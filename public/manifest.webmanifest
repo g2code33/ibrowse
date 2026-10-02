@@ -1,0 +1,26 @@
+{
+  "name": "ibrowse",
+  "short_name": "ibrowse",
+  "id": "com.ibrowse.app",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#172554",
+  "theme_color": "#172554",
+  "version": "0.1.0",
+  "cacheVersion": "0.1.0",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
