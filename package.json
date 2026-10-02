@@ -1,0 +1,117 @@
+{
+  "name": "ibrowse",
+  "productName": "ibrowse",
+  "version": "0.1.0",
+  "description": "ibrowse cross-platform PWA, desktop, and mobile shell.",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/lint.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "prebuild:web": "npm run refresh:branding && npm run verify:versions",
+    "build:web": "node scripts/build-web.mjs",
+    "build": "npm run build:web",
+    "refresh:branding": "node scripts/branding.mjs --write",
+    "verify:branding": "node scripts/branding.mjs --check",
+    "verify:pwa": "node scripts/verify-pwa.mjs",
+    "verify:packaging": "node scripts/verify-packaging.mjs",
+    "verify:updates": "node --test tests/update-service.test.mjs tests/admin-updates.test.mjs",
+    "package:linux:dir": "electron-builder --linux dir --publish never",
+    "package:linux": "electron-builder --linux deb AppImage --publish never",
+    "package:win": "electron-builder --win nsis portable --publish never",
+    "build:desktop:linux": "npm run build:web && npm run package:linux",
+    "build:desktop:win": "npm run build:web && npm run package:win",
+    "build:android": "node scripts/ensure-capacitor-platform.mjs android && npx cap sync android && cd android && ./gradlew assembleRelease",
+    "build:ios": "node scripts/ensure-capacitor-platform.mjs ios && npx cap sync ios && xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS -archivePath build/ibrowse.xcarchive archive && xcodebuild -exportArchive -archivePath build/ibrowse.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist",
+    "smoke:desktop": "node scripts/smoke-desktop.mjs",
+    "ci:gates": "npm run typecheck && npm run lint && npm test && npm run build:web && npm run verify:pwa && npm run verify:packaging && npm run verify:updates && npm run verify:branding && npm run smoke:desktop",
+    "ci:clean-vm": "node scripts/clean-vm-check.mjs",
+    "release:verify": "node scripts/release-verify.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "version:bump": "node scripts/version.mjs",
+    "verify:versions": "node scripts/version.mjs --check",
+    "test:no-network": "node --import ./tests/no-network-guard.mjs --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "6.2.2"
+  },
+  "devDependencies": {
+    "@capacitor/android": "6.2.2",
+    "@capacitor/cli": "6.2.2",
+    "@capacitor/ios": "6.2.2",
+    "electron-builder": "26.15.3",
+    "typescript": "5.6.3"
+  },
+  "build": {
+    "appId": "com.ibrowse.app",
+    "productName": "ibrowse",
+    "executableName": "ibrowse",
+    "artifactName": "${productName}-${os}-${arch}-${version}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icons/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "ibrowse",
+      "uninstallDisplayName": "ibrowse",
+      "installerIcon": "build/icons/installer.ico",
+      "uninstallerIcon": "build/icons/uninstaller.ico",
+      "artifactName": "ibrowse-setup-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "AppImage"
+      ],
+      "category": "Network",
+      "executableName": "ibrowse",
+      "icon": "build/icons/hicolor",
+      "syncDesktopName": true
+    },
+    "deb": {
+      "afterInstall": "build/linux/after-install.sh",
+      "depends": []
+    },
+    "appImage": {
+      "artifactName": "ibrowse-${version}.${ext}"
+    },
+    "electronVersion": "31.7.7"
+  },
+  "optionalDependencies": {
+    "electron": "31.7.7"
+  },
+  "author": "g2code33",
+  "desktopName": "ibrowse"
+}
