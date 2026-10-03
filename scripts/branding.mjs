@@ -35,6 +35,13 @@ async function main() {
   expected.set('public/apple-touch-icon.png', encodePng(resizeNearest(source, 180)));
   for (const size of hicolorSizes) {
     expected.set(`build/icons/hicolor/${size}x${size}/apps/yayra.png`, encodePng(resizeNearest(source, size)));
+    // electron-builder's Linux "set" icon resolver only reads a flat
+    // directory of `<size>x<size>.png` files (see app-builder-lib's
+    // iconConverter collectIconsFromDir) — it does not walk the freedesktop
+    // hicolor/<size>x<size>/apps/ hierarchy above. Ship both so the .deb
+    // installs the full hicolor icon theme AND electron-builder packages
+    // every resolution into /usr/share/icons/hicolor/<size>x<size>/apps/.
+    expected.set(`build/icons/linux-set/${size}x${size}.png`, encodePng(resizeNearest(source, size)));
   }
   const ico = makeIco([16, 24, 32, 48, 64, 96, 128, 256].map((size) => ({ size, png: encodePng(resizeNearest(source, size)) })));
   expected.set('build/icons/icon.ico', ico);

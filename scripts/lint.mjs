@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = process.cwd();
@@ -31,9 +31,19 @@ async function listFiles(dir, base = dir) {
   for (const entry of await readdir(dir)) {
     if (['.git', 'node_modules', 'dist', 'release'].includes(entry)) continue;
     const absolute = path.join(dir, entry);
-    const info = await stat(absolute);
-    if (info.isDirectory()) out.push(...await listFiles(absolute, base));
-    else out.push(path.relative(base, absolute).split(path.sep).join('/'));
+    // Use lstat (not stat) so packaging symlinks such as
+    // build/linux/usr-bin/yayra -> ../../opt/yayra/yayra are treated as
+    // plain entries instead of crashing the walk: their target only exists
+    // once the Debian package is installed, so a link-following stat()
+    // throws ENOENT here.
+    const info = await lstat(absolute);
+    if (info.isSymbolicLink()) {
+      out.push(path.relative(base, absolute).split(path.sep).join('/'));
+    } else if (info.isDirectory()) {
+      out.push(...await listFiles(absolute, base));
+    } else {
+      out.push(path.relative(base, absolute).split(path.sep).join('/'));
+    }
   }
   return out;
 }
