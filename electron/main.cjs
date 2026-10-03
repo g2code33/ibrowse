@@ -1,8 +1,9 @@
-const { app, BrowserWindow, ipcMain, protocol, net } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
+const { createWebviewBridge } = require('./webviewBridge.cjs');
 
 const CUSTOM_SCHEME = 'yayra';
 const DIST_DIR = path.join(__dirname, '..', 'dist');
@@ -45,6 +46,17 @@ function createWindow() {
     }
   });
   registerDesktopUpdateHandlers({ getWindow: () => mainWindow });
+  // Native website-rendering engine bridge (replaces <iframe>-based rendering
+  // so real sites with X-Frame-Options/frame-ancestors - Google, GitHub,
+  // etc. - actually load). See electron/webviewBridge.cjs for the full
+  // architecture rationale.
+  const webviewBridge = createWebviewBridge({
+    WebContentsView,
+    ipcMain,
+    shell,
+    getMainWindow: () => mainWindow
+  });
+  mainWindow.on('closed', () => webviewBridge.destroyAll());
   ipcMain.handle('yayra:get-launch-info', () => ({
     version: app.getVersion(),
     updateState: 'diagnostics-ready',
