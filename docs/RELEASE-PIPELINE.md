@@ -28,7 +28,7 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 - `workflow_dispatch` inputs:
   - `version_override`: exact semver applied to all manifests during the run.
   - `publish`: boolean, default `false`.
-  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
+  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`; the manual-release default is `desktop-linux,android` until platform certificates are configured. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
 - Concurrency: release/main runs never cancel one another.
 - Job fan-out: `web` builds once and uploads `ibrowse-web-dist-${sha}`; all platform jobs download that exact artifact before packaging.
 - Publish gate: only tag `v*` or `workflow_dispatch` with `publish: true`, under GitHub Environment `release`.

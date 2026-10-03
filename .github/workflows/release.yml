@@ -19,7 +19,7 @@ on:
         description: 'Comma-separated targets: web,desktop-win,desktop-linux,android,ios or all'
         required: true
         type: string
-        default: all
+        default: desktop-linux,android
 
 concurrency:
   group: release-${{ github.ref }}
