@@ -7,9 +7,15 @@
   "display": "standalone",
   "background_color": "#172554",
   "theme_color": "#172554",
-  "version": "0.1.6",
-  "cacheVersion": "0.1.6",
+  "version": "0.1.7",
+  "cacheVersion": "0.1.7",
   "icons": [
+    {
+      "src": "assets/brand/mainlogo.JPG",
+      "sizes": "1024x1024",
+      "type": "image/jpeg",
+      "purpose": "any"
+    },
     {
       "src": "icons/icon-192.png",
       "sizes": "192x192",

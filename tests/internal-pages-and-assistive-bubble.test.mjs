@@ -409,9 +409,13 @@ test('Requirement 5: 3-Dot Menu opens Full Right-Side Drawer without workspace b
   shell.state.isSideDrawerOpen = true;
   shell.render(container);
 
-  // Close drawer
-  shell.state.isSideDrawerOpen = false;
+  // Clicking anywhere outside the drawer closes it.
+  shell.state.isSideDrawerOpen = true;
   shell.render(container);
+  const drawerScrim = container.querySelector('.fb-side-drawer-scrim');
+  assert.ok(drawerScrim, 'Drawer must expose an outside-click scrim');
+  drawerScrim.click();
+  assert.equal(shell.state.isSideDrawerOpen, false);
   assert.equal(container.querySelector('.fb-side-drawer-menu'), null);
 });
 

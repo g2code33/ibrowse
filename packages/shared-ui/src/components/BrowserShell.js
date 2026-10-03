@@ -914,9 +914,11 @@ export class BrowserShell {
     logoOrb.innerHTML = Icons.officialOrb;
     hero.appendChild(logoOrb);
 
-    const title = document.createElement('h1');
+    const title = document.createElement('div');
     title.className = 'fb-newtab-title';
-    title.textContent = activeTab.isPrivate ? 'Incognito' : 'yayra';
+    title.setAttribute('role', 'img');
+    title.setAttribute('aria-label', activeTab.isPrivate ? 'Incognito' : 'yayra');
+    title.innerHTML = activeTab.isPrivate ? '<span>Incognito</span>' : Icons.officialWordmark;
     hero.appendChild(title);
     newTabPage.appendChild(hero);
 
@@ -1848,6 +1850,14 @@ export class BrowserShell {
           </div>
         </header>
 
+        <section class="fb-extension-platform-notice">
+          <div class="fb-extension-platform-notice-copy">
+            <strong>Real website extension companion</strong>
+            <p>The PWA can manage these preferences, but browser security prevents a website from injecting into arbitrary cross-origin pages. Install the companion extension to block real tracker requests and apply Dark Reader or Reader Mode on external websites.</p>
+          </div>
+          <a class="fb-btn fb-btn-primary" href="https://github.com/g2code33/yayra/tree/main/extensions/yayra-companion" target="_blank" rel="noopener">Open companion project</a>
+        </section>
+
         <div class="fb-extensions-list">
           ${this.state.extensionsItems.map((ext) => `
             <div class="fb-extension-row fb-extension-card ${ext.enabled ? 'enabled' : ''}" data-ext-id="${ext.id}">
@@ -1952,7 +1962,7 @@ export class BrowserShell {
       <div class="fb-internal-container">
         <div class="fb-about-hero">
           <div class="fb-about-logo">${Icons.officialOrb}</div>
-          <h1 class="fb-about-appname">yayra</h1>
+          <div class="fb-about-appname" role="img" aria-label="yayra">${Icons.officialWordmark}</div>
           <span class="fb-about-version fb-about-version-badge">Version 0.1.0 (Stable 64-bit Release)</span>
           <p style="max-width:480px; color:var(--fb-text-secondary); font-size:0.9rem; margin:8px 0 16px;">
             Fast, private floating browser with native glassmorphism overlay and persistent assistive bubble.
@@ -2594,6 +2604,17 @@ export class BrowserShell {
    * REQUIREMENT 5: FULL RIGHT-SIDE DRAWER MENU WITH SUBMENUS (ZERO BLUR)
    * ----------------------------------------------------------- */
   renderSideDrawer(root) {
+    // Keep the workspace crisp, but reserve the whole area outside the drawer
+    // as a click target so the menu closes exactly like a native browser menu.
+    const scrim = document.createElement('button');
+    scrim.type = 'button';
+    scrim.className = 'fb-side-drawer-scrim';
+    scrim.setAttribute('aria-label', 'Close Yayra menu');
+    scrim.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.render();
+    });
+
     const drawer = document.createElement('div');
     drawer.className = 'fb-side-drawer-menu';
 
@@ -2602,8 +2623,8 @@ export class BrowserShell {
 
     drawer.innerHTML = `
       <header class="fb-side-drawer-header">
-        <strong style="font-size:0.95rem;">Yayra Menu</strong>
-        <button class="fb-btn-action fb-close-drawer-btn">${Icons.close}</button>
+        <span class="fb-menu-wordmark" role="img" aria-label="yayra menu">${Icons.officialWordmark}</span>
+        <button class="fb-btn-action fb-close-drawer-btn" aria-label="Close menu">${Icons.close}</button>
       </header>
 
       <div class="fb-side-drawer-content">
@@ -3072,6 +3093,7 @@ export class BrowserShell {
       this.minimizeToBubble();
     });
 
+    root.appendChild(scrim);
     root.appendChild(drawer);
   }
 
@@ -3350,8 +3372,8 @@ export class BrowserShell {
     modal.className = 'fb-modal-card fb-chrome-menu-card fb-modal-menu';
     modal.innerHTML = `
       <div class="fb-modal-header">
-        <h2 class="fb-modal-title">Yayra Menu</h2>
-        <button class="fb-modal-close-btn">${Icons.close}</button>
+        <h2 class="fb-modal-title"><span class="fb-menu-wordmark" role="img" aria-label="yayra menu">${Icons.officialWordmark}</span></h2>
+        <button class="fb-modal-close-btn" aria-label="Close menu">${Icons.close}</button>
       </div>
       <div class="fb-modal-body fb-menu-grid">
         <button class="fb-menu-item fb-btn-new-tab" data-action="new-tab">${Icons.plus} <span>New Tab</span></button>
