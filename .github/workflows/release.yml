@@ -164,8 +164,13 @@ jobs:
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$WINDOWS_CERTIFICATE_BASE64" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
+            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
+              echo "::error:: Windows release signing requires WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD before publishing"
+              exit 1
+            fi
             echo "::warning:: Windows signing skipped: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not configured"
             {
               echo "## Signing skipped"
