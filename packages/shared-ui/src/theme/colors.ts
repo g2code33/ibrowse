@@ -116,6 +116,14 @@ export const LightThemeTokens = Object.freeze({
   statusWarning: ColorPalette.semantic.warning
 });
 
+export const AccentThemeTokens = Object.freeze({
+  blue: { accentPrimary: '#06b6d4', accentSecondary: '#2563eb', accentGlow: 'rgba(6, 182, 212, 0.35)', borderGlassHighlight: 'rgba(56, 189, 248, 0.35)', gradientAccent: 'linear-gradient(135deg, #67e8f9 0%, #3b82f6 52%, #1d4ed8 100%)' },
+  purple: { accentPrimary: '#a78bfa', accentSecondary: '#7c3aed', accentGlow: 'rgba(167, 139, 250, 0.34)', borderGlassHighlight: 'rgba(196, 181, 253, 0.42)', gradientAccent: 'linear-gradient(135deg, #c4b5fd 0%, #8b5cf6 52%, #6d28d9 100%)' },
+  green: { accentPrimary: '#34d399', accentSecondary: '#059669', accentGlow: 'rgba(52, 211, 153, 0.32)', borderGlassHighlight: 'rgba(110, 231, 183, 0.42)', gradientAccent: 'linear-gradient(135deg, #6ee7b7 0%, #10b981 52%, #047857 100%)' },
+  rose: { accentPrimary: '#fb7185', accentSecondary: '#e11d48', accentGlow: 'rgba(251, 113, 133, 0.32)', borderGlassHighlight: 'rgba(253, 164, 175, 0.42)', gradientAccent: 'linear-gradient(135deg, #fda4af 0%, #f43f5e 52%, #be123c 100%)' },
+  amber: { accentPrimary: '#fbbf24', accentSecondary: '#d97706', accentGlow: 'rgba(251, 191, 36, 0.3)', borderGlassHighlight: 'rgba(253, 230, 138, 0.42)', gradientAccent: 'linear-gradient(135deg, #fde68a 0%, #f59e0b 52%, #b45309 100%)' }
+});
+
 export const Colors = Object.freeze({
   dark: DarkThemeTokens,
   light: LightThemeTokens,

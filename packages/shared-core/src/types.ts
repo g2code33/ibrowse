@@ -90,6 +90,7 @@ export interface UserSettings {
   closeToTray: boolean;
   startWithWindows: boolean;
   theme: ThemeMode;
+  colorTheme?: 'blue' | 'purple' | 'green' | 'rose' | 'amber';
   searchEngine: SearchEngine;
   customSearchUrl?: string;
   startUrl: string;
@@ -117,6 +118,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = Object.freeze({
   closeToTray: true,
   startWithWindows: false,
   theme: 'dark',
+  colorTheme: 'blue',
   searchEngine: 'duckduckgo',
   startUrl: 'https://duckduckgo.com',
   defaultZoom: 1.0,

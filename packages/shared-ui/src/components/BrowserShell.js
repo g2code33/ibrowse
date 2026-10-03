@@ -40,9 +40,9 @@ import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract
  * =========================================================================
  */
 export const DEVELOPER_AD_LINKS = [
+  { id: 'ad-rx-store', title: 'RX Store — Developer Sponsor', url: 'https://rx-store-web.pages.dev', domain: 'rx-store-web.pages.dev' },
   { id: 'ad-google', title: 'Google AI & Cloud', url: 'https://cloud.google.com', domain: 'cloud.google.com' },
   { id: 'ad-github', title: 'GitHub Developers', url: 'https://github.com', domain: 'github.com' },
-  { id: 'ad-claude', title: 'Anthropic Claude AI', url: 'https://anthropic.com', domain: 'anthropic.com' },
   { id: 'ad-duckduckgo', title: 'DuckDuckGo Privacy', url: 'https://duckduckgo.com', domain: 'duckduckgo.com' }
 ];
 
@@ -81,6 +81,15 @@ export class BrowserShell {
             favicon: null
           }
         ];
+
+    let locallyPersistedSettings = {};
+    if (typeof localStorage !== 'undefined') {
+      try {
+        locallyPersistedSettings = JSON.parse(localStorage.getItem('yayra:settings') || '{}');
+      } catch {
+        locallyPersistedSettings = {};
+      }
+    }
 
     // Reactive State
     this.state = {
@@ -129,6 +138,7 @@ export class BrowserShell {
       passwordsSearchQuery: '',
       settings: {
         theme: 'dark',
+        colorTheme: 'blue',
         searchEngine: 'google', // Requirement 13: Default search engine is Google
         floatingEnabledByDefault: true,
         startFloatingOnLaunch: true,
@@ -145,6 +155,7 @@ export class BrowserShell {
         httpsFirst: true,
         clearHistoryOnExit: false,
         restoreSessionOnLaunch: true,
+        ...locallyPersistedSettings,
         ...options.initialSettings
       },
       updateState: {
@@ -267,6 +278,7 @@ export class BrowserShell {
     const shell = document.createElement('div');
     shell.className = `fb-browser-shell ${this.state.isMobile ? 'fb-mobile-layout' : 'fb-desktop-layout'} ${isPrivate ? 'fb-incognito-mode' : ''}`;
     shell.setAttribute('data-theme', this.state.settings.theme || 'dark');
+    shell.setAttribute('data-color-theme', this.state.settings.colorTheme || 'blue');
     shell.setAttribute('data-floating-mode', this.state.desktopFloatingMode);
 
     // Apply frame transparency
@@ -655,12 +667,66 @@ export class BrowserShell {
    * MOBILE LAYOUT (SAFARI-STYLE BOTTOM BAR) (PHASE 2B)
    * ----------------------------------------------------------- */
   renderMobileLayout(root, activeTab) {
-    // 1. Mobile Top Address Pill
+    // Safari-inspired mobile chrome: a compact tab/tool rail above the page,
+    // then the address and navigation controls at the bottom. All Yayra
+    // actions remain available; the layout only changes their placement.
     const topBar = document.createElement('header');
     topBar.className = 'fb-mobile-topbar';
+    topBar.setAttribute('aria-label', 'Safari-style browser tools');
+
+    const safariTabbar = document.createElement('nav');
+    safariTabbar.className = 'fb-mobile-safari-tabbar';
+    const topActions = [
+      { className: 'fb-mobile-tab-overview', icon: Icons.tabs, title: 'Show all tabs', action: () => this.openModal('tab-switcher') },
+      { className: 'fb-mobile-tab-bookmarks', icon: Icons.bookmark, title: 'Bookmarks', action: () => this.openInternalPage('yayra://bookmarks') },
+      { className: 'fb-mobile-tab-privacy', icon: Icons.shield, title: 'Privacy and shields', action: () => this.openInternalPage('yayra://permissions') },
+      { className: 'fb-mobile-tab-history', icon: Icons.history, title: 'History', action: () => this.openInternalPage('yayra://history') }
+    ];
+    topActions.forEach(({ className, icon, title, action }) => {
+      const button = document.createElement('button');
+      button.className = `fb-mobile-safari-tab-btn ${className}`;
+      button.type = 'button';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.innerHTML = icon;
+      button.addEventListener('click', action);
+      safariTabbar.appendChild(button);
+    });
+    topBar.appendChild(safariTabbar);
+    root.appendChild(topBar);
+
+    // Main viewport remains the same shared renderer used by desktop so all
+    // internal pages, tools, privacy controls, and web content are preserved.
+    const viewport = document.createElement('main');
+    viewport.className = 'fb-browser-viewport fb-mobile-viewport';
+    this.renderViewportContent(viewport, activeTab);
+    root.appendChild(viewport);
+    this.viewportElement = viewport;
+
+    const bottomBar = document.createElement('nav');
+    bottomBar.className = 'fb-mobile-bottombar';
+
+    const addressRow = document.createElement('div');
+    addressRow.className = 'fb-mobile-address-row';
+
+    const bBack = document.createElement('button');
+    bBack.className = 'fb-mobile-nav-btn';
+    bBack.type = 'button';
+    bBack.title = 'Back';
+    bBack.setAttribute('aria-label', 'Back');
+    bBack.innerHTML = Icons.arrowLeft;
+    bBack.disabled = !activeTab.canGoBack;
+    bBack.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
+    addressRow.appendChild(bBack);
 
     const addressPill = document.createElement('div');
     addressPill.className = 'fb-mobile-address-pill';
+    addressPill.setAttribute('role', 'button');
+    addressPill.setAttribute('tabindex', '0');
+    addressPill.setAttribute('aria-label', 'Search or enter website address');
 
     const secIcon = document.createElement('span');
     secIcon.className = 'fb-mobile-sec-icon';
@@ -675,74 +741,78 @@ export class BrowserShell {
     `;
     addressPill.appendChild(titleWrap);
 
-    addressPill.addEventListener('click', () => {
-      this.openModal('search-overlay');
+    const openSearch = () => this.openModal('search-overlay');
+    addressPill.addEventListener('click', openSearch);
+    addressPill.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openSearch();
+      }
     });
+    addressRow.appendChild(addressPill);
 
-    topBar.appendChild(addressPill);
-    root.appendChild(topBar);
+    const tabsBtn = document.createElement('button');
+    tabsBtn.className = 'fb-mobile-nav-btn fb-mobile-tabs-btn';
+    tabsBtn.type = 'button';
+    tabsBtn.title = 'Show all tabs';
+    tabsBtn.setAttribute('aria-label', 'Show all tabs');
+    tabsBtn.innerHTML = `
+      <span class="fb-tabs-icon-wrapper">
+        ${Icons.tabs}
+        <span class="fb-tabs-count-badge">${this.state.tabs.length}</span>
+      </span>
+    `;
+    tabsBtn.addEventListener('click', () => this.openModal('tab-switcher'));
+    addressRow.appendChild(tabsBtn);
+    bottomBar.appendChild(addressRow);
 
-    // 2. Viewport
-    const viewport = document.createElement('main');
-    viewport.className = 'fb-browser-viewport fb-mobile-viewport';
-    this.renderViewportContent(viewport, activeTab);
-    root.appendChild(viewport);
-    this.viewportElement = viewport;
-
-    // 3. Bottom Toolbar (Back, Forward, Share, Bookmarks, Tabs Count)
-    const bottomBar = document.createElement('nav');
-    bottomBar.className = 'fb-mobile-bottombar';
-
-    const bBack = document.createElement('button');
-    bBack.className = 'fb-mobile-nav-btn';
-    bBack.innerHTML = Icons.arrowLeft;
-    bBack.disabled = !activeTab.canGoBack;
-    bBack.addEventListener('click', () => {
-      this.goBack();
-      this.render();
-    });
-    bottomBar.appendChild(bBack);
+    const toolRow = document.createElement('div');
+    toolRow.className = 'fb-mobile-secondary-tools';
 
     const bFwd = document.createElement('button');
     bFwd.className = 'fb-mobile-nav-btn';
+    bFwd.type = 'button';
+    bFwd.title = 'Forward';
+    bFwd.setAttribute('aria-label', 'Forward');
     bFwd.innerHTML = Icons.arrowRight;
     bFwd.disabled = !activeTab.canGoForward;
     bFwd.addEventListener('click', () => {
       this.goForward();
       this.render();
     });
-    bottomBar.appendChild(bFwd);
+    toolRow.appendChild(bFwd);
 
     const bShare = document.createElement('button');
     bShare.className = 'fb-mobile-nav-btn';
+    bShare.type = 'button';
+    bShare.title = 'Share';
+    bShare.setAttribute('aria-label', 'Share current page');
     bShare.innerHTML = Icons.share;
     bShare.addEventListener('click', () => this.shareCurrentPage());
-    bottomBar.appendChild(bShare);
+    toolRow.appendChild(bShare);
 
     const bBook = document.createElement('button');
     bBook.className = `fb-mobile-nav-btn ${this.state.isBookmarked ? 'active' : ''}`;
+    bBook.type = 'button';
+    bBook.title = this.state.isBookmarked ? 'Remove bookmark' : 'Bookmark';
+    bBook.setAttribute('aria-label', this.state.isBookmarked ? 'Remove bookmark' : 'Bookmark current page');
     bBook.innerHTML = this.state.isBookmarked ? Icons.starFilled : Icons.star;
     bBook.addEventListener('click', () => this.toggleBookmarkCurrentTab());
-    bottomBar.appendChild(bBook);
-
-    const tabsBtn = document.createElement('button');
-    tabsBtn.className = 'fb-mobile-nav-btn fb-mobile-tabs-btn';
-    tabsBtn.innerHTML = `
-      ${Icons.tabs}
-      <span class="fb-tabs-count-badge">${this.state.tabs.length}</span>
-    `;
-    tabsBtn.addEventListener('click', () => this.openModal('tab-switcher'));
-    bottomBar.appendChild(tabsBtn);
+    toolRow.appendChild(bBook);
 
     const bMenu = document.createElement('button');
     bMenu.className = 'fb-mobile-nav-btn';
+    bMenu.type = 'button';
+    bMenu.title = 'More tools';
+    bMenu.setAttribute('aria-label', 'More tools');
     bMenu.innerHTML = Icons.moreVertical;
     bMenu.addEventListener('click', () => {
       this.state.isSideDrawerOpen = !this.state.isSideDrawerOpen;
       this.render();
     });
-    bottomBar.appendChild(bMenu);
+    toolRow.appendChild(bMenu);
 
+    bottomBar.appendChild(toolRow);
     root.appendChild(bottomBar);
   }
 
@@ -810,7 +880,7 @@ export class BrowserShell {
    * ----------------------------------------------------------- */
   renderNewTabPage(viewport, activeTab) {
     const newTabPage = document.createElement('div');
-    newTabPage.className = 'fb-newtab-page';
+    newTabPage.className = `fb-newtab-page ${this.state.isMobile ? 'fb-mobile-safari-start-page' : ''}`;
 
     // Requirement 5 & 7: Developer Advertisement Badges (Sleek, Non-Overshadowing)
     const adLinks = DEVELOPER_AD_LINKS || this.state.sponsoredLinks || [];
@@ -869,13 +939,17 @@ export class BrowserShell {
     `;
     newTabPage.appendChild(searchForm);
 
+    if (this.state.isMobile && !activeTab.isPrivate) {
+      this.renderMobileSafariExtensionCard(newTabPage);
+    }
+
     if (!activeTab.isPrivate) {
       // Requirement 6: Frequently Used Sites with Authentic SVG Logos
       const frequentSection = document.createElement('div');
       frequentSection.style.width = '100%';
       frequentSection.style.maxWidth = '680px';
       frequentSection.innerHTML = `
-        <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">Frequently Used Sites</h3>
+        <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">${this.state.isMobile ? 'Favorites' : 'Frequently Used Sites'}</h3>
       `;
 
       const frequentGrid = document.createElement('div');
@@ -910,7 +984,7 @@ export class BrowserShell {
         const recentHist = document.createElement('div');
         recentHist.className = 'fb-newtab-history';
         recentHist.innerHTML = `
-          <h3 class="fb-newtab-section-title">Recent History</h3>
+          <h3 class="fb-newtab-section-title">${this.state.isMobile ? 'Suggestions' : 'Recent History'}</h3>
           <div class="fb-history-quicklist">
             ${this.state.historyItems.slice(0, 5).map((h) => `
               <div class="fb-history-quick-item" data-url="${h.url}">
@@ -931,12 +1005,95 @@ export class BrowserShell {
       }
     }
 
+    if (this.state.isMobile && !activeTab.isPrivate) {
+      this.renderMobileSafariStartSections(newTabPage);
+    }
+
     viewport.appendChild(newTabPage);
 
     // Auto-focus the search bar
     setTimeout(() => {
       newTabPage.querySelector('.fb-newtab-input')?.focus();
     }, 50);
+  }
+
+  renderMobileSafariExtensionCard(container) {
+    const card = document.createElement('section');
+    card.className = 'fb-mobile-safari-extension-card';
+    card.innerHTML = `
+      <div class="fb-mobile-safari-extension-art" aria-hidden="true">
+        <span>${Icons.shield}</span><span>${Icons.lock}</span><span>${Icons.starFilled}</span>
+      </div>
+      <h2>Extensions</h2>
+      <p>Supercharge your Yayra browsing with extensions that can find discounts, block ads, and more.</p>
+      <button type="button" class="fb-btn fb-btn-primary fb-mobile-safari-extension-btn">Browse Extensions</button>
+    `;
+    card.querySelector('button')?.addEventListener('click', () => this.openInternalPage('yayra://extensions'));
+    container.appendChild(card);
+  }
+
+  renderMobileSafariStartSections(container) {
+    const privacy = document.createElement('section');
+    privacy.className = 'fb-mobile-safari-section fb-mobile-safari-privacy-card';
+    privacy.innerHTML = `
+      <h2>${Icons.shield} Privacy Report</h2>
+      <div class="fb-mobile-safari-report-body">
+        <span class="fb-mobile-safari-report-icon">${Icons.shield}</span>
+        <p>Yayra's tracker and ad shield is active for your browsing session.</p>
+      </div>
+    `;
+    container.appendChild(privacy);
+
+    const reading = document.createElement('section');
+    reading.className = 'fb-mobile-safari-section fb-mobile-safari-reading-list';
+    reading.innerHTML = '<h2>Reading List</h2>';
+    const readingItems = this.state.historyItems.slice(0, 3);
+    if (readingItems.length) {
+      readingItems.forEach((item) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fb-mobile-safari-list-row';
+        row.innerHTML = `<span class="fb-mobile-safari-list-icon">${Icons.bookmark}</span><span class="fb-mobile-safari-list-copy"><strong></strong><small></small></span>`;
+        row.querySelector('strong').textContent = item.title || item.url;
+        row.querySelector('small').textContent = item.url;
+        row.addEventListener('click', () => this.navigateActiveTab(item.url));
+        reading.appendChild(row);
+      });
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'fb-mobile-safari-empty';
+      empty.textContent = 'Save pages here to read them later.';
+      reading.appendChild(empty);
+    }
+    container.appendChild(reading);
+
+    const recently = document.createElement('section');
+    recently.className = 'fb-mobile-safari-section fb-mobile-safari-recently-closed';
+    recently.innerHTML = '<div class="fb-mobile-safari-section-heading"><h2>Recently Closed Tabs</h2><button type="button" class="fb-mobile-safari-clear">Clear All</button></div>';
+    const closedTabs = this.state.closedTabsHistory.slice(0, 4);
+    if (closedTabs.length) {
+      closedTabs.forEach((tab) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fb-mobile-safari-closed-row';
+        row.textContent = tab.title || tab.url;
+        row.addEventListener('click', () => {
+          this.restoreLastClosedTab();
+          this.render();
+        });
+        recently.appendChild(row);
+      });
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'fb-mobile-safari-empty';
+      empty.textContent = 'Closed tabs will appear here.';
+      recently.appendChild(empty);
+    }
+    recently.querySelector('.fb-mobile-safari-clear')?.addEventListener('click', () => {
+      this.state.closedTabsHistory = [];
+      this.render();
+    });
+    container.appendChild(recently);
   }
 
   /* -------------------------------------------------------------
@@ -1049,6 +1206,16 @@ export class BrowserShell {
                 <option value="dark" ${this.state.settings.theme === 'dark' ? 'selected' : ''}>Dark (Default)</option>
                 <option value="light" ${this.state.settings.theme === 'light' ? 'selected' : ''}>Light</option>
                 <option value="system" ${this.state.settings.theme === 'system' ? 'selected' : ''}>System</option>
+              </select>
+            </div>
+            <div class="fb-setting-row">
+              <label>Accent theme</label>
+              <select id="fb-in-set-color-theme" class="fb-select">
+                <option value="blue" ${(this.state.settings.colorTheme || 'blue') === 'blue' ? 'selected' : ''}>Blue (Default)</option>
+                <option value="purple" ${this.state.settings.colorTheme === 'purple' ? 'selected' : ''}>Violet</option>
+                <option value="green" ${this.state.settings.colorTheme === 'green' ? 'selected' : ''}>Emerald</option>
+                <option value="rose" ${this.state.settings.colorTheme === 'rose' ? 'selected' : ''}>Rose</option>
+                <option value="amber" ${this.state.settings.colorTheme === 'amber' ? 'selected' : ''}>Amber</option>
               </select>
             </div>
             <div class="fb-setting-row">
@@ -1200,16 +1367,25 @@ export class BrowserShell {
       const floatingDefault = page.querySelector('#fb-in-set-floating-default')?.checked;
       const mode = page.querySelector('#fb-in-set-floating-mode')?.value;
       const theme = page.querySelector('#fb-in-set-theme')?.value;
+      const colorTheme = page.querySelector('#fb-in-set-color-theme')?.value;
       const engine = page.querySelector('#fb-in-set-engine')?.value;
 
       this.state.settings.floatingEnabledByDefault = floatingDefault;
       this.state.settings.desktopFloatingMode = mode;
       this.state.desktopFloatingMode = mode;
       if (theme) this.state.settings.theme = theme;
+      if (colorTheme) this.state.settings.colorTheme = colorTheme;
       if (engine) this.state.settings.searchEngine = engine;
 
       if (this.settingsRepo) {
         await this.settingsRepo.updateSettings(this.state.settings);
+      }
+      if (typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem('yayra:settings', JSON.stringify(this.state.settings));
+        } catch {
+          // Keep the browser usable when storage is unavailable or full.
+        }
       }
       alert('Settings saved successfully.');
       this.render();
