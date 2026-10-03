@@ -179,10 +179,102 @@ export class BrowserShell {
     this.boundKeyHandler = (e) => this.handleGlobalKeyDown(e);
     this._bookmarkCheckId = 0;
 
+    // Native website-rendering engine bridge (Electron desktop only - see
+    // electron/webviewBridge.cjs). Subscribed once here, not per-render,
+    // because the underlying native views persist across this class's
+    // frequent full-DOM re-renders.
+    this._nativeWebviewTabIds = new Set();
+    this._nativeWebviewResizeObservers = new Map();
+    this._unsubscribeNativeWebview = null;
+    if (this.nativeWebview) {
+      this._unsubscribeNativeWebview = this.nativeWebview.onEvent((evt) => this.handleNativeWebviewEvent(evt));
+    }
+
     if (typeof window !== 'undefined') {
       setTimeout(() => {
         this.checkForUpdates(false);
       }, 1200);
+    }
+  }
+
+  // window.yayra.webview (exposed by electron/preload.cjs) only exists when
+  // running inside the Electron desktop shell. Its absence (plain web/PWA
+  // tab, or Android/iOS Capacitor WebView) is the signal to fall back to the
+  // <iframe>-based renderer, which is the only option available there.
+  get nativeWebview() {
+    if (typeof window === 'undefined') return null;
+    return (window.yayra && window.yayra.webview) || (window.ibrowse && window.ibrowse.webview) || null;
+  }
+
+  // Capacitor's native in-app browser (SFSafariViewController on iOS, Chrome
+  // Custom Tabs on Android) — used on Android/iOS builds, which run the
+  // whole app (including this file) inside ONE Capacitor WebView. That outer
+  // WebView is still a real Chromium/WebKit engine and enforces the exact
+  // same X-Frame-Options / frame-ancestors restrictions against any nested
+  // <iframe> as a desktop browser would, and Google/Apple/Microsoft apply
+  // the same embedded-webview sign-in block there too. Only active when
+  // actually running as a packaged native app (`Capacitor.isNativePlatform()`),
+  // never for the plain web/PWA build, where window.Capacitor is absent.
+  get capacitorBrowser() {
+    if (typeof window === 'undefined') return null;
+    const capacitor = window.Capacitor;
+    if (!capacitor || typeof capacitor.isNativePlatform !== 'function' || !capacitor.isNativePlatform()) return null;
+    return (capacitor.Plugins && capacitor.Plugins.Browser) || null;
+  }
+
+  // Keep in sync with SYSTEM_BROWSER_AUTH_HOSTS in electron/webviewBridge.cjs
+  // (the Electron main process equivalent). Duplicated rather than imported
+  // because electron/webviewBridge.cjs is a CommonJS, Electron-only module
+  // and this file ships in the plain web/PWA/Capacitor bundle too.
+  static SYSTEM_BROWSER_AUTH_HOSTS = ['accounts.google.com', 'appleid.apple.com', 'login.live.com', 'login.microsoftonline.com'];
+
+  // Apex hostnames (and all their subdomains) that are known to send
+  // X-Frame-Options / CSP frame-ancestors headers forbidding ANY iframe
+  // embedding, enforced by the target site itself.
+  static FRAME_EMBEDDING_BLOCKED_HOSTS = [
+    'google.com', 'youtube.com',
+    'facebook.com', 'instagram.com', 'threads.net', 'twitter.com', 'x.com', 'linkedin.com',
+    'github.com',
+    'amazon.com',
+    'microsoft.com', 'live.com', 'outlook.com', 'office.com',
+    'apple.com', 'icloud.com',
+    'paypal.com',
+    'netflix.com',
+    'pinterest.com',
+    'reddit.com',
+    'yahoo.com',
+    'stackoverflow.com', 'stackexchange.com',
+    'nytimes.com', 'wsj.com',
+    'twitch.tv',
+    'bing.com'
+  ];
+
+  isSystemBrowserAuthHost(url) {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return BrowserShell.SYSTEM_BROWSER_AUTH_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  // Opens a URL using the best available system-level surface: Capacitor's
+  // native in-app browser on Android/iOS, or a plain new browser tab/window
+  // everywhere else (desktop web/PWA). Electron has its own main-process
+  // handoff (shell.openExternal, see electron/webviewBridge.cjs) and never
+  // reaches this method for auth hosts.
+  async openExternally(url) {
+    const capacitorBrowser = this.capacitorBrowser;
+    if (capacitorBrowser && typeof capacitorBrowser.open === 'function') {
+      try {
+        await capacitorBrowser.open({ url });
+        return;
+      } catch (err) {
+        console.warn('[yayra] Capacitor Browser.open() failed, falling back to window.open', err);
+      }
+    }
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
   }
 
@@ -904,6 +996,13 @@ export class BrowserShell {
     }
 
     const url = activeTab.url || '';
+    const isInternalPage = !url || url === 'about:blank' || url.startsWith('yayra://');
+    // The native engine (Electron WebContentsView) renders as a separate
+    // on-screen surface above the HTML document, not inside it - so it must
+    // be explicitly shown/hidden to match whichever tab/page is actually
+    // on screen right now (internal pages like Settings must not have a
+    // leftover native surface floating over them).
+    this.syncNativeWebviewVisibility(activeTab.id, !isInternalPage);
 
     if (!url || url === 'yayra://newtab' || url === 'about:blank') {
       this.renderNewTabPage(viewport, activeTab);
@@ -934,19 +1033,312 @@ export class BrowserShell {
         webViewContainer.style.height = `${(100 / this.state.zoomLevel) * 100}%`;
       }
 
-      const iframe = document.createElement('iframe');
-      iframe.className = 'fb-webview-frame';
-      iframe.src = activeTab.url;
-      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
-      iframe.setAttribute('allow', 'fullscreen');
-
-      iframe.addEventListener('load', () => {
-        this.updateTabLoading(activeTab.id, false);
+      const { wrapper } = this.createWebContentFrame(activeTab.url, {
+        frameClassName: 'fb-webview-frame',
+        onLoaded: () => this.updateTabLoading(activeTab.id, false),
+        tabId: activeTab.id,
+        isPrivate: activeTab.isPrivate,
+        allowNative: true
       });
 
-      webViewContainer.appendChild(iframe);
+      webViewContainer.appendChild(wrapper);
       viewport.appendChild(webViewContainer);
     }
+  }
+
+  /* -------------------------------------------------------------
+   * EXTERNAL WEB CONTENT FRAME HELPER
+   * -----------------------------------------------------------
+   * Many real-world sites (Google, GitHub, Facebook, etc.) send their own
+   * X-Frame-Options / CSP frame-ancestors headers that forbid being
+   * embedded in ANY iframe. That restriction is enforced by the target
+   * site and by the browser itself — Yayra's own CSP (frame-src) cannot
+   * override it, and modern Chrome now renders its own inline
+   * "<site> refused to connect." error INSIDE the frame rather than
+   * failing silently, which also defeats any contentDocument-based
+   * runtime detection (the error document itself is cross-origin, so
+   * reading it throws exactly like a real successful navigation would).
+   * The only reliable fix is to proactively recognize known
+   * frame-hostile hosts before ever attempting to embed them, and show a
+   * clear in-app fallback with an explicit "Open in new tab" action
+   * instead of a dead/blocked frame.
+   * ----------------------------------------------------------- */
+  isKnownFrameBlockedUrl(url) {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      return BrowserShell.FRAME_EMBEDDING_BLOCKED_HOSTS.some(
+        (blocked) => hostname === blocked || hostname.endsWith(`.${blocked}`)
+      );
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  buildFrameBlockedFallback(url) {
+    const fallback = document.createElement('div');
+    fallback.className = 'fb-frame-blocked-fallback';
+    fallback.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:#15171c; color:#d7dbe3; text-align:center; padding:24px; z-index:1;';
+    fallback.innerHTML = `
+      <div style="font-size:0.9rem; max-width:360px; line-height:1.5;">This site doesn't allow embedded browsing and must be opened in its own tab.</div>
+      <button type="button" class="fb-btn fb-frame-blocked-open-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">Open in new tab</button>
+    `;
+    fallback.querySelector('.fb-frame-blocked-open-btn')?.addEventListener('click', () => {
+      this.openExternally(url);
+    });
+    return fallback;
+  }
+
+  buildSystemBrowserHandoffFallback(url) {
+    const fallback = document.createElement('div');
+    fallback.className = 'fb-frame-blocked-fallback fb-auth-handoff-fallback';
+    fallback.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:#15171c; color:#d7dbe3; text-align:center; padding:24px; z-index:1;';
+    fallback.innerHTML = `
+      <div style="font-size:0.9rem; max-width:360px; line-height:1.5;">For your security, sign-in opens in your browser and never inside an embedded view.</div>
+      <button type="button" class="fb-btn fb-auth-handoff-open-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">Continue sign-in</button>
+    `;
+    fallback.querySelector('.fb-auth-handoff-open-btn')?.addEventListener('click', () => {
+      this.openExternally(url);
+    });
+    return fallback;
+  }
+
+  createWebContentFrame(url, { frameClassName = '', onLoaded, tabId = null, isPrivate = false, allowNative = true } = {}) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'fb-webview-frame-wrapper';
+    wrapper.style.cssText = 'position:relative; flex:1; width:100%; height:100%; display:flex; min-height:0;';
+
+    // PRIMARY FIX: on Electron (Linux/Windows desktop builds) real website
+    // content is rendered by a native WebContentsView, not an <iframe> -
+    // see electron/webviewBridge.cjs for the full rationale. A WebContentsView
+    // is a sibling OS surface, not a nested browsing context, so a target
+    // site's X-Frame-Options/frame-ancestors headers (which only govern
+    // frame/iframe embedding) never come into play.
+    if (allowNative && tabId && this.nativeWebview) {
+      this.attachNativeWebviewSlot(wrapper, tabId, url, isPrivate);
+      if (typeof onLoaded === 'function') onLoaded();
+      return { wrapper, iframe: null };
+    }
+
+    // No native Electron bridge here: plain web/PWA tab, or an Android/iOS
+    // Capacitor build (which still runs this file inside ONE WebView, so a
+    // nested <iframe> is subject to the exact same restrictions a desktop
+    // browser tab would see). Google/Apple/Microsoft refuse to complete
+    // sign-in inside ANY embedded webview on these platforms too - hand off
+    // to the real system/in-app browser instead of attempting (and failing)
+    // to embed the sign-in page. See the matching Electron-side handoff in
+    // electron/webviewBridge.cjs for the desktop equivalent of this check.
+    if (this.isSystemBrowserAuthHost(url)) {
+      wrapper.appendChild(this.buildSystemBrowserHandoffFallback(url));
+      this.openExternally(url);
+      if (typeof onLoaded === 'function') onLoaded();
+      return { wrapper, iframe: null };
+    }
+
+    // Known case: don't even attempt to embed it — avoids the raw browser
+    // "refused to connect" error ever flashing inside the frame.
+    if (this.isKnownFrameBlockedUrl(url)) {
+      wrapper.appendChild(this.buildFrameBlockedFallback(url));
+      if (typeof onLoaded === 'function') onLoaded();
+      return { wrapper, iframe: null };
+    }
+
+    const iframe = document.createElement('iframe');
+    if (frameClassName) iframe.className = frameClassName;
+    iframe.src = url;
+    iframe.style.cssText = 'flex:1; border:none; width:100%; height:100%;';
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
+    iframe.setAttribute('allow', 'fullscreen');
+
+    let settled = false;
+    const showBlockedFallback = () => {
+      if (settled) return;
+      settled = true;
+      wrapper.appendChild(this.buildFrameBlockedFallback(url));
+    };
+
+    iframe.addEventListener('load', () => {
+      if (typeof onLoaded === 'function') onLoaded();
+      // Best-effort secondary net for hosts not in the known-blocked list:
+      // a site that refuses framing never actually navigates — the
+      // browser silently keeps the frame on its pre-navigation
+      // same-origin document instead. A genuinely framed cross-origin
+      // page throws a SecurityError on contentDocument access; a blocked
+      // one does not, because it was never replaced. Note this does NOT
+      // catch every case (some browsers render the inline refusal error
+      // as a cross-origin document too, which is why the proactive
+      // hostname list above is the primary defense).
+      setTimeout(() => {
+        try {
+          const frameDoc = iframe.contentDocument || iframe.contentWindow?.document;
+          const blocked = !!frameDoc && (!frameDoc.location || frameDoc.location.href === 'about:blank');
+          if (blocked) showBlockedFallback();
+        } catch (_err) {
+          // Threw because the frame now holds a real cross-origin document
+          // — navigation succeeded, nothing to do.
+        }
+      }, 450);
+    });
+
+    wrapper.appendChild(iframe);
+    return { wrapper, iframe };
+  }
+
+  /* -------------------------------------------------------------
+   * NATIVE WEBSITE-RENDERING ENGINE (ELECTRON DESKTOP)
+   * -----------------------------------------------------------
+   * See electron/webviewBridge.cjs for the main-process side. This is the
+   * renderer half: it keeps a transparent placeholder <div> in the normal
+   * HTML layout (so flexbox/grid sizing, the tab strip, address bar, etc.
+   * all work completely unchanged) and tells the main process to position a
+   * real native WebContentsView exactly on top of that placeholder's
+   * on-screen bounds.
+   * ----------------------------------------------------------- */
+  attachNativeWebviewSlot(wrapper, tabId, url, isPrivate) {
+    wrapper.className += ' fb-native-webview-slot';
+    this._nativeWebviewTabIds.add(tabId);
+
+    this.nativeWebview.ensure(tabId, url, isPrivate).then((result) => {
+      if (result && result.handedOffToSystemBrowser) {
+        const tab = this.state.tabs.find((t) => t.id === tabId);
+        if (tab) {
+          tab.url = 'yayra://newtab';
+          tab.isLoading = false;
+          this.showTransientNotice('Opened in your default browser for secure sign-in.');
+          if (tabId === this.state.activeTabId) this.render();
+        }
+      }
+    }).catch((err) => console.warn('[yayra] native webview ensure() failed:', err));
+
+    const reportBounds = () => {
+      try {
+        const rect = wrapper.getBoundingClientRect();
+        this.nativeWebview.setBounds(tabId, {
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height
+        });
+      } catch (_err) {
+        // Non-browser/test environment without a real layout engine - safe
+        // to ignore, there is nothing to position on screen.
+      }
+    };
+
+    const previousObserver = this._nativeWebviewResizeObservers.get(tabId);
+    if (previousObserver) previousObserver.disconnect();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(reportBounds);
+      observer.observe(wrapper);
+      this._nativeWebviewResizeObservers.set(tabId, observer);
+    } else {
+      // No ResizeObserver (very old WebKit/test environments): best-effort
+      // one-shot placement plus the existing window resize handler.
+      setTimeout(reportBounds, 0);
+    }
+  }
+
+  /**
+   * Shows only the active tab's native view (when it should be visible -
+   * i.e. the active tab is actually rendering external web content, not an
+   * internal yayra:// page) and hides every other tab's native view. Native
+   * views are sibling OS surfaces layered above the HTML document, so any
+   * tab not currently on screen must be explicitly hidden or it would float
+   * over whatever IS on screen.
+   */
+  syncNativeWebviewVisibility(activeTabId, showActive) {
+    if (!this.nativeWebview || this._nativeWebviewTabIds.size === 0) return;
+    for (const tabId of this._nativeWebviewTabIds) {
+      const visible = tabId === activeTabId && showActive;
+      this.nativeWebview.setVisible(tabId, visible).catch(() => {});
+    }
+  }
+
+  handleNativeWebviewEvent(evt) {
+    if (!evt || !evt.tabId) return;
+    const { tabId, type } = evt;
+    const tab = this.state.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    switch (type) {
+      case 'loading-start':
+        this.updateTabLoading(tabId, true);
+        break;
+      case 'loading-stop':
+        this.updateTabLoading(tabId, false);
+        break;
+      case 'navigated': {
+        tab.url = evt.url || tab.url;
+        tab.isSecure = (tab.url || '').startsWith('https://');
+        tab.canGoBack = Boolean(evt.canGoBack);
+        tab.canGoForward = Boolean(evt.canGoForward);
+        const navigationState = this.ensureNavigationState(tab);
+        const currentUrl = navigationState.historyStack[navigationState.currentIndex];
+        if (currentUrl !== tab.url) {
+          navigationState.historyStack = navigationState.historyStack.slice(0, navigationState.currentIndex + 1);
+          navigationState.historyStack.push(tab.url);
+          navigationState.currentIndex = navigationState.historyStack.length - 1;
+        }
+        if (!tab.isPrivate && this.historyRepo && tab.url !== 'yayra://newtab') {
+          if (typeof this.historyRepo.recordVisit === 'function') this.historyRepo.recordVisit(tab.url, tab.title);
+          else if (typeof this.historyRepo.addEntry === 'function') this.historyRepo.addEntry(tab.url, tab.title, tab.favicon);
+        }
+        if (tabId === this.state.activeTabId) {
+          this.state.urlInputValue = this.getDisplayUrl(tab.url);
+          this.updateBookmarkState(tab.url);
+          this.render();
+        }
+        break;
+      }
+      case 'title-updated':
+        tab.title = evt.title || tab.title;
+        if (tabId === this.state.activeTabId) this.render();
+        break;
+      case 'favicon-updated':
+        tab.favicon = evt.favicon || tab.favicon;
+        break;
+      case 'fail-load':
+        this.updateTabLoading(tabId, false);
+        console.warn(`[yayra] native webview failed to load ${evt.url}: ${evt.errorDescription} (${evt.errorCode})`);
+        break;
+      case 'system-browser-handoff':
+        this.showTransientNotice('Opened in your default browser for secure sign-in.');
+        break;
+      case 'new-window-request':
+        if (evt.url) {
+          this.createNewTab();
+          this.navigateActiveTab(evt.url);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  destroyNativeWebview(tabId) {
+    if (!this._nativeWebviewTabIds.has(tabId)) return;
+    this._nativeWebviewTabIds.delete(tabId);
+    const observer = this._nativeWebviewResizeObservers.get(tabId);
+    if (observer) {
+      observer.disconnect();
+      this._nativeWebviewResizeObservers.delete(tabId);
+    }
+    this.nativeWebview?.destroy(tabId).catch(() => {});
+  }
+
+  showTransientNotice(message) {
+    if (typeof document === 'undefined') return;
+    const notice = document.createElement('div');
+    notice.className = 'fb-transient-notice';
+    notice.textContent = message;
+    notice.style.cssText = 'position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1f2430; color:#e7eaf0; padding:10px 18px; border-radius:10px; font-size:0.85rem; box-shadow:0 8px 24px rgba(0,0,0,0.35); z-index:999999; opacity:0; transition:opacity 0.2s ease;';
+    document.body.appendChild(notice);
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(cb, 16);
+    raf(() => { notice.style.opacity = '1'; });
+    setTimeout(() => {
+      notice.style.opacity = '0';
+      setTimeout(() => notice.remove(), 250);
+    }, 4000);
   }
 
   /* -------------------------------------------------------------
@@ -2261,11 +2653,15 @@ export class BrowserShell {
         <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:rgba(0,0,0,0.3); border-bottom:1px solid rgba(255,255,255,0.08);">
           <input type="text" class="fb-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search or type address" style="flex:1; height:30px; font-size:0.825rem;" />
         </div>
-        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
-          <iframe src="${activeTab.url && !activeTab.url.startsWith('yayra://') ? activeTab.url : 'about:blank'}" style="flex:1; border:none; width:100%; height:100%;"></iframe>
-        </div>
+        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow:hidden;"></div>
       </div>
     `;
+
+    const dupViewportUrl = activeTab.url && !activeTab.url.startsWith('yayra://') ? activeTab.url : 'about:blank';
+    if (dupViewportUrl !== 'about:blank') {
+      const { wrapper } = this.createWebContentFrame(dupViewportUrl);
+      dupWin.querySelector('.fb-mini-viewport')?.appendChild(wrapper);
+    }
 
     dupWin.querySelector('.fb-open-full-btn')?.addEventListener('click', () => {
       dupWin.remove();
@@ -2525,12 +2921,8 @@ export class BrowserShell {
       } else if (url === 'yayra://about') {
         this.renderInternalAboutPage(miniViewport, activeTab);
       } else {
-        const iframe = document.createElement('iframe');
-        iframe.src = activeTab.url;
-        iframe.style.cssText = 'flex:1; border:none; width:100%; height:100%;';
-        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
-        iframe.setAttribute('allow', 'fullscreen');
-        miniViewport.appendChild(iframe);
+        const { wrapper } = this.createWebContentFrame(activeTab.url);
+        miniViewport.appendChild(wrapper);
       }
     }
 
@@ -4081,6 +4473,8 @@ export class BrowserShell {
     const tabIndex = this.state.tabs.findIndex((t) => t.id === tabId);
     if (tabIndex === -1) return;
 
+    this.destroyNativeWebview(tabId);
+
     const [closedTab] = this.state.tabs.splice(tabIndex, 1);
 
     // Save to closed tabs history (for Ctrl+Shift+T restore)
@@ -4285,22 +4679,30 @@ export class BrowserShell {
 
   reload() {
     const activeTab = this.getActiveTab();
-    if (activeTab) {
-      activeTab.isLoading = true;
-      this.render();
-      setTimeout(() => {
-        this.updateTabLoading(activeTab.id, false);
-        this.render();
-      }, 300);
+    if (!activeTab) return;
+    if (this.nativeWebview && this._nativeWebviewTabIds.has(activeTab.id)) {
+      // Real reload on the native engine; loading-start/loading-stop events
+      // flow back through handleNativeWebviewEvent and drive the UI.
+      this.nativeWebview.reload(activeTab.id).catch(() => {});
+      return;
     }
+    activeTab.isLoading = true;
+    this.render();
+    setTimeout(() => {
+      this.updateTabLoading(activeTab.id, false);
+      this.render();
+    }, 300);
   }
 
   stopLoading() {
     const activeTab = this.getActiveTab();
-    if (activeTab) {
-      activeTab.isLoading = false;
-      this.render();
+    if (!activeTab) return;
+    if (this.nativeWebview && this._nativeWebviewTabIds.has(activeTab.id)) {
+      this.nativeWebview.stop(activeTab.id).catch(() => {});
+      return;
     }
+    activeTab.isLoading = false;
+    this.render();
   }
 
   updateTabLoading(tabId, isLoading) {
@@ -4618,6 +5020,13 @@ export class BrowserShell {
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.boundResizeHandler);
       window.removeEventListener('keydown', this.boundKeyHandler);
+    }
+    if (this._unsubscribeNativeWebview) {
+      this._unsubscribeNativeWebview();
+      this._unsubscribeNativeWebview = null;
+    }
+    for (const tabId of Array.from(this._nativeWebviewTabIds || [])) {
+      this.destroyNativeWebview(tabId);
     }
     if (this.bubbleOverlay) {
       this.bubbleOverlay.remove();
