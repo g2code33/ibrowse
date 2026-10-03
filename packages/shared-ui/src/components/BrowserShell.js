@@ -771,18 +771,17 @@ export class BrowserShell {
     const addressRow = document.createElement('div');
     addressRow.className = 'fb-mobile-address-row';
 
-    const bBack = document.createElement('button');
-    bBack.className = 'fb-mobile-nav-btn';
-    bBack.type = 'button';
-    bBack.title = 'Back';
-    bBack.setAttribute('aria-label', 'Back');
-    bBack.innerHTML = Icons.arrowLeft;
-    bBack.disabled = !activeTab.canGoBack;
-    bBack.addEventListener('click', () => {
-      this.goBack();
-      this.render();
+    const bRefresh = document.createElement('button');
+    bRefresh.className = 'fb-mobile-nav-btn fb-mobile-refresh-btn';
+    bRefresh.type = 'button';
+    bRefresh.title = activeTab.isLoading ? 'Stop loading' : 'Refresh page';
+    bRefresh.setAttribute('aria-label', activeTab.isLoading ? 'Stop loading' : 'Refresh page');
+    bRefresh.innerHTML = activeTab.isLoading ? Icons.stop : Icons.refresh;
+    bRefresh.addEventListener('click', () => {
+      if (activeTab.isLoading) this.stopLoading();
+      else this.reload();
     });
-    addressRow.appendChild(bBack);
+    addressRow.appendChild(bRefresh);
 
     const addressPill = document.createElement('div');
     addressPill.className = 'fb-mobile-address-pill';
@@ -831,6 +830,19 @@ export class BrowserShell {
     const toolRow = document.createElement('div');
     toolRow.className = 'fb-mobile-secondary-tools';
 
+    const bBack = document.createElement('button');
+    bBack.className = 'fb-mobile-nav-btn';
+    bBack.type = 'button';
+    bBack.title = 'Back';
+    bBack.setAttribute('aria-label', 'Back');
+    bBack.innerHTML = Icons.arrowLeft;
+    bBack.disabled = !activeTab.canGoBack;
+    bBack.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
+    toolRow.appendChild(bBack);
+
     const bFwd = document.createElement('button');
     bFwd.className = 'fb-mobile-nav-btn';
     bFwd.type = 'button';
@@ -843,18 +855,6 @@ export class BrowserShell {
       this.render();
     });
     toolRow.appendChild(bFwd);
-
-    const bRefresh = document.createElement('button');
-    bRefresh.className = 'fb-mobile-nav-btn fb-mobile-refresh-btn';
-    bRefresh.type = 'button';
-    bRefresh.title = activeTab.isLoading ? 'Stop loading' : 'Refresh page';
-    bRefresh.setAttribute('aria-label', activeTab.isLoading ? 'Stop loading' : 'Refresh page');
-    bRefresh.innerHTML = activeTab.isLoading ? Icons.stop : Icons.refresh;
-    bRefresh.addEventListener('click', () => {
-      if (activeTab.isLoading) this.stopLoading();
-      else this.reload();
-    });
-    toolRow.appendChild(bRefresh);
 
     const bShare = document.createElement('button');
     bShare.className = 'fb-mobile-nav-btn';
@@ -4242,12 +4242,9 @@ export class BrowserShell {
   goBack() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return false;
-    // Notify a native engine when one is attached, but always advance the
-    // shell's own immediate history as well. Returning early here used to
-    // leave the UI on the start page after a native back/forward request.
-    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
-      this.navigationController.goBack();
-    }
+    // Move the active tab's local history first. A native controller may
+    // update its own model synchronously, so delegating before this step can
+    // overwrite the shell state or jump straight back to the new-tab page.
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex <= 0) return false;
     navigationState.currentIndex -= 1;
@@ -4260,15 +4257,15 @@ export class BrowserShell {
     navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !activeTab.url.startsWith('yayra://');
     this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
+      this.navigationController.goBack();
+    }
     return true;
   }
 
   goForward() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return false;
-    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
-      this.navigationController.goForward();
-    }
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex >= navigationState.historyStack.length - 1) return false;
     navigationState.currentIndex += 1;
@@ -4281,6 +4278,9 @@ export class BrowserShell {
     navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !activeTab.url.startsWith('yayra://');
     this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
+      this.navigationController.goForward();
+    }
     return true;
   }
 

@@ -223,6 +223,11 @@ test('Mobile Refresh and Navigation: pull affordance, refresh button, and immedi
   shell.render(container);
   assert.ok(container.querySelector('.fb-mobile-refresh-btn'), 'Mobile toolbar must have a refresh button');
   assert.ok(container.querySelector('.fb-mobile-pull-indicator'), 'Mobile viewport must have pull-to-refresh affordance');
+  const addressRow = container.querySelector('.fb-mobile-address-row');
+  assert.ok(addressRow?.querySelector('.fb-mobile-refresh-btn'), 'Refresh should occupy the left address-row control');
+  const mobileTools = container.querySelector('.fb-mobile-secondary-tools');
+  assert.equal(mobileTools?.children[0]?.getAttribute('aria-label'), 'Back', 'Back should be beside Forward');
+  assert.equal(mobileTools?.children[1]?.getAttribute('aria-label'), 'Forward', 'Forward should be beside Back');
 
   const controllerCalls = [];
   const controlledShell = new BrowserShell({
