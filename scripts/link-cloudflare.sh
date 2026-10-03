@@ -6,4 +6,5 @@ set -euo pipefail
 # Wrangler refuses OAuth login while an API token is present. Keep the
 # deployment token in the caller's environment, but hide it from this child
 # process so the interactive account-link flow can run.
-exec env -u CLOUDFLARE_API_TOKEN npx --yes wrangler@4 login
+env -u CLOUDFLARE_API_TOKEN npx --yes wrangler@4 login
+env -u CLOUDFLARE_API_TOKEN npx --yes wrangler@4 whoami
