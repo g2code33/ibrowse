@@ -10,7 +10,12 @@ if (!existsSync(path.join(root, 'dist/index.html'))) {
   process.exit(1);
 }
 const electronBin = process.platform === 'win32' ? path.join(root, 'node_modules/.bin/electron.cmd') : path.join(root, 'node_modules/.bin/electron');
-if (!existsSync(electronBin)) {
+const electronRuntime = process.platform === 'win32'
+  ? path.join(root, 'node_modules/electron/dist/electron.exe')
+  : process.platform === 'darwin'
+    ? path.join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')
+    : path.join(root, 'node_modules/electron/dist/electron');
+if (!existsSync(electronBin) || !existsSync(electronRuntime)) {
   await staticSmokeFallback();
   process.exit(0);
 }
@@ -53,6 +58,6 @@ async function staticSmokeFallback() {
     console.error('desktop smoke fallback failed: documented fallback log line missing from Electron main process');
     process.exit(1);
   }
-  console.log('[yayra-smoke] {"title":"yayra","hasRoot":true,"mode":"static-fallback","reason":"Electron optional runtime was not installed in this sandbox"}');
+  console.log('[yayra-smoke] {"title":"yayra","hasRoot":true,"mode":"static-fallback","reason":"Electron runtime was not installed in this sandbox"}');
   console.log('desktop smoke fallback passed: built DOM and retry ladder log are present; actual binary smoke runs in CI when Electron runtime is available');
 }

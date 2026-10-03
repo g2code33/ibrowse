@@ -15,7 +15,14 @@ const builtAt = process.env.BUILT_AT || new Date().toISOString();
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
 await cp(path.join(root, 'public'), dist, { recursive: true });
+await cp(path.join(root, 'assets', 'brand'), path.join(dist, 'assets', 'brand'), { recursive: true });
 await cp(path.join(root, 'src'), path.join(dist, 'src'), { recursive: true });
+// BrowserShell is imported directly by the web entry point. Keep its runtime
+// packages inside the self-contained PWA bundle instead of leaving imports
+// pointing back at the repository checkout.
+for (const packageName of ['browser-contract', 'persistence', 'shared-ui']) {
+  await cp(path.join(root, 'packages', packageName), path.join(dist, 'packages', packageName), { recursive: true });
+}
 
 await replaceFile(path.join(dist, 'index.html'), {
   __BUILD_VERSION__: version,

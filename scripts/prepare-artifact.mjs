@@ -47,7 +47,7 @@ function required(name) { const v = value(name); if (!v) { console.error(`missin
 function value(name) { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : ''; }
 function targetDefaultInput(t) {
   if (t === 'pwa') return 'dist';
-  if (t === 'linux') return 'release/*.{deb,AppImage}';
+  if (t === 'linux') return 'release/*.deb,release/*.AppImage';
   if (t === 'windows') return 'release/*.exe';
   if (t === 'android') return 'android/app/build/outputs/apk/release/*.apk';
   if (t === 'ios') return 'build/ios-export/*.ipa,build/*.xcarchive';
@@ -63,7 +63,10 @@ async function resolveInputs(patterns) {
     const root = base.endsWith('/') ? base.slice(0, -1) : path.dirname(base);
     const regex = globRegex(trimmed);
     if (existsSync(root)) {
-      for (const file of await listFiles(root)) if (regex.test(file)) out.push(file);
+      // Archives such as .xcarchive are directories. Include directory entries in
+      // the scan as well as files so a directory glob can be packaged as one
+      // artifact instead of being reported as "no files matched".
+      for (const file of await listEntries(root)) if (regex.test(file)) out.push(file);
     }
   }
   return [...new Set(out)];
@@ -73,13 +76,14 @@ function globRegex(pattern) {
   escaped = escaped.replace(/\\\{([^}]+)\\\}/g, (_m, body) => `(${body.split(',').map((v) => v.replace('.', '\\.')).join('|')})`);
   return new RegExp(`^${escaped}$`);
 }
-async function listFiles(dir) {
+async function listEntries(dir) {
   const out = [];
   for (const entry of await readdir(dir)) {
     const absolute = path.join(dir, entry);
     const info = await stat(absolute);
-    if (info.isDirectory()) out.push(...await listFiles(absolute));
-    else out.push(absolute.split(path.sep).join('/'));
+    const normalized = absolute.split(path.sep).join('/');
+    out.push(normalized);
+    if (info.isDirectory()) out.push(...await listEntries(absolute));
   }
   return out;
 }

@@ -602,7 +602,7 @@ export class MainDashboard {
 
     wrap.innerHTML = `
       <div style="display:flex; align-items:center; gap:14px;">
-        <div style="width:48px; height:48px;">${Icons.logoOrb}</div>
+        <div style="width:48px; height:48px;">${Icons.officialOrb}</div>
         <div>
           <h2 class="fb-h2" style="background:var(--fb-gradient-accent); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">FloatBrowse</h2>
           <span class="fb-body" style="font-size:0.8125rem;">Version 0.1.0 · Build Stable</span>

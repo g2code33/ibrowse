@@ -1,6 +1,9 @@
 export const DESKTOP_CUSTOM_SCHEME = 'yayra';
 export const ASSET_ORIGINS = Object.freeze(['https://yayra.pages.dev']);
-export const API_ORIGINS = Object.freeze(['https://updates.yayra.app']);
+export const API_ORIGINS = Object.freeze([
+  'https://updates.yayra.app',
+  'https://suggestqueries.google.com'
+]);
 
 export function buildContentSecurityPolicy() {
   const scheme = `${DESKTOP_CUSTOM_SCHEME}:`;

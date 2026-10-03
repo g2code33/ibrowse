@@ -4,6 +4,8 @@
 
 export interface IconMap {
   logoOrb: string;
+  officialOrb: string;
+  officialWordmark: string;
   globe: string;
   compass: string;
   search: string;

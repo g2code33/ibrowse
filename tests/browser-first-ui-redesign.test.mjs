@@ -149,7 +149,16 @@ test('Desktop Floating Mode & Bubble Minimization: Toggles Mode A vs Mode B and 
   // Toggle Mode to Browser-First
   shell.toggleDesktopMode();
   assert.equal(shell.state.desktopFloatingMode, 'browser-first');
+  assert.equal(shell.state.isMinimizedToBubble, false);
   assert.equal(modeChanged, 'browser-first');
+
+  // Toggle back to Circle-First: the full browser must dock into the bubble.
+  shell.toggleDesktopMode();
+  assert.equal(shell.state.desktopFloatingMode, 'circle-first');
+  assert.equal(shell.state.isMinimizedToBubble, true);
+  shell.toggleDesktopMode();
+  assert.equal(shell.state.desktopFloatingMode, 'browser-first');
+  assert.equal(shell.state.isMinimizedToBubble, false);
 
   // Minimize to Floating Bubble
   shell.minimizeToBubble();

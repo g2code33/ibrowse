@@ -9,6 +9,7 @@ const root = process.cwd();
 const out = process.argv[2] || 'dist/updates/manifest.json';
 const metadataDir = process.argv[3] || '.artifacts';
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+const releaseRepository = process.env.GITHUB_REPOSITORY || 'g2code33/yayra';
 const latest = {};
 const downloads = {};
 const records = existsSync(path.join(root, metadataDir)) ? await findBuildInfo(path.join(root, metadataDir)) : [];
@@ -23,7 +24,7 @@ for (const recordPath of records) {
     const absolute = path.join(dir, file);
     if (!existsSync(absolute)) continue;
     const info = await stat(absolute);
-    downloads[target] = { url: record.urlBase ? `${record.urlBase}/${file}` : `https://github.com/g2code33/iFLY/releases/download/v${record.version}/${file}`, sha256, bytes: info.size };
+    downloads[target] = { url: record.urlBase ? `${record.urlBase}/${file}` : `https://github.com/${releaseRepository}/releases/download/v${record.version}/${file}`, sha256, bytes: info.size };
     break;
   }
 }

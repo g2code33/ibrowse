@@ -90,10 +90,15 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
       - run: npm run package:win
-      - shell: bash
+      - name: Verify Windows executables
+        shell: pwsh
         run: |
-          exe=$(find release -name '*.exe' | head -n 1)
-          if [ -n "$exe" ]; then node scripts/assert-windows-version.mjs "$exe"; fi
+          $exe = Get-ChildItem -Path release -Recurse -File -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $exe) {
+            Write-Error 'no exe produced under release/'
+            exit 1
+          }
+          node scripts/assert-windows-version.mjs $exe.FullName
 
   android:
     name: android APK build-only

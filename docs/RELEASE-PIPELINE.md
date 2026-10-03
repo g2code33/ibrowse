@@ -7,7 +7,7 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 | Area | Implementation |
 |---|---|
 | Web bundle | `npm run build:web` copies `public/` + `src/` to `dist/`, injects CSP, `dist/version.json`, and a service-worker precache list. |
-| Desktop | Electron `31.7.7` is pinned in `package.json#build.electronVersion`; electron-builder `26.15.3` creates Windows NSIS/portable and Linux `.deb`/`.AppImage`. |
+| Desktop | Electron `31.7.7` is pinned in `package.json#build.electronVersion`; electron-builder `26.15.3` creates Windows NSIS/portable and the Linux `.AppImage`, while the deterministic `dpkg-deb` packager creates the Linux `.deb`. |
 | Mobile | Capacitor `6.2.2`; CI creates native platform projects as needed, then runs `cap sync` against the already-built `dist/`. |
 | Updates | `src/services/updateService.js` implements client state/semver/checksum/snooze rules; `worker/update-worker.mjs` serves `/updates/manifest.json`; `scripts/generate-update-manifest.mjs` rewrites the manifest from artifact metadata. |
 | Branding | `assets/brand/source.png` is the source of truth; `npm run refresh:branding` generates favicon, PWA icons, hicolor icons, `.ico`, Android, and iOS icon assets. |
@@ -25,13 +25,15 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 ### `.github/workflows/release.yml` — main/release build
 
 - Triggers: push to `main`, tag `v*`, and `workflow_dispatch`.
+- Current release scope is Android and Linux. Pushes and tags do not run Windows or iOS jobs; those remain explicit later-release options through `workflow_dispatch`.
 - `workflow_dispatch` inputs:
   - `version_override`: exact semver applied to all manifests during the run.
   - `publish`: boolean, default `false`.
-  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
+  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`; the manual-release default is `desktop-linux,android`. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
 - Concurrency: release/main runs never cancel one another.
-- Job fan-out: `web` builds once and uploads `ibrowse-web-dist-${sha}`; all platform jobs download that exact artifact before packaging.
+- Job fan-out: `web` builds once and uploads `ibrowse-web-dist-${sha}`; all selected platform jobs download that exact artifact before packaging.
 - Publish gate: only tag `v*` or `workflow_dispatch` with `publish: true`, under GitHub Environment `release`.
+- A publish run fails early when the required Android or Linux signing secrets are missing. Build-only pushes may produce diagnostic unsigned artifacts, but the publish job refuses them.
 
 ## Job and artifact map
 
@@ -47,7 +49,7 @@ Unsigned artifacts include `-unsigned` in the artifact name. Each artifact direc
 |---|---|---|---|
 | `web` | `ubuntu-latest` | `ibrowse-pwa-<version>.tar.gz`, `SHA256SUMS.txt`, `build-info.json` | PWA bundle is not code-signed; integrity is represented by SHA256. |
 | `desktop-win` | `windows-latest` | NSIS installer `.exe`, portable `.exe`, sums/info | Signed when Windows cert secrets exist; otherwise uploaded as `-unsigned`. |
-| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, sums/info | Signed when Linux signing key exists; otherwise uploaded as `-unsigned`. |
+| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, detached `.sig` signatures, public key, sums/info | OpenSSL-signs both Linux packages when `LINUX_SIGNING_KEY` exists; otherwise uploaded as `-unsigned`. |
 | `android` | `ubuntu-latest` | release APK, sums/info | Signed when Android keystore secrets exist; otherwise uploaded as `-unsigned`. |
 | `ios` | `macos-14` | `.ipa` for signed export or `.xcarchive` for unsigned archive, sums/info | Signed/exported when Apple/App Store Connect secrets exist; otherwise unsigned archive artifact. |
 
@@ -61,15 +63,17 @@ At the end of publish, `scripts/ci-summary.mjs` writes this table shape into `$G
 
 ## Secrets
 
-All secrets are optional-but-honest. When a required secret is absent, the workflow emits `::warning::`, writes a `## Signing skipped` section to `$GITHUB_STEP_SUMMARY`, marks `build-info.json.unsigned: true`, and adds `-unsigned` to the artifact name.
+Build-only runs report missing secrets honestly and mark diagnostic artifacts as unsigned. A publish run is different: Android and Linux signing secrets are mandatory, and the workflow fails before packaging when either target cannot be signed. `scripts/assert-release-signed.mjs` also blocks any unsigned artifact from publication.
 
 | Secret | Target | Missing-secret result |
 |---|---|---|
 | `WINDOWS_CERTIFICATE_BASE64` | Windows | NSIS and portable `.exe` are built unsigned; artifact name includes `-unsigned`. |
 | `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Same as above. |
-| `LINUX_SIGNING_KEY` | Linux | `.deb` and `.AppImage` are built unsigned; artifact name includes `-unsigned`. |
-| `ANDROID_KEYSTORE_BASE64` | Android | APK is assembled unsigned; artifact name includes `-unsigned`. |
-| `ANDROID_KEYSTORE_PASSWORD` | Android | Same as above. |
+| `LINUX_SIGNING_KEY` | Linux | Base64-encoded or PEM RSA/EC private key used to create detached `.sig` signatures; without it the artifact name includes `-unsigned`. |
+| `LINUX_SIGNING_KEY_PASSWORD` | Linux | Optional passphrase for the Linux private key. |
+| `ANDROID_KEYSTORE_BASE64` | Android | Base64-encoded keystore used to sign the release APK; without it the artifact name includes `-unsigned`. |
+| `ANDROID_KEYSTORE_PASSWORD` | Android | Keystore password. |
+| `ANDROID_KEYSTORE_TYPE` | Android | Keystore type such as `JKS` or `PKCS12`; the generated free keystore uses `PKCS12`. |
 | `ANDROID_KEY_ALIAS` | Android | Same as above. |
 | `ANDROID_KEY_PASSWORD` | Android | Same as above. |
 | `APPLE_TEAM_ID` | iOS | CI performs unsigned archive attempt; artifact name includes `-unsigned`. |
@@ -82,6 +86,10 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 | `CLOUDFLARE_ACCOUNT_ID` | Web publish | Same as above. |
 | `CLOUDFLARE_PROJECT_NAME` | Web publish | Same as above. |
 | `GH_TOKEN`/`${{ github.token }}` | Release publish | Required by `gh`; if auth fails the script exits and asks for GitHub reconnection. |
+
+## Free Android and Linux signing
+
+A free self-generated Android PKCS#12 keystore and encrypted Linux RSA key can be generated locally for sideloaded Android and Linux releases. Keep the generated `.signing/` directory private; it is ignored by Git. Copy the values from `.signing/actions-secrets.env` into the corresponding GitHub Actions secrets, then use `targets: desktop-linux,android`. Google Play distribution and Apple/Windows trust programs are separate from artifact signing.
 
 ## Cutting a release
 
@@ -96,7 +104,7 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 
 2. Push through the normal PR path. Do not tag or publish from a PR.
 3. After merge to `main`, release.yml builds all artifacts. It refuses to continue if the version already exists in GitHub Releases.
-4. To publish, run release.yml manually with `publish: true` and the desired `targets`, or push an approved `v*` tag. The publish job runs in Environment `release`.
+4. To publish, run release.yml manually with `publish: true` and the desired `targets`, or push an approved `v*` tag. The publish job runs in Environment `release` and refuses any artifact set whose `build-info.json` is unsigned.
 5. Publish sequence:
    - create or reuse draft release with `gh release create <tag> <files…> -t <title> -n <body> --draft`;
    - upload/replace assets with `gh release upload <tag> <files…> --clobber`;

@@ -3,14 +3,16 @@
  * Manages Dark, Light, and System theme modes and applies CSS custom properties.
  */
 
-import { DarkThemeTokens, LightThemeTokens } from './colors.js';
+import { DarkThemeTokens, LightThemeTokens, AccentThemeTokens } from './colors.js';
 import { Spacing, Radii, Blur } from './spacing.js';
 import { Typography } from './typography.js';
 
 export type ThemeMode = 'dark' | 'light' | 'system';
+export type ColorTheme = keyof typeof AccentThemeTokens;
 
 export class ThemeManager {
   private currentMode: ThemeMode = 'dark';
+  private currentColorTheme: ColorTheme = 'blue';
   private listeners: Set<(mode: ThemeMode) => void> = new Set();
 
   constructor(initialMode: ThemeMode = 'dark', onModeChange?: (mode: ThemeMode) => void) {
@@ -22,6 +24,20 @@ export class ThemeManager {
 
   public getMode(): ThemeMode {
     return this.currentMode;
+  }
+
+  public getColorTheme(): ColorTheme {
+    return this.currentColorTheme;
+  }
+
+  public setColorTheme(colorTheme: ColorTheme, rootElement?: HTMLElement): ColorTheme {
+    if (!Object.prototype.hasOwnProperty.call(AccentThemeTokens, colorTheme)) return this.currentColorTheme;
+    this.currentColorTheme = colorTheme;
+    if (rootElement || (typeof document !== 'undefined' && document.documentElement)) {
+      const root = rootElement || document.documentElement;
+      this.applyTokens(root);
+    }
+    return this.currentColorTheme;
   }
 
   public getEffectiveMode(): 'dark' | 'light' {
@@ -68,6 +84,9 @@ export class ThemeManager {
     for (const [key, value] of Object.entries(tokens)) {
       props[`--fb-${this.kebabCase(key)}`] = value;
     }
+    for (const [key, value] of Object.entries(AccentThemeTokens[this.currentColorTheme])) {
+      props[`--fb-${this.kebabCase(key)}`] = value;
+    }
 
     return props;
   }
@@ -85,10 +104,14 @@ export class ThemeManager {
     const tokens = isDark ? DarkThemeTokens : LightThemeTokens;
 
     root.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    root.setAttribute('data-color-theme', this.currentColorTheme);
 
     for (const [key, value] of Object.entries(tokens)) {
       const cssVar = `--fb-${this.kebabCase(key)}`;
       root.style.setProperty(cssVar, value);
+    }
+    for (const [key, value] of Object.entries(AccentThemeTokens[this.currentColorTheme])) {
+      root.style.setProperty(`--fb-${this.kebabCase(key)}`, value);
     }
   }
 

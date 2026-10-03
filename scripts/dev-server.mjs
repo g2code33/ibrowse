@@ -41,7 +41,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (reqPath === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({
       app: 'Yayra FloatBrowse',
       version: '0.1.0',
@@ -50,6 +50,27 @@ const server = http.createServer((req, res) => {
       desktopModes: ['circle-first', 'browser-first'],
       displaySession: process.env.WAYLAND_DISPLAY ? 'Wayland' : 'X11',
       time: new Date().toISOString()
+    }));
+    return;
+  }
+
+  // Give the live preview a root-scoped manifest so the current dev app can
+  // be installed as a PWA without pretending it is a release deployment.
+  if (reqPath === '/manifest.webmanifest') {
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json; charset=utf-8', 'Cache-Control': 'no-store, max-age=0' });
+    res.end(JSON.stringify({
+      name: 'yayra dev preview',
+      short_name: 'yayra dev',
+      id: '/?dev=yayra',
+      start_url: '/?dev=yayra',
+      scope: '/',
+      display: 'standalone',
+      background_color: '#060b19',
+      theme_color: '#172554',
+      icons: [
+        { src: '/public/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+        { src: '/public/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+      ]
     }));
     return;
   }
@@ -63,29 +84,42 @@ const server = http.createServer((req, res) => {
   }
 
   fs.stat(filePath, (err, stats) => {
-    if (err || !stats.isFile()) {
+    if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
     }
 
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': contentType });
-    fs.createReadStream(filePath).pipe(res);
+    const requestedFile = stats.isDirectory() ? path.join(filePath, 'index.html') : filePath;
+    fs.stat(requestedFile, (fileErr, fileStats) => {
+      if (fileErr || !fileStats.isFile()) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+
+      const ext = path.extname(requestedFile).toLowerCase();
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store, max-age=0' });
+      fs.createReadStream(requestedFile).pipe(res);
+    });
   });
 });
 
 function serveBrowserApp(res) {
+  // Query-bust the entry module as an extra guard against a stale preview or
+  // an older service worker that cached the previous dev shell.
+  const devToken = Date.now().toString(36);
   const html = `<!DOCTYPE html>
-<html lang="en" data-theme="dark" data-version="0.1.0">
+<html lang="en" data-theme="dark" data-version="dev">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>yayra — Fast, Private Floating Browser</title>
+  <meta name="theme-color" content="#172554">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" sizes="32x32" href="/public/favicon-32x32.png">
-  <link rel="stylesheet" href="/packages/shared-ui/src/theme/design-system.css">
-  <link rel="stylesheet" href="/packages/shared-ui/src/glassmorphism.css">
+  <link rel="stylesheet" href="/packages/shared-ui/src/theme/design-system.css?dev=${devToken}">
+  <link rel="stylesheet" href="/packages/shared-ui/src/glassmorphism.css?dev=${devToken}">
   <style>
     html, body {
       margin: 0;
@@ -109,25 +143,35 @@ function serveBrowserApp(res) {
 </head>
 <body>
   <header id="top-header" class="top-header" aria-label="Application header"></header>
-  <div id="app"></div>
+  <main id="app"></main>
 
   <script type="module">
-    import { BrowserShell } from '/packages/shared-ui/src/components/BrowserShell.js';
-
-    const root = document.getElementById('app');
-    const shell = new BrowserShell({
-      container: root,
-      initialUrl: 'yayra://newtab'
-    });
-
-    shell.initialize().then(() => {
+    // Remove a release PWA worker from this preview origin before importing
+    // source modules. This prevents an old precache from masking live edits.
+    window.__YAYRA_DEV__ = true;
+    const registrations = 'serviceWorker' in navigator
+      ? await navigator.serviceWorker.getRegistrations()
+      : [];
+    const hadOldWorker = registrations.length > 0 || Boolean(navigator.serviceWorker?.controller);
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+    if (globalThis.caches) {
+      await Promise.all((await caches.keys()).map((key) => caches.delete(key)));
+    }
+    if (hadOldWorker && !sessionStorage.getItem('yayra-dev-worker-cleared')) {
+      sessionStorage.setItem('yayra-dev-worker-cleared', '1');
+      location.reload();
+    } else {
+      const { BrowserShell } = await import('/packages/shared-ui/src/components/BrowserShell.js?dev=${devToken}');
+      const root = document.getElementById('app');
+      const shell = new BrowserShell({ container: root, initialUrl: 'yayra://newtab' });
+      await shell.initialize();
       shell.render(root);
-    });
+    }
   </script>
 </body>
 </html>`;
 
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, max-age=0' });
   res.end(html);
 }
 

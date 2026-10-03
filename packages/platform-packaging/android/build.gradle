@@ -31,12 +31,14 @@ android {
             def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("ANDROID_KEYSTORE_PASSWORD")
             def keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("ANDROID_KEY_ALIAS")
             def keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("ANDROID_KEY_PASSWORD")
+            def keystoreType = System.getenv("ANDROID_KEYSTORE_TYPE") ?: project.findProperty("ANDROID_KEYSTORE_TYPE") ?: "JKS"
 
             if (keystorePath && file(keystorePath).exists() && keystorePassword && keyAlias && keyPassword) {
                 storeFile file(keystorePath)
                 storePassword keystorePassword
                 keyAlias keyAlias
                 keyPassword keyPassword
+                storeType keystoreType
                 v1SigningEnabled true
                 v2SigningEnabled true
             } else {

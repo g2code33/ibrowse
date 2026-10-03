@@ -14,7 +14,8 @@ export const DEFAULT_BROWSER_SETTINGS = Object.freeze({
   clearCookiesOnExit: false,
   allowWebsitePopups: false,
   desktopFloatingMode: 'circle-first',
-  theme: 'dark'
+  theme: 'dark',
+  colorTheme: 'blue'
 });
 
 export function createDefaultBrowserSettings(overrides = {}) {

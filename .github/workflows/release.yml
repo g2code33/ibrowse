@@ -3,23 +3,23 @@ name: Release build and publish
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version_override:
-        description: 'Semver override to apply to all manifests for this run (blank uses package.json)'
+        description: "Semver override to apply to all manifests for this run (blank uses package.json)"
         required: false
         type: string
       publish:
-        description: 'Publish draft-first release and update manifest'
+        description: "Publish draft-first release and update manifest"
         required: true
         type: boolean
         default: false
       targets:
-        description: 'Comma-separated targets: web,desktop-win,desktop-linux,android,ios or all'
+        description: "Comma-separated targets: web,desktop-win,desktop-linux,android,ios or all"
         required: true
         type: string
-        default: all
+        default: desktop-linux,android
 
 concurrency:
   group: release-${{ github.ref }}
@@ -50,7 +50,7 @@ jobs:
           if [ -n "${{ inputs.version_override }}" ]; then node scripts/version.mjs "${{ inputs.version_override }}"; fi
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Refuse duplicate version in release feed
-        if: github.ref == 'refs/heads/main' || inputs.publish == true
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-version-not-released.mjs
@@ -78,7 +78,9 @@ jobs:
     name: linux deb and AppImage
     runs-on: ubuntu-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-linux') || contains(inputs.targets, 'linux')
+    # Every push (including pushes to main) is a release build. Manual
+    # dispatches can still select a narrower target set.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-linux') || contains(inputs.targets, 'linux')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -98,8 +100,13 @@ jobs:
         shell: bash
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$LINUX_SIGNING_KEY" ]; then
+            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
+              echo "::error:: Linux release signing requires LINUX_SIGNING_KEY before publishing"
+              exit 1
+            fi
             echo "::warning:: Linux signing skipped: LINUX_SIGNING_KEY is not configured; building unsigned .deb and .AppImage"
             {
               echo "## Signing skipped"
@@ -111,8 +118,20 @@ jobs:
           fi
       - run: npm run package:linux
       - run: npm run verify:packaging
+      - name: Sign Linux packages and AppImage
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_PASSWORD: ${{ secrets.LINUX_SIGNING_KEY_PASSWORD }}
+        run: node scripts/sign-linux-artifacts.mjs release
       - id: artifact
-        run: node scripts/prepare-artifact.mjs --target linux --signed ${{ steps.signing.outputs.signed }} --why-not "LINUX_SIGNING_KEY not configured"
+        shell: bash
+        run: |
+          input="release/*.deb,release/*.AppImage"
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            input="$input,release/*.deb.sig,release/*.AppImage.sig,release/linux-signing-public-key.pem"
+          fi
+          node scripts/prepare-artifact.mjs --target linux --input "$input" --signed "${{ steps.signing.outputs.signed }}" --why-not "LINUX_SIGNING_KEY not configured"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
@@ -123,7 +142,9 @@ jobs:
     name: windows NSIS and portable
     runs-on: windows-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows')
+    # Main pushes build and publish Windows together with Android and Linux.
+    # Manual dispatches can still select Windows explicitly.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -141,30 +162,72 @@ jobs:
           name: yayra-web-dist-${{ github.sha }}
           path: dist
       - id: signing
-        shell: bash
+        shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
-          if [ -z "$WINDOWS_CERTIFICATE_BASE64" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
-            echo "::warning:: Windows signing skipped: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not configured"
-            {
-              echo "## Signing skipped"
-              echo "Windows: certificate secrets are absent, so NSIS and portable .exe artifacts are unsigned. Artifact name includes unsigned."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "$WINDOWS_CERTIFICATE_BASE64" | base64 -d > windows-cert.pfx
-            echo "CSC_LINK=$PWD/windows-cert.pfx" >> "$GITHUB_ENV"
-            echo "CSC_KEY_PASSWORD=$WINDOWS_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-          fi
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            if ($env:RELEASE_REQUIRES_SIGNING -eq 'true') {
+              Write-Error 'Windows release signing requires WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD before publishing'
+              exit 1
+            }
+            Write-Warning 'Windows signing skipped: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not configured'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Signing skipped'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Windows: certificate secrets are absent, so NSIS and portable .exe artifacts are unsigned. Artifact name includes unsigned.'
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            $certificatePath = Join-Path $env:RUNNER_TEMP 'yayra-windows-signing.pfx'
+            $certificateBase64 = $env:WINDOWS_CERTIFICATE_BASE64 -replace '\s', ''
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($certificateBase64))
+            # Build first without electron-builder's automatic signer. The
+            # resulting release executables are signed explicitly below with
+            # signtool so self-signed PFX certificates work consistently.
+            "WINDOWS_CERTIFICATE_PATH=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CSC_IDENTITY_AUTO_DISCOVERY=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
       - run: npm run package:win
-      - shell: bash
+      - name: Sign Windows executables with the configured PFX
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          exe=$(find release -name '*.exe' | head -n 1)
-          if [ -z "$exe" ]; then echo "no exe produced"; exit 1; fi
-          node scripts/assert-windows-version.mjs "$exe"
+          $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -File -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if ($null -eq $signTool) {
+            Write-Error 'Windows SDK signtool.exe was not found on the runner'
+            exit 1
+          }
+          $executables = @(Get-ChildItem -Path release -File -Filter '*.exe')
+          if ($executables.Count -eq 0) {
+            Write-Error 'no release executables were produced under release/'
+            exit 1
+          }
+          foreach ($exe in $executables) {
+            & $signTool.FullName sign /fd SHA256 /f $env:WINDOWS_CERTIFICATE_PATH /p $env:WINDOWS_CERTIFICATE_PASSWORD /d 'Yayra' $exe.FullName
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "signtool failed for $($exe.Name)"
+              exit $LASTEXITCODE
+            }
+            $signature = Get-AuthenticodeSignature -FilePath $exe.FullName
+            if ($null -eq $signature.SignerCertificate) {
+              Write-Error "no Authenticode signer was found on $($exe.Name)"
+              exit 1
+            }
+          }
+      - name: Verify Windows executables
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path release -File -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $exe) {
+            Write-Error 'no exe produced under release/'
+            exit 1
+          }
+          node scripts/assert-windows-version.mjs $exe.FullName
       - id: artifact
         shell: bash
         run: node scripts/prepare-artifact.mjs --target windows --signed ${{ steps.signing.outputs.signed }} --why-not "WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD not configured"
@@ -178,7 +241,7 @@ jobs:
     name: android release APK
     runs-on: ubuntu-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'android')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'android')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -201,8 +264,14 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_TYPE: ${{ secrets.ANDROID_KEYSTORE_TYPE }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
+              echo "::error:: Android release signing requires the keystore secrets before publishing"
+              exit 1
+            fi
             echo "::warning:: Android signing skipped: one or more Android keystore secrets are absent; release APK is unsigned"
             {
               echo "## Signing skipped"
@@ -211,9 +280,22 @@ jobs:
             echo "signed=false" >> "$GITHUB_OUTPUT"
           else
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-release.keystore
+            echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android-release.keystore" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_TYPE=${ANDROID_KEYSTORE_TYPE:-PKCS12}" >> "$GITHUB_ENV"
             echo "signed=true" >> "$GITHUB_OUTPUT"
           fi
       - run: npm run build:android
+      - name: Verify Android release is actually signed
+        if: steps.signing.outputs.signed == 'true'
+        shell: bash
+        run: |
+          if find android/app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit | grep -q .; then
+            echo "::error:: Gradle produced an unsigned Android release APK despite signing secrets being configured"
+            exit 1
+          fi
       - id: artifact
         run: node scripts/prepare-artifact.mjs --target android --signed ${{ steps.signing.outputs.signed }} --why-not "Android keystore secrets not configured"
       - uses: actions/upload-artifact@v4
@@ -226,7 +308,9 @@ jobs:
     name: iOS archive/export
     runs-on: macos-14
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'ios')
+    # Apple remains an explicit later-release option; do not block the
+    # Android/Linux release on an Apple certificate or team.
+    if: github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'ios'))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -263,15 +347,71 @@ jobs:
           fi
       - run: node scripts/ensure-capacitor-platform.mjs ios
       - run: npx cap sync ios
+      - name: Install Apple signing credentials
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/yayra-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12_PATH="$RUNNER_TEMP/yayra-signing.p12"
+          PRIVATE_KEY_DIR="$RUNNER_TEMP/private_keys"
+          PRIVATE_KEY_PATH="$PRIVATE_KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          python3 - "$P12_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          value = os.environ["APPLE_CERTIFICATE_P12_BASE64"]
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(value))
+          PY
+          security import "$P12_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          mkdir -p "$PRIVATE_KEY_DIR"
+          python3 - "$PRIVATE_KEY_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          value = os.environ["APP_STORE_CONNECT_PRIVATE_KEY"].replace('\\n', '\n')
+          if "BEGIN PRIVATE KEY" not in value:
+              value = base64.b64decode(value).decode()
+          pathlib.Path(sys.argv[1]).write_text(value)
+          PY
+          echo "APPLE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "APPLE_AUTH_KEY_PATH=$PRIVATE_KEY_PATH" >> "$GITHUB_ENV"
+          cat > ios/exportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+          </dict></plist>
+          EOF
       - name: Build signed or unsigned archive
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-            npm run build:ios
+            xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -authenticationKeyPath "$APPLE_AUTH_KEY_PATH" -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" -archivePath build/yayra.xcarchive archive
+            xcodebuild -exportArchive -archivePath build/yayra.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist -allowProvisioningUpdates -authenticationKeyPath "$APPLE_AUTH_KEY_PATH" -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
           else
             xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO archive -archivePath build/yayra.xcarchive
           fi
       - id: artifact
-        run: node scripts/prepare-artifact.mjs --target ios --signed ${{ steps.signing.outputs.signed }} --why-not "Apple Developer/App Store Connect secrets not configured"
+        shell: bash
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            input="build/ios-export/*.ipa"
+          else
+            input="build/yayra.xcarchive"
+          fi
+          node scripts/prepare-artifact.mjs --target ios --input "$input" --signed "${{ steps.signing.outputs.signed }}" --why-not "Apple Developer/App Store Connect secrets not configured"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
@@ -282,7 +422,7 @@ jobs:
     name: draft release, verify assets, publish live
     runs-on: ubuntu-latest
     needs: [web, desktop-linux, desktop-win, android, ios]
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+    if: always() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
     environment: release
     steps:
       - uses: actions/checkout@v4
@@ -297,8 +437,23 @@ jobs:
           path: .artifacts
           merge-multiple: false
       - run: node scripts/ci-summary.mjs .artifacts
-      - run: node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
+      - name: Refuse to publish unsigned artifacts
+        run: node scripts/assert-release-signed.mjs .artifacts
+      - name: Generate and stage the release update manifest
+        run: |
+          node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
+          cp dist/updates/manifest.json ".artifacts/updates-manifest-${{ needs.web.outputs.version }}.json"
+      - name: Select release verification targets
+        shell: bash
+        run: |
+          targets="pwa,linux,android"
+          requested="${{ inputs.targets }}"
+          if [[ "${{ github.event_name }}" == "push" || "$requested" == "all" || "$requested" == *"desktop-win"* || "$requested" == *"windows"* ]]; then
+            targets="$targets,windows"
+          fi
+          echo "RELEASE_TARGETS=$targets" >> "$GITHUB_ENV"
       - name: Deploy web to Cloudflare Pages when configured
+        id: web_deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -307,11 +462,13 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
             echo "::warning:: Web deploy skipped: Cloudflare Pages secrets are not configured"
             {
-              echo "## Signing skipped"
-              echo "Web deploy: Cloudflare Pages credentials are absent. Release assets are still prepared."
+              echo "## Web deploy skipped"
+              echo "Cloudflare Pages credentials are absent; the release-hosted manifest will be verified instead."
             } >> "$GITHUB_STEP_SUMMARY"
+            echo "manifest_url=https://github.com/${{ github.repository }}/releases/download/v${{ needs.web.outputs.version }}/updates-manifest-${{ needs.web.outputs.version }}.json" >> "$GITHUB_OUTPUT"
           else
             npx wrangler pages deploy dist --project-name "$CLOUDFLARE_PROJECT_NAME"
+            echo "manifest_url=https://updates.yayra.app/updates/manifest.json" >> "$GITHUB_OUTPUT"
           fi
       - name: Publish draft-first GitHub Release
         env:
@@ -320,5 +477,5 @@ jobs:
       - name: Verify live release and manifest contract
         env:
           GH_TOKEN: ${{ github.token }}
-          UPDATE_MANIFEST_URL: https://updates.yayra.app/updates/manifest.json
+          UPDATE_MANIFEST_URL: ${{ steps.web_deploy.outputs.manifest_url }}
         run: node scripts/release-verify.mjs "v${{ needs.web.outputs.version }}"

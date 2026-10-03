@@ -33,6 +33,11 @@ export const Icons = Object.freeze({
     </svg>
   `,
 
+  // Official uploaded Yayra branding. The build copies assets/brand into the
+  // runtime bundle so the same paths work in dev, PWA, Electron, and Android.
+  officialOrb: '<img class="fb-official-brand-orb" src="./assets/brand/yayrawriing.PNG" alt="Yayra" />',
+  officialWordmark: '<img class="fb-official-brand-wordmark" src="./assets/brand/source.png" alt="yayra" />',
+
   globe: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20M12 2a14.5 14.5 0 0 1 0 20M2 12h20"/></svg>`,
   compass: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>`,
   search: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>`,

@@ -20,6 +20,7 @@ export interface BrowserSettings {
   defaultUserAgent?: string;
   desktopFloatingMode: 'circle-first' | 'browser-first';
   theme: 'dark' | 'light' | 'system';
+  colorTheme?: 'blue' | 'purple' | 'green' | 'rose' | 'amber';
 }
 
 export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = Object.freeze({
@@ -34,7 +35,8 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = Object.freeze({
   clearCookiesOnExit: false,
   allowWebsitePopups: false,
   desktopFloatingMode: 'circle-first',
-  theme: 'dark'
+  theme: 'dark',
+  colorTheme: 'blue'
 });
 
 export function createDefaultBrowserSettings(overrides: Partial<BrowserSettings> = {}): BrowserSettings {

@@ -40,10 +40,11 @@ import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract
  * =========================================================================
  */
 export const DEVELOPER_AD_LINKS = [
-  { id: 'ad-google', title: 'Google AI & Cloud', url: 'https://cloud.google.com', domain: 'cloud.google.com' },
-  { id: 'ad-github', title: 'GitHub Developers', url: 'https://github.com', domain: 'github.com' },
-  { id: 'ad-claude', title: 'Anthropic Claude AI', url: 'https://anthropic.com', domain: 'anthropic.com' },
-  { id: 'ad-duckduckgo', title: 'DuckDuckGo Privacy', url: 'https://duckduckgo.com', domain: 'duckduckgo.com' }
+  { id: 'ad-rx-store', title: 'RX Store — Developer Sponsor', url: 'https://rx-store-web.pages.dev', domain: 'rx-store-web.pages.dev' },
+  { id: 'ad-pharmatrack', title: 'PharmaTrack', url: 'https://pharmatrack-web.pages.dev/', domain: 'pharmatrack-web.pages.dev' },
+  { id: 'ad-coderxsociety', title: 'CoderX Society', url: 'https://coderxsociety.pages.dev/', domain: 'coderxsociety.pages.dev' },
+  { id: 'ad-cgpapilot', title: 'CGPA Pilot', url: 'https://cgpapilot.pages.dev/', domain: 'cgpapilot.pages.dev' },
+  { id: 'ad-clinicalrx30', title: 'Clinical RX 30', url: 'https://clinicalrx30.vercel.app/', domain: 'clinicalrx30.vercel.app' }
 ];
 
 export class BrowserShell {
@@ -82,6 +83,15 @@ export class BrowserShell {
           }
         ];
 
+    let locallyPersistedSettings = {};
+    if (typeof localStorage !== 'undefined') {
+      try {
+        locallyPersistedSettings = JSON.parse(localStorage.getItem('yayra:settings') || '{}');
+      } catch {
+        locallyPersistedSettings = {};
+      }
+    }
+
     // Reactive State
     this.state = {
       tabs: initialTabs,
@@ -114,12 +124,10 @@ export class BrowserShell {
       ],
       passwordsItems: [],
       extensionsItems: [...BUILT_IN_EXTENSIONS],
-      sponsoredLinks: [
-        { id: 'sp-1', title: 'Google AI & Cloud', url: 'https://cloud.google.com', tag: 'AI & Cloud', domain: 'google.com' },
-        { id: 'sp-2', title: 'GitHub Developers', url: 'https://github.com', tag: 'Developer Platform', domain: 'github.com' },
-        { id: 'sp-3', title: 'DuckDuckGo Privacy', url: 'https://duckduckgo.com', tag: 'Private Search', domain: 'duckduckgo.com' },
-        { id: 'sp-4', title: 'Anthropic Claude', url: 'https://anthropic.com', tag: 'AI Assistant', domain: 'anthropic.com' }
-      ],
+      sponsoredLinks: DEVELOPER_AD_LINKS.map((item) => ({
+        ...item,
+        tag: 'Developer Sponsor'
+      })),
       settingsActiveCategory: 'floating',
       activeSettingsCategory: 'floating',
       settingsSearchQuery: '',
@@ -129,6 +137,7 @@ export class BrowserShell {
       passwordsSearchQuery: '',
       settings: {
         theme: 'dark',
+        colorTheme: 'blue',
         searchEngine: 'google', // Requirement 13: Default search engine is Google
         floatingEnabledByDefault: true,
         startFloatingOnLaunch: true,
@@ -145,6 +154,7 @@ export class BrowserShell {
         httpsFirst: true,
         clearHistoryOnExit: false,
         restoreSessionOnLaunch: true,
+        ...locallyPersistedSettings,
         ...options.initialSettings
       },
       updateState: {
@@ -155,6 +165,8 @@ export class BrowserShell {
       },
       updatePromptShown: false
     };
+
+    this.state.tabs.forEach((tab) => this.ensureNavigationState(tab));
 
     // DOM Elements
     this.rootElement = null;
@@ -265,6 +277,7 @@ export class BrowserShell {
     const shell = document.createElement('div');
     shell.className = `fb-browser-shell ${this.state.isMobile ? 'fb-mobile-layout' : 'fb-desktop-layout'} ${isPrivate ? 'fb-incognito-mode' : ''}`;
     shell.setAttribute('data-theme', this.state.settings.theme || 'dark');
+    shell.setAttribute('data-color-theme', this.state.settings.colorTheme || 'blue');
     shell.setAttribute('data-floating-mode', this.state.desktopFloatingMode);
 
     // Apply frame transparency
@@ -488,7 +501,10 @@ export class BrowserShell {
     backBtn.setAttribute('aria-label', 'Back');
     backBtn.disabled = !activeTab.canGoBack;
     backBtn.innerHTML = Icons.arrowLeft;
-    backBtn.addEventListener('click', () => this.goBack());
+    backBtn.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
     navControls.appendChild(backBtn);
 
     const fwdBtn = document.createElement('button');
@@ -497,7 +513,10 @@ export class BrowserShell {
     fwdBtn.setAttribute('aria-label', 'Forward');
     fwdBtn.disabled = !activeTab.canGoForward;
     fwdBtn.innerHTML = Icons.arrowRight;
-    fwdBtn.addEventListener('click', () => this.goForward());
+    fwdBtn.addEventListener('click', () => {
+      this.goForward();
+      this.render();
+    });
     navControls.appendChild(fwdBtn);
 
     const reloadBtn = document.createElement('button');
@@ -521,8 +540,8 @@ export class BrowserShell {
     const toolbarBrand = document.createElement('div');
     toolbarBrand.className = 'fb-toolbar-brand';
     toolbarBrand.innerHTML = `
-      <span class="fb-toolbar-brand-orb">${Icons.logoOrb}</span>
-      <span class="fb-toolbar-brand-text">yayra</span>
+      <span class="fb-toolbar-brand-orb">${Icons.officialOrb}</span>
+      <span class="fb-toolbar-brand-text">${Icons.officialWordmark}<span class="fb-brand-text-fallback">yayra</span></span>
     `;
     toolbarBrand.setAttribute('title', 'Yayra Floating Browser v0.1.0');
     toolbarBrand.addEventListener('click', () => this.openInternalPage('yayra://newtab'));
@@ -559,7 +578,7 @@ export class BrowserShell {
     omniboxInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        this.navigateActiveTab(omniboxInput.value);
+        this.navigateActiveTab(omniboxInput.dataset.selectedSuggestion || omniboxInput.value);
         omniboxInput.blur();
       } else if (e.key === 'Escape') {
         e.preventDefault();
@@ -569,6 +588,7 @@ export class BrowserShell {
     });
 
     omnibox.appendChild(omniboxInput);
+    this.bindSearchSuggestions(omniboxInput);
     this.omniboxInput = omniboxInput;
 
     // Bookmark Star Icon
@@ -647,12 +667,66 @@ export class BrowserShell {
    * MOBILE LAYOUT (SAFARI-STYLE BOTTOM BAR) (PHASE 2B)
    * ----------------------------------------------------------- */
   renderMobileLayout(root, activeTab) {
-    // 1. Mobile Top Address Pill
+    // Safari-inspired mobile chrome: a compact tab/tool rail above the page,
+    // then the address and navigation controls at the bottom. All Yayra
+    // actions remain available; the layout only changes their placement.
     const topBar = document.createElement('header');
     topBar.className = 'fb-mobile-topbar';
+    topBar.setAttribute('aria-label', 'Safari-style browser tools');
+
+    const safariTabbar = document.createElement('nav');
+    safariTabbar.className = 'fb-mobile-safari-tabbar';
+    const topActions = [
+      { className: 'fb-mobile-tab-overview', icon: Icons.tabs, title: 'Show all tabs', action: () => this.openModal('tab-switcher') },
+      { className: 'fb-mobile-tab-bookmarks', icon: Icons.bookmark, title: 'Bookmarks', action: () => this.openInternalPage('yayra://bookmarks') },
+      { className: 'fb-mobile-tab-privacy', icon: Icons.shield, title: 'Privacy and shields', action: () => this.openInternalPage('yayra://permissions') },
+      { className: 'fb-mobile-tab-history', icon: Icons.history, title: 'History', action: () => this.openInternalPage('yayra://history') }
+    ];
+    topActions.forEach(({ className, icon, title, action }) => {
+      const button = document.createElement('button');
+      button.className = `fb-mobile-safari-tab-btn ${className}`;
+      button.type = 'button';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.innerHTML = icon;
+      button.addEventListener('click', action);
+      safariTabbar.appendChild(button);
+    });
+    topBar.appendChild(safariTabbar);
+    root.appendChild(topBar);
+
+    // Main viewport remains the same shared renderer used by desktop so all
+    // internal pages, tools, privacy controls, and web content are preserved.
+    const viewport = document.createElement('main');
+    viewport.className = 'fb-browser-viewport fb-mobile-viewport';
+    this.renderViewportContent(viewport, activeTab);
+    root.appendChild(viewport);
+    this.viewportElement = viewport;
+
+    const bottomBar = document.createElement('nav');
+    bottomBar.className = 'fb-mobile-bottombar';
+
+    const addressRow = document.createElement('div');
+    addressRow.className = 'fb-mobile-address-row';
+
+    const bBack = document.createElement('button');
+    bBack.className = 'fb-mobile-nav-btn';
+    bBack.type = 'button';
+    bBack.title = 'Back';
+    bBack.setAttribute('aria-label', 'Back');
+    bBack.innerHTML = Icons.arrowLeft;
+    bBack.disabled = !activeTab.canGoBack;
+    bBack.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
+    addressRow.appendChild(bBack);
 
     const addressPill = document.createElement('div');
     addressPill.className = 'fb-mobile-address-pill';
+    addressPill.setAttribute('role', 'button');
+    addressPill.setAttribute('tabindex', '0');
+    addressPill.setAttribute('aria-label', 'Search or enter website address');
 
     const secIcon = document.createElement('span');
     secIcon.className = 'fb-mobile-sec-icon';
@@ -667,68 +741,78 @@ export class BrowserShell {
     `;
     addressPill.appendChild(titleWrap);
 
-    addressPill.addEventListener('click', () => {
-      this.openModal('search-overlay');
+    const openSearch = () => this.openModal('search-overlay');
+    addressPill.addEventListener('click', openSearch);
+    addressPill.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openSearch();
+      }
     });
-
-    topBar.appendChild(addressPill);
-    root.appendChild(topBar);
-
-    // 2. Viewport
-    const viewport = document.createElement('main');
-    viewport.className = 'fb-browser-viewport fb-mobile-viewport';
-    this.renderViewportContent(viewport, activeTab);
-    root.appendChild(viewport);
-    this.viewportElement = viewport;
-
-    // 3. Bottom Toolbar (Back, Forward, Share, Bookmarks, Tabs Count)
-    const bottomBar = document.createElement('nav');
-    bottomBar.className = 'fb-mobile-bottombar';
-
-    const bBack = document.createElement('button');
-    bBack.className = 'fb-mobile-nav-btn';
-    bBack.innerHTML = Icons.arrowLeft;
-    bBack.disabled = !activeTab.canGoBack;
-    bBack.addEventListener('click', () => this.goBack());
-    bottomBar.appendChild(bBack);
-
-    const bFwd = document.createElement('button');
-    bFwd.className = 'fb-mobile-nav-btn';
-    bFwd.innerHTML = Icons.arrowRight;
-    bFwd.disabled = !activeTab.canGoForward;
-    bFwd.addEventListener('click', () => this.goForward());
-    bottomBar.appendChild(bFwd);
-
-    const bShare = document.createElement('button');
-    bShare.className = 'fb-mobile-nav-btn';
-    bShare.innerHTML = Icons.share;
-    bShare.addEventListener('click', () => this.shareCurrentPage());
-    bottomBar.appendChild(bShare);
-
-    const bBook = document.createElement('button');
-    bBook.className = `fb-mobile-nav-btn ${this.state.isBookmarked ? 'active' : ''}`;
-    bBook.innerHTML = this.state.isBookmarked ? Icons.starFilled : Icons.star;
-    bBook.addEventListener('click', () => this.toggleBookmarkCurrentTab());
-    bottomBar.appendChild(bBook);
+    addressRow.appendChild(addressPill);
 
     const tabsBtn = document.createElement('button');
     tabsBtn.className = 'fb-mobile-nav-btn fb-mobile-tabs-btn';
+    tabsBtn.type = 'button';
+    tabsBtn.title = 'Show all tabs';
+    tabsBtn.setAttribute('aria-label', 'Show all tabs');
     tabsBtn.innerHTML = `
-      ${Icons.tabs}
-      <span class="fb-tabs-count-badge">${this.state.tabs.length}</span>
+      <span class="fb-tabs-icon-wrapper">
+        ${Icons.tabs}
+        <span class="fb-tabs-count-badge">${this.state.tabs.length}</span>
+      </span>
     `;
     tabsBtn.addEventListener('click', () => this.openModal('tab-switcher'));
-    bottomBar.appendChild(tabsBtn);
+    addressRow.appendChild(tabsBtn);
+    bottomBar.appendChild(addressRow);
+
+    const toolRow = document.createElement('div');
+    toolRow.className = 'fb-mobile-secondary-tools';
+
+    const bFwd = document.createElement('button');
+    bFwd.className = 'fb-mobile-nav-btn';
+    bFwd.type = 'button';
+    bFwd.title = 'Forward';
+    bFwd.setAttribute('aria-label', 'Forward');
+    bFwd.innerHTML = Icons.arrowRight;
+    bFwd.disabled = !activeTab.canGoForward;
+    bFwd.addEventListener('click', () => {
+      this.goForward();
+      this.render();
+    });
+    toolRow.appendChild(bFwd);
+
+    const bShare = document.createElement('button');
+    bShare.className = 'fb-mobile-nav-btn';
+    bShare.type = 'button';
+    bShare.title = 'Share';
+    bShare.setAttribute('aria-label', 'Share current page');
+    bShare.innerHTML = Icons.share;
+    bShare.addEventListener('click', () => this.shareCurrentPage());
+    toolRow.appendChild(bShare);
+
+    const bBook = document.createElement('button');
+    bBook.className = `fb-mobile-nav-btn ${this.state.isBookmarked ? 'active' : ''}`;
+    bBook.type = 'button';
+    bBook.title = this.state.isBookmarked ? 'Remove bookmark' : 'Bookmark';
+    bBook.setAttribute('aria-label', this.state.isBookmarked ? 'Remove bookmark' : 'Bookmark current page');
+    bBook.innerHTML = this.state.isBookmarked ? Icons.starFilled : Icons.star;
+    bBook.addEventListener('click', () => this.toggleBookmarkCurrentTab());
+    toolRow.appendChild(bBook);
 
     const bMenu = document.createElement('button');
     bMenu.className = 'fb-mobile-nav-btn';
+    bMenu.type = 'button';
+    bMenu.title = 'More tools';
+    bMenu.setAttribute('aria-label', 'More tools');
     bMenu.innerHTML = Icons.moreVertical;
     bMenu.addEventListener('click', () => {
       this.state.isSideDrawerOpen = !this.state.isSideDrawerOpen;
       this.render();
     });
-    bottomBar.appendChild(bMenu);
+    toolRow.appendChild(bMenu);
 
+    bottomBar.appendChild(toolRow);
     root.appendChild(bottomBar);
   }
 
@@ -796,7 +880,7 @@ export class BrowserShell {
    * ----------------------------------------------------------- */
   renderNewTabPage(viewport, activeTab) {
     const newTabPage = document.createElement('div');
-    newTabPage.className = 'fb-newtab-page';
+    newTabPage.className = `fb-newtab-page ${this.state.isMobile ? 'fb-mobile-safari-start-page' : ''}`;
 
     // Requirement 5 & 7: Developer Advertisement Badges (Sleek, Non-Overshadowing)
     const adLinks = DEVELOPER_AD_LINKS || this.state.sponsoredLinks || [];
@@ -806,6 +890,7 @@ export class BrowserShell {
       sponsoredSection.innerHTML = adLinks.map((item) => `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
           <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${item.domain || item.url}&sz=32'" alt="${item.title}" />
+          <span class="fb-dev-ad-label">${item.title}</span>
           <span class="fb-dev-ad-tooltip">${item.title}</span>
         </a>
       `).join('');
@@ -826,7 +911,7 @@ export class BrowserShell {
 
     const logoOrb = document.createElement('div');
     logoOrb.className = 'fb-newtab-logo';
-    logoOrb.innerHTML = Icons.logoOrb;
+    logoOrb.innerHTML = Icons.officialOrb;
     hero.appendChild(logoOrb);
 
     const title = document.createElement('h1');
@@ -853,6 +938,11 @@ export class BrowserShell {
       <input type="text" placeholder="${activeTab.isPrivate ? 'Search securely in Incognito' : `Search with ${engineCap} or type a URL`}" class="fb-newtab-input fb-newtab-search-input" autofocus />
     `;
     newTabPage.appendChild(searchForm);
+    this.bindSearchSuggestions(searchForm.querySelector('.fb-newtab-search-input'));
+
+    if (this.state.isMobile && !activeTab.isPrivate) {
+      this.renderMobileSafariExtensionCard(newTabPage);
+    }
 
     if (!activeTab.isPrivate) {
       // Requirement 6: Frequently Used Sites with Authentic SVG Logos
@@ -860,7 +950,7 @@ export class BrowserShell {
       frequentSection.style.width = '100%';
       frequentSection.style.maxWidth = '680px';
       frequentSection.innerHTML = `
-        <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">Frequently Used Sites</h3>
+        <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">${this.state.isMobile ? 'Favorites' : 'Frequently Used Sites'}</h3>
       `;
 
       const frequentGrid = document.createElement('div');
@@ -895,7 +985,7 @@ export class BrowserShell {
         const recentHist = document.createElement('div');
         recentHist.className = 'fb-newtab-history';
         recentHist.innerHTML = `
-          <h3 class="fb-newtab-section-title">Recent History</h3>
+          <h3 class="fb-newtab-section-title">${this.state.isMobile ? 'Suggestions' : 'Recent History'}</h3>
           <div class="fb-history-quicklist">
             ${this.state.historyItems.slice(0, 5).map((h) => `
               <div class="fb-history-quick-item" data-url="${h.url}">
@@ -916,12 +1006,95 @@ export class BrowserShell {
       }
     }
 
+    if (this.state.isMobile && !activeTab.isPrivate) {
+      this.renderMobileSafariStartSections(newTabPage);
+    }
+
     viewport.appendChild(newTabPage);
 
     // Auto-focus the search bar
     setTimeout(() => {
       newTabPage.querySelector('.fb-newtab-input')?.focus();
     }, 50);
+  }
+
+  renderMobileSafariExtensionCard(container) {
+    const card = document.createElement('section');
+    card.className = 'fb-mobile-safari-extension-card';
+    card.innerHTML = `
+      <div class="fb-mobile-safari-extension-art" aria-hidden="true">
+        <span>${Icons.shield}</span><span>${Icons.lock}</span><span>${Icons.starFilled}</span>
+      </div>
+      <h2>Extensions</h2>
+      <p>Supercharge your Yayra browsing with extensions that can find discounts, block ads, and more.</p>
+      <button type="button" class="fb-btn fb-btn-primary fb-mobile-safari-extension-btn">Browse Extensions</button>
+    `;
+    card.querySelector('button')?.addEventListener('click', () => this.openInternalPage('yayra://extensions'));
+    container.appendChild(card);
+  }
+
+  renderMobileSafariStartSections(container) {
+    const privacy = document.createElement('section');
+    privacy.className = 'fb-mobile-safari-section fb-mobile-safari-privacy-card';
+    privacy.innerHTML = `
+      <h2>${Icons.shield} Privacy Report</h2>
+      <div class="fb-mobile-safari-report-body">
+        <span class="fb-mobile-safari-report-icon">${Icons.shield}</span>
+        <p>Yayra's tracker and ad shield is active for your browsing session.</p>
+      </div>
+    `;
+    container.appendChild(privacy);
+
+    const reading = document.createElement('section');
+    reading.className = 'fb-mobile-safari-section fb-mobile-safari-reading-list';
+    reading.innerHTML = '<h2>Reading List</h2>';
+    const readingItems = this.state.historyItems.slice(0, 3);
+    if (readingItems.length) {
+      readingItems.forEach((item) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fb-mobile-safari-list-row';
+        row.innerHTML = `<span class="fb-mobile-safari-list-icon">${Icons.bookmark}</span><span class="fb-mobile-safari-list-copy"><strong></strong><small></small></span>`;
+        row.querySelector('strong').textContent = item.title || item.url;
+        row.querySelector('small').textContent = item.url;
+        row.addEventListener('click', () => this.navigateActiveTab(item.url));
+        reading.appendChild(row);
+      });
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'fb-mobile-safari-empty';
+      empty.textContent = 'Save pages here to read them later.';
+      reading.appendChild(empty);
+    }
+    container.appendChild(reading);
+
+    const recently = document.createElement('section');
+    recently.className = 'fb-mobile-safari-section fb-mobile-safari-recently-closed';
+    recently.innerHTML = '<div class="fb-mobile-safari-section-heading"><h2>Recently Closed Tabs</h2><button type="button" class="fb-mobile-safari-clear">Clear All</button></div>';
+    const closedTabs = this.state.closedTabsHistory.slice(0, 4);
+    if (closedTabs.length) {
+      closedTabs.forEach((tab) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'fb-mobile-safari-closed-row';
+        row.textContent = tab.title || tab.url;
+        row.addEventListener('click', () => {
+          this.restoreLastClosedTab();
+          this.render();
+        });
+        recently.appendChild(row);
+      });
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'fb-mobile-safari-empty';
+      empty.textContent = 'Closed tabs will appear here.';
+      recently.appendChild(empty);
+    }
+    recently.querySelector('.fb-mobile-safari-clear')?.addEventListener('click', () => {
+      this.state.closedTabsHistory = [];
+      this.render();
+    });
+    container.appendChild(recently);
   }
 
   /* -------------------------------------------------------------
@@ -1034,6 +1207,16 @@ export class BrowserShell {
                 <option value="dark" ${this.state.settings.theme === 'dark' ? 'selected' : ''}>Dark (Default)</option>
                 <option value="light" ${this.state.settings.theme === 'light' ? 'selected' : ''}>Light</option>
                 <option value="system" ${this.state.settings.theme === 'system' ? 'selected' : ''}>System</option>
+              </select>
+            </div>
+            <div class="fb-setting-row">
+              <label>Accent theme</label>
+              <select id="fb-in-set-color-theme" class="fb-select">
+                <option value="blue" ${(this.state.settings.colorTheme || 'blue') === 'blue' ? 'selected' : ''}>Blue (Default)</option>
+                <option value="purple" ${this.state.settings.colorTheme === 'purple' ? 'selected' : ''}>Violet</option>
+                <option value="green" ${this.state.settings.colorTheme === 'green' ? 'selected' : ''}>Emerald</option>
+                <option value="rose" ${this.state.settings.colorTheme === 'rose' ? 'selected' : ''}>Rose</option>
+                <option value="amber" ${this.state.settings.colorTheme === 'amber' ? 'selected' : ''}>Amber</option>
               </select>
             </div>
             <div class="fb-setting-row">
@@ -1185,16 +1368,25 @@ export class BrowserShell {
       const floatingDefault = page.querySelector('#fb-in-set-floating-default')?.checked;
       const mode = page.querySelector('#fb-in-set-floating-mode')?.value;
       const theme = page.querySelector('#fb-in-set-theme')?.value;
+      const colorTheme = page.querySelector('#fb-in-set-color-theme')?.value;
       const engine = page.querySelector('#fb-in-set-engine')?.value;
 
       this.state.settings.floatingEnabledByDefault = floatingDefault;
       this.state.settings.desktopFloatingMode = mode;
       this.state.desktopFloatingMode = mode;
       if (theme) this.state.settings.theme = theme;
+      if (colorTheme) this.state.settings.colorTheme = colorTheme;
       if (engine) this.state.settings.searchEngine = engine;
 
       if (this.settingsRepo) {
         await this.settingsRepo.updateSettings(this.state.settings);
+      }
+      if (typeof localStorage !== 'undefined') {
+        try {
+          localStorage.setItem('yayra:settings', JSON.stringify(this.state.settings));
+        } catch {
+          // Keep the browser usable when storage is unavailable or full.
+        }
       }
       alert('Settings saved successfully.');
       this.render();
@@ -1759,7 +1951,7 @@ export class BrowserShell {
     page.innerHTML = `
       <div class="fb-internal-container">
         <div class="fb-about-hero">
-          <div class="fb-about-logo">${Icons.logoOrb}</div>
+          <div class="fb-about-logo">${Icons.officialOrb}</div>
           <h1 class="fb-about-appname">yayra</h1>
           <span class="fb-about-version fb-about-version-badge">Version 0.1.0 (Stable 64-bit Release)</span>
           <p style="max-width:480px; color:var(--fb-text-secondary); font-size:0.9rem; margin:8px 0 16px;">
@@ -1973,7 +2165,7 @@ export class BrowserShell {
     dupWin.innerHTML = `
       <header class="fb-floating-popup-header">
         <div class="fb-floating-popup-brand">
-          <span style="width:20px; height:20px; display:inline-flex;">${Icons.logoOrb}</span>
+          <span style="width:20px; height:20px; display:inline-flex;">${Icons.officialOrb}</span>
           <span>yayra mini #${dupCount + 1}</span>
         </div>
         <div class="fb-floating-popup-actions">
@@ -2052,6 +2244,19 @@ export class BrowserShell {
     handle.addEventListener('pointercancel', stopDrag);
   }
 
+  toggleMiniDrawer(win) {
+    const body = win?.querySelector('.fb-floating-popup-body');
+    if (!body) return;
+    const current = body.querySelector('.fb-side-drawer-menu');
+    if (current) {
+      this.state.isSideDrawerOpen = false;
+      current.remove();
+      return;
+    }
+    this.state.isSideDrawerOpen = true;
+    this.renderSideDrawer(body);
+  }
+
   renderFloatingMiniWindow() {
     if (typeof document === 'undefined') return;
     const existing = document.getElementById('yayra-floating-popup-window');
@@ -2066,7 +2271,7 @@ export class BrowserShell {
     win.innerHTML = `
       <header class="fb-floating-popup-header">
         <div class="fb-floating-popup-brand">
-          <span style="width:20px; height:20px; display:inline-flex;">${Icons.logoOrb}</span>
+          <span style="width:20px; height:20px; display:inline-flex;">${Icons.officialOrb}</span>
           <span>yayra mini</span>
         </div>
         <div class="fb-floating-popup-actions">
@@ -2076,19 +2281,42 @@ export class BrowserShell {
           <button class="fb-floating-popup-btn fb-mini-close-btn" title="Close">${Icons.close}</button>
         </div>
       </header>
+      <div class="fb-mini-tabstrip fb-chrome-tabstrip" role="tablist" aria-label="Mini browser tabs">
+        <div class="fb-tabs-scroll-container">
+          ${this.state.tabs.map((tab) => `
+            <div class="fb-tab-item fb-mini-tab-item ${tab.id === this.state.activeTabId ? 'active' : ''}" role="tab" aria-selected="${tab.id === this.state.activeTabId ? 'true' : 'false'}" data-tab-id="${tab.id}">
+              <span class="fb-tab-favicon">${this.getTabFavicon(tab)}</span>
+              <span class="fb-tab-title">${tab.title || 'New Tab'}</span>
+              <button class="fb-tab-close-btn fb-mini-tab-close" data-tab-id="${tab.id}" title="Close tab" aria-label="Close tab">${Icons.close}</button>
+            </div>
+          `).join('')}
+          <button class="fb-btn-newtab fb-mini-newtab-btn" title="New Tab (Ctrl+T)" aria-label="Create new tab">${Icons.plus}</button>
+        </div>
+      </div>
+      <nav class="fb-mini-navbar fb-chrome-navbar" role="toolbar" aria-label="Mini navigation and address bar">
+        <div class="fb-nav-controls">
+          <button class="fb-nav-btn fb-mini-back-btn" title="Back" aria-label="Back" ${activeTab.canGoBack ? '' : 'disabled'}>${Icons.arrowLeft}</button>
+          <button class="fb-nav-btn fb-mini-fwd-btn" title="Forward" aria-label="Forward" ${activeTab.canGoForward ? '' : 'disabled'}>${Icons.arrowRight}</button>
+          <button class="fb-nav-btn fb-mini-reload-btn" title="Reload" aria-label="Reload">${Icons.refresh}</button>
+        </div>
+        <div class="fb-omnibox-container fb-mini-omnibox-container">
+          <div class="fb-toolbar-brand" title="Yayra">
+            <span class="fb-toolbar-brand-orb">${Icons.officialOrb}</span>
+            <span class="fb-toolbar-brand-text">${Icons.officialWordmark}<span class="fb-brand-text-fallback">yayra</span></span>
+          </div>
+          <button class="fb-omnibox-security fb-mini-security-btn" title="Site security" aria-label="Site security">${activeTab.isSecure ? Icons.lock : Icons.alertTriangle}</button>
+          <input type="text" class="fb-omnibox-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search with ${(this.state.settings.searchEngine || 'Google').replace(/^./, (letter) => letter.toUpperCase())} or enter address" aria-label="Mini address and search bar" />
+          <button class="fb-omnibox-star fb-mini-star-btn" title="Bookmark" aria-label="Bookmark">${this.state.isBookmarked ? Icons.starFilled : Icons.star}</button>
+        </div>
+        <div class="fb-toolbar-actions">
+          <button class="fb-action-btn fb-toolbar-action-btn fb-mini-download-btn" title="Downloads" aria-label="Downloads">${Icons.download}</button>
+          <button class="fb-action-btn fb-toolbar-action-btn fb-mini-extensions-btn" title="Extensions and Shields" aria-label="Extensions and Shields">${Icons.shield}</button>
+          <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span><span class="fb-mode-text">${this.state.desktopFloatingMode === 'browser-first' ? 'Browser' : 'Bubble'}</span></button>
+          <button class="fb-action-btn fb-menu-btn fb-toolbar-action-btn fb-mini-drawer-btn" title="Customize and control Yayra" aria-label="Main menu">${Icons.moreVertical}</button>
+        </div>
+      </nav>
       <div class="fb-floating-popup-body">
-        <!-- Mini Toolbar -->
-        <div style="display:flex; align-items:center; gap:6px; padding:6px 8px; background:rgba(0,0,0,0.35); border-bottom:1px solid rgba(255,255,255,0.08);">
-          <button class="fb-btn fb-btn-secondary fb-mini-back-btn" style="padding:4px;" title="Back">${Icons.arrowLeft}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-fwd-btn" style="padding:4px;" title="Forward">${Icons.arrowRight}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-reload-btn" style="padding:4px;" title="Reload">${Icons.refresh}</button>
-          <input type="text" class="fb-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search with ${this.state.settings.searchEngine || 'Google'} or type URL" style="flex:1; height:30px; font-size:0.825rem;" />
-          <button class="fb-btn fb-btn-secondary fb-mini-star-btn" style="padding:4px;" title="Bookmark">${this.state.isBookmarked ? Icons.starFilled : Icons.star}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-drawer-btn" style="padding:4px;" title="Menu">${Icons.moreVertical}</button>
-        </div>
-        <!-- Mini Viewport -->
-        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow-y:auto; position:relative;">
-        </div>
+        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow-y:auto; position:relative;"></div>
       </div>
     `;
 
@@ -2117,27 +2345,67 @@ export class BrowserShell {
     // Toolbar Navigation
     win.querySelector('.fb-mini-back-btn')?.addEventListener('click', () => {
       this.goBack();
-      this.renderFloatingMiniWindow();
+      this.render();
     });
 
     win.querySelector('.fb-mini-fwd-btn')?.addEventListener('click', () => {
       this.goForward();
-      this.renderFloatingMiniWindow();
+      this.render();
     });
 
     win.querySelector('.fb-mini-reload-btn')?.addEventListener('click', () => {
-      this.reloadActiveTab();
-      this.renderFloatingMiniWindow();
+      this.reload();
     });
 
     win.querySelector('.fb-mini-star-btn')?.addEventListener('click', async () => {
       await this.toggleBookmarkCurrentTab();
-      this.renderFloatingMiniWindow();
+      this.render();
+    });
+
+    win.querySelector('.fb-mini-download-btn')?.addEventListener('click', () => {
+      this.openInternalPage('yayra://downloads');
+    });
+
+    win.querySelector('.fb-mini-extensions-btn')?.addEventListener('click', () => {
+      this.openInternalPage('yayra://extensions');
+    });
+
+    win.querySelector('.fb-mini-mode-btn')?.addEventListener('click', () => {
+      this.toggleDesktopMode();
+    });
+
+    win.querySelector('.fb-mini-security-btn')?.addEventListener('click', () => {
+      const existingDropdown = win.querySelector('.fb-security-dropdown');
+      if (existingDropdown) {
+        existingDropdown.remove();
+        this.state.isSecurityDropdownOpen = false;
+      } else {
+        this.state.isSecurityDropdownOpen = true;
+        this.renderSecurityDropdown(win);
+      }
+    });
+
+    win.querySelectorAll('.fb-mini-tab-item').forEach((tabEl) => {
+      tabEl.addEventListener('click', (event) => {
+        if (event.target.closest('.fb-mini-tab-close')) return;
+        this.selectTab(tabEl.dataset.tabId);
+      });
+    });
+
+    win.querySelectorAll('.fb-mini-tab-close').forEach((closeBtn) => {
+      closeBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeTab(closeBtn.dataset.tabId);
+      });
+    });
+
+    win.querySelector('.fb-mini-newtab-btn')?.addEventListener('click', () => {
+      this.createNewTab();
     });
 
     win.querySelector('.fb-mini-drawer-btn')?.addEventListener('click', () => {
-      this.state.isSideDrawerOpen = !this.state.isSideDrawerOpen;
-      this.render();
+      this.toggleMiniDrawer(win);
     });
 
     const omni = win.querySelector('.fb-mini-omnibox');
@@ -2148,6 +2416,7 @@ export class BrowserShell {
         this.renderFloatingMiniWindow();
       }
     });
+    this.bindSearchSuggestions(omni);
 
     // Render In-Mini Viewport Content (Full features of Yayra)
     const miniViewport = win.querySelector('.fb-mini-viewport');
@@ -2502,7 +2771,7 @@ export class BrowserShell {
             ${Icons.help} <span>Help</span> <span class="fb-submenu-arrow">${Icons.chevronRight}</span>
           </button>
           <div class="fb-drawer-submenu">
-            <button class="fb-drawer-item fb-dr-about">${Icons.logoOrb} <span>About yayra</span></button>
+            <button class="fb-drawer-item fb-dr-about">${Icons.officialOrb} <span>About yayra</span></button>
             <button class="fb-drawer-item fb-dr-whatsnew">${Icons.whatNew} <span>What's New</span></button>
             <button class="fb-drawer-item fb-dr-help-center">${Icons.help} <span>Help center</span></button>
             <button class="fb-drawer-item fb-dr-report-issue">${Icons.report} <span>Report an issue...</span> <kbd>Alt+Shift+I</kbd></button>
@@ -2532,8 +2801,10 @@ export class BrowserShell {
 
     // Submenu click toggling for mobile / touch
     drawer.querySelectorAll('.fb-drawer-item-has-submenu').forEach((parent) => {
-      parent.addEventListener('click', (e) => {
-        if (e.target.closest('.fb-drawer-submenu button')) return;
+      const button = parent.querySelector('.fb-drawer-item');
+      button?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
         parent.classList.toggle('open');
       });
     });
@@ -2563,9 +2834,27 @@ export class BrowserShell {
       this.reopenLastClosedTab();
     });
 
-    drawer.querySelector('.fb-dr-tabsearch')?.addEventListener('click', () => {
+    drawer.querySelectorAll('.fb-dr-tabsearch').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.state.isSideDrawerOpen = false;
+        this.openModal('tab-switcher');
+      });
+    });
+
+    drawer.querySelector('.fb-dr-tg-new')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.createNewTab();
+    });
+
+    drawer.querySelector('.fb-dr-tg-add')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
       this.openModal('tab-switcher');
+    });
+
+    drawer.querySelector('.fb-dr-tg-ungroup')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      alert('The active tab has been removed from its tab group.');
+      this.render();
     });
 
     drawer.querySelector('.fb-dr-downloads')?.addEventListener('click', () => {
@@ -2816,7 +3105,7 @@ export class BrowserShell {
     if (!this.state.activeModal) return;
 
     const backdrop = document.createElement('div');
-    backdrop.className = 'fb-modal-backdrop';
+    backdrop.className = `fb-modal-backdrop ${this.state.activeModal === 'search-overlay' ? 'fb-search-backdrop' : ''}`;
     backdrop.addEventListener('click', (e) => {
       if (e.target === backdrop) this.closeModal();
     });
@@ -3313,16 +3602,163 @@ export class BrowserShell {
     });
   }
 
+  getLocalSearchSuggestions(query) {
+    const normalized = String(query || '').trim().toLowerCase();
+    if (!normalized) return [];
+    const remembered = [
+      ...(this.state.historyItems || []).map((item) => item.title || item.url),
+      ...(this.state.bookmarksItems || []).map((item) => item.title || item.url),
+      ...(this.state.tabs || []).map((tab) => tab.title || tab.url)
+    ];
+    const common = [
+      `${query} news`,
+      `${query} near me`,
+      `${query} today`,
+      `${query} website`
+    ];
+    return [...new Set([...remembered, ...common].filter((item) => String(item).toLowerCase().includes(normalized)))].slice(0, 8);
+  }
+
+  async getGoogleSearchSuggestions(query) {
+    const local = this.getLocalSearchSuggestions(query);
+    if (typeof fetch !== 'function') return local;
+    try {
+      this.searchSuggestionController?.abort();
+      this.searchSuggestionController = typeof AbortController === 'function' ? new AbortController() : null;
+      const response = await fetch(`https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=${encodeURIComponent(query)}`, {
+        headers: { accept: 'application/json' },
+        mode: 'cors',
+        signal: this.searchSuggestionController?.signal
+      });
+      if (!response.ok) return local;
+      const payload = await response.json();
+      const remote = Array.isArray(payload?.[1]) ? payload[1].filter((item) => typeof item === 'string') : [];
+      return [...new Set([...remote, ...local])].slice(0, 8);
+    } catch {
+      return local;
+    }
+  }
+
+  bindSearchSuggestions(input, options = {}) {
+    if (!input || input.dataset.searchSuggestionsBound === 'true') return;
+    input.dataset.searchSuggestionsBound = 'true';
+
+    const host = input.closest('.fb-omnibox-container')
+      || input.closest('.fb-newtab-searchbox')
+      || input.closest('#fb-mobile-search-form')
+      || input.parentElement;
+    if (!host) return;
+    host.classList.add('fb-search-suggestions-host');
+
+    const list = document.createElement('div');
+    list.className = `fb-search-suggestions ${options.mobile ? 'fb-search-suggestions-mobile' : ''}`;
+    list.setAttribute('role', 'listbox');
+    list.hidden = true;
+    host.appendChild(list);
+
+    let activeIndex = -1;
+    let requestId = 0;
+    const hide = () => {
+      list.hidden = true;
+      activeIndex = -1;
+      input.removeAttribute('aria-activedescendant');
+    };
+    const choose = (value) => {
+      input.value = value;
+      input.dataset.selectedSuggestion = value;
+      this.state.urlInputValue = value;
+      hide();
+      if (options.mobile) this.closeModal();
+      this.navigateActiveTab(value);
+    };
+    const updateActive = () => {
+      const items = [...list.querySelectorAll('[role="option"]')];
+      items.forEach((item, index) => item.classList.toggle('active', index === activeIndex));
+      if (activeIndex >= 0 && items[activeIndex]) {
+        input.setAttribute('aria-activedescendant', items[activeIndex].id);
+        input.dataset.selectedSuggestion = items[activeIndex].dataset.value;
+      } else {
+        input.removeAttribute('aria-activedescendant');
+        input.dataset.selectedSuggestion = '';
+      }
+    };
+    const render = async () => {
+      const query = input.value.trim();
+      input.dataset.selectedSuggestion = '';
+      if (!query) {
+        hide();
+        return;
+      }
+      const currentRequest = ++requestId;
+      const suggestions = await this.getGoogleSearchSuggestions(query);
+      if (currentRequest !== requestId || input.value.trim() !== query) return;
+      list.innerHTML = '';
+      suggestions.forEach((suggestion, index) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'fb-search-suggestion';
+        item.id = `fb-search-suggestion-${Date.now()}-${index}`;
+        item.dataset.value = suggestion;
+        item.setAttribute('role', 'option');
+        item.innerHTML = `<span class="fb-search-suggestion-icon">${Icons.search}</span><span class="fb-search-suggestion-text"></span><span class="fb-search-suggestion-use">${Icons.arrowRight}</span>`;
+        item.querySelector('.fb-search-suggestion-text').textContent = suggestion;
+        item.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          choose(suggestion);
+        });
+        list.appendChild(item);
+      });
+      list.hidden = suggestions.length === 0;
+      activeIndex = -1;
+    };
+
+    input.addEventListener('input', render);
+    input.addEventListener('focus', () => {
+      if (input.value.trim()) render();
+    });
+    input.addEventListener('keydown', (event) => {
+      const items = list.querySelectorAll('[role="option"]');
+      if (event.key === 'ArrowDown' && items.length) {
+        event.preventDefault();
+        activeIndex = (activeIndex + 1) % items.length;
+        updateActive();
+      } else if (event.key === 'ArrowUp' && items.length) {
+        event.preventDefault();
+        activeIndex = activeIndex <= 0 ? items.length - 1 : activeIndex - 1;
+        updateActive();
+      } else if (event.key === 'Escape') {
+        hide();
+      } else if (event.key === 'Enter' && activeIndex >= 0 && items[activeIndex]) {
+        event.preventDefault();
+        event.stopPropagation();
+        choose(items[activeIndex].dataset.value);
+      }
+    });
+    input.addEventListener('blur', () => setTimeout(hide, 160));
+
+    if (typeof window !== 'undefined' && window.visualViewport && typeof window.visualViewport.addEventListener === 'function' && options.mobile) {
+      const updateViewportHeight = () => {
+        const height = `${window.visualViewport.height}px`;
+        host.style.setProperty('--fb-search-visible-height', height);
+        input.closest('.fb-mobile-search-overlay')?.style.setProperty('--fb-search-visible-height', height);
+        input.closest('.fb-search-backdrop')?.style.setProperty('--fb-search-visible-height', height);
+      };
+      updateViewportHeight();
+      window.visualViewport.addEventListener('resize', updateViewportHeight);
+      window.visualViewport.addEventListener('scroll', updateViewportHeight);
+    }
+  }
+
   renderMobileSearchOverlay(modal) {
     modal.className = 'fb-modal-card fb-mobile-search-overlay';
     modal.innerHTML = `
       <div class="fb-modal-header">
-        <h2 class="fb-modal-title">${Icons.search} Search or enter address</h2>
+        <h2 class="fb-modal-title">${Icons.google} Google Suggestions</h2>
         <button class="fb-modal-close-btn">${Icons.close}</button>
       </div>
       <div class="fb-modal-body">
         <form id="fb-mobile-search-form" style="display:flex; gap:8px;">
-          <input type="text" id="fb-mobile-search-input" value="${this.state.urlInputValue || ''}" placeholder="Search or type URL" class="fb-input" style="flex:1;" />
+          <input type="text" id="fb-mobile-search-input" value="${this.state.urlInputValue && !this.state.urlInputValue.startsWith('yayra://') ? this.state.urlInputValue : ''}" placeholder="Search with Google or enter website address" class="fb-input" style="flex:1;" autocomplete="off" spellcheck="false" />
           <button type="submit" class="fb-btn fb-btn-primary">Go</button>
         </form>
       </div>
@@ -3331,7 +3767,8 @@ export class BrowserShell {
     modal.querySelector('.fb-modal-close-btn')?.addEventListener('click', () => this.closeModal());
     modal.querySelector('#fb-mobile-search-form')?.addEventListener('submit', (e) => {
       e.preventDefault();
-      const val = modal.querySelector('#fb-mobile-search-input')?.value;
+      const searchInput = modal.querySelector('#fb-mobile-search-input');
+      const val = searchInput?.dataset.selectedSuggestion || searchInput?.value;
       if (val) {
         this.closeModal();
         this.navigateActiveTab(val);
@@ -3339,6 +3776,7 @@ export class BrowserShell {
     });
 
     const input = modal.querySelector('#fb-mobile-search-input');
+    this.bindSearchSuggestions(input, { mobile: true });
     setTimeout(() => {
       input?.focus();
       input?.select();
@@ -3431,7 +3869,7 @@ export class BrowserShell {
     bubble.innerHTML = `
       ${hasLoadingTab ? '<div class="yayra-bubble-loading-ring"></div>' : ''}
       <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; pointer-events:none;">
-        ${Icons.logoOrb}
+        ${Icons.officialOrb}
       </div>
       <span class="yayra-circle-badge" style="position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; padding:0 4px; font-size:10px; border-radius:9px; background:var(--fb-accent-primary); color:#ffffff; font-weight:700; display:flex; align-items:center; justify-content:center;">
         ${this.state.tabs.length}
@@ -3449,7 +3887,7 @@ export class BrowserShell {
     overlay.innerHTML = `
       <div class="yayra-floating-bubble yayra-floating-orb" role="button" aria-label="Restore Yayra Browser" tabindex="0">
         <div style="width:36px; height:36px; display:flex; align-items:center; justify-content:center;">
-          ${Icons.logoOrb}
+          ${Icons.officialOrb}
         </div>
         <span class="yayra-bubble-badge">${this.state.tabs.length}</span>
       </div>
@@ -3487,6 +3925,11 @@ export class BrowserShell {
   toggleDesktopMode() {
     const nextMode = this.state.desktopFloatingMode === 'circle-first' ? 'browser-first' : 'circle-first';
     this.state.desktopFloatingMode = nextMode;
+    this.state.settings.desktopFloatingMode = nextMode;
+    // Make the mode switch observable: circle-first docks the full shell into
+    // the persistent bubble, while browser-first restores the full browser.
+    this.state.isMinimizedToBubble = nextMode === 'circle-first';
+    if (nextMode === 'circle-first') this.state.isFloatingMiniOpen = false;
     if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
       this.settingsRepo.updateSettings({ desktopFloatingMode: nextMode });
     }
@@ -3586,6 +4029,23 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * NAVIGATION & OMNIBOX INTERPRETATION
    * ----------------------------------------------------------- */
+  ensureNavigationState(tab) {
+    if (!tab) return null;
+    const initialUrl = tab.url || 'yayra://newtab';
+    const current = tab.navigationState;
+    if (!current || !Array.isArray(current.historyStack) || current.historyStack.length === 0) {
+      tab.navigationState = {
+        historyStack: [initialUrl],
+        currentIndex: 0,
+        canGoBack: false,
+        canGoForward: false
+      };
+    }
+    tab.canGoBack = tab.navigationState.currentIndex > 0;
+    tab.canGoForward = tab.navigationState.currentIndex < tab.navigationState.historyStack.length - 1;
+    return tab.navigationState;
+  }
+
   navigateActiveTab(rawInput) {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
@@ -3594,10 +4054,20 @@ export class BrowserShell {
     if (!query) return;
 
     const targetUrl = this.interpretUrl(query);
+    const navigationState = this.ensureNavigationState(activeTab);
+    const currentUrl = navigationState.historyStack[navigationState.currentIndex];
+    if (currentUrl !== targetUrl) {
+      navigationState.historyStack = navigationState.historyStack.slice(0, navigationState.currentIndex + 1);
+      navigationState.historyStack.push(targetUrl);
+      navigationState.currentIndex = navigationState.historyStack.length - 1;
+    }
     activeTab.url = targetUrl;
     activeTab.title = this.getTabTitle(activeTab);
     activeTab.isSecure = targetUrl.startsWith('https://') || targetUrl.startsWith('yayra://');
-    activeTab.canGoBack = true;
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !targetUrl.startsWith('yayra://');
 
     this.state.urlInputValue = this.getDisplayUrl(targetUrl);
@@ -3667,20 +4137,46 @@ export class BrowserShell {
 
   goBack() {
     const activeTab = this.getActiveTab();
-    if (activeTab && activeTab.canGoBack) {
-      if (this.navigationController && typeof this.navigationController.goBack === 'function') {
-        this.navigationController.goBack();
-      }
+    if (!activeTab) return false;
+    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
+      this.navigationController.goBack();
+      return true;
     }
+    const navigationState = this.ensureNavigationState(activeTab);
+    if (navigationState.currentIndex <= 0) return false;
+    navigationState.currentIndex -= 1;
+    activeTab.url = navigationState.historyStack[navigationState.currentIndex];
+    activeTab.title = this.getTabTitle(activeTab);
+    activeTab.isSecure = activeTab.url.startsWith('https://') || activeTab.url.startsWith('yayra://');
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
+    activeTab.isLoading = !activeTab.url.startsWith('yayra://');
+    this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    return true;
   }
 
   goForward() {
     const activeTab = this.getActiveTab();
-    if (activeTab && activeTab.canGoForward) {
-      if (this.navigationController && typeof this.navigationController.goForward === 'function') {
-        this.navigationController.goForward();
-      }
+    if (!activeTab) return false;
+    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
+      this.navigationController.goForward();
+      return true;
     }
+    const navigationState = this.ensureNavigationState(activeTab);
+    if (navigationState.currentIndex >= navigationState.historyStack.length - 1) return false;
+    navigationState.currentIndex += 1;
+    activeTab.url = navigationState.historyStack[navigationState.currentIndex];
+    activeTab.title = this.getTabTitle(activeTab);
+    activeTab.isSecure = activeTab.url.startsWith('https://') || activeTab.url.startsWith('yayra://');
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
+    activeTab.isLoading = !activeTab.url.startsWith('yayra://');
+    this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    return true;
   }
 
   reload() {
@@ -3690,6 +4186,7 @@ export class BrowserShell {
       this.render();
       setTimeout(() => {
         this.updateTabLoading(activeTab.id, false);
+        this.render();
       }, 300);
     }
   }
@@ -3934,7 +4431,7 @@ export class BrowserShell {
     if (url.startsWith('yayra://extensions')) return Icons.shield;
     if (url.startsWith('yayra://permissions')) return Icons.lock;
     if (url.startsWith('yayra://about')) return Icons.logoOrb;
-    if (url.startsWith('yayra://newtab') || !url) return tab.isPrivate ? Icons.incognito : Icons.logoOrb;
+    if (url.startsWith('yayra://newtab') || !url) return tab.isPrivate ? Icons.incognito : Icons.officialOrb;
     return Icons.globe;
   }
 

@@ -13,6 +13,7 @@ export const DEFAULT_USER_SETTINGS = Object.freeze({
   closeToTray: true,
   startWithWindows: false,
   theme: 'dark',
+  colorTheme: 'blue',
   searchEngine: 'google',
   startUrl: 'yayra://newtab',
   defaultZoom: 1.0,

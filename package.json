@@ -1,7 +1,7 @@
 {
   "name": "yayra",
   "productName": "yayra",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "Yayra cross-platform floating browser for Android, Windows, and Linux.",
   "type": "module",
   "main": "electron/main.cjs",
@@ -23,14 +23,14 @@
     "verify:updates": "node --test tests/update-service.test.mjs tests/admin-updates.test.mjs",
     "package:linux:dir": "electron-builder --linux dir --publish never",
     "package:linux:deb": "node scripts/package-linux-deb.mjs",
-    "package:linux": "electron-builder --linux deb AppImage --publish never",
+    "package:linux": "electron-builder --linux AppImage --publish never && node scripts/package-linux-deb.mjs",
     "package:win": "electron-builder --win nsis portable --publish never",
     "package:windows": "node scripts/package-windows.mjs",
     "package:android": "node scripts/package-android.mjs",
     "package:all": "npm run package:android && npm run package:windows && npm run package:linux:deb",
     "build:desktop:linux": "npm run build:web && npm run package:linux",
     "build:desktop:win": "npm run build:web && npm run package:win",
-    "build:android": "node scripts/ensure-capacitor-platform.mjs android && npx cap sync android && cd android && ./gradlew assembleRelease",
+    "build:android": "node scripts/ensure-capacitor-platform.mjs android && npx cap sync android && node scripts/configure-android-signing.mjs && cd android && ./gradlew assembleRelease",
     "build:ios": "node scripts/ensure-capacitor-platform.mjs ios && npx cap sync ios && xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS -archivePath build/yayra.xcarchive archive && xcodebuild -exportArchive -archivePath build/yayra.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist",
     "smoke:desktop": "node scripts/smoke-desktop.mjs",
     "ci:gates": "npm run typecheck && npm run lint && npm test && npm run build:web && npm run verify:pwa && npm run verify:packaging && npm run verify:updates && npm run verify:branding && npm run smoke:desktop",
@@ -49,6 +49,7 @@
     "@capacitor/cli": "6.2.2",
     "@capacitor/ios": "6.2.2",
     "electron-builder": "26.15.3",
+    "electron": "31.7.7",
     "typescript": "5.6.3"
   },
   "build": {
@@ -57,6 +58,9 @@
     "executableName": "yayra",
     "artifactName": "${productName}-${os}-${arch}-${version}.${ext}",
     "asar": true,
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -103,7 +107,7 @@
       ],
       "category": "Network",
       "executableName": "yayra",
-      "icon": "build/icons/hicolor",
+      "icon": "build/icons/hicolor/512x512/apps/yayra.png",
       "syncDesktopName": true
     },
     "deb": {
@@ -115,9 +119,9 @@
     },
     "electronVersion": "31.7.7"
   },
-  "optionalDependencies": {
-    "electron": "31.7.7"
+  "author": {
+    "name": "g2code33",
+    "email": "support@yayra.app"
   },
-  "author": "g2code33",
   "desktopName": "yayra"
 }
