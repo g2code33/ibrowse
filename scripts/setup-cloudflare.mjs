@@ -8,7 +8,13 @@ if (!apiToken) {
   process.exit(1);
 }
 
-const accountId = process.env.CLOUDFLARE_ACCOUNT_ID || await discoverAccountId();
+const configuredAccountId = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+if (configuredAccountId && !/^[a-f0-9]{32}$/i.test(configuredAccountId)) {
+  console.warn('Ignoring the placeholder/invalid CLOUDFLARE_ACCOUNT_ID and discovering the account from Cloudflare.');
+}
+const accountId = /^[a-f0-9]{32}$/i.test(configuredAccountId)
+  ? configuredAccountId
+  : await discoverAccountId();
 if (!accountId) process.exit(1);
 process.env.CLOUDFLARE_ACCOUNT_ID = accountId;
 process.env.CLOUDFLARE_PROJECT_NAME = projectName;
