@@ -270,8 +270,16 @@ test('Requirement 2, 4, 6: Floating Mini-Browser Window opens standalone, is mov
   const miniWin = document.getElementById('yayra-floating-popup-window');
   assert.ok(miniWin, 'Floating mini window popup should be mounted');
   assert.ok(miniWin.querySelector('.fb-open-full-btn'), 'Open Full Browser button must exist');
+  assert.ok(miniWin.querySelector('.fb-mini-tabstrip'), 'Mini must use the shared tab-strip header');
   assert.ok(miniWin.querySelector('.fb-mini-omnibox'), 'Mini omnibox must exist');
+  assert.ok(miniWin.querySelector('.fb-mini-download-btn'), 'Mini downloads button must exist');
+  assert.ok(miniWin.querySelector('.fb-mini-extensions-btn'), 'Mini extensions button must exist');
+  assert.ok(miniWin.querySelector('.fb-mini-drawer-btn'), 'Mini menu button must exist');
   assert.ok(miniWin.querySelector('.fb-mini-duplicate-btn'), 'Duplicate button must exist');
+
+  // The mini menu must open inside the mini window, not behind the main browser.
+  miniWin.querySelector('.fb-mini-drawer-btn').click();
+  assert.ok(miniWin.querySelector('.fb-side-drawer-menu'), 'Mini menu should open inside the mini window');
 
   // Test duplicate floating mini window
   shell.duplicateFloatingMini();
@@ -281,6 +289,30 @@ test('Requirement 2, 4, 6: Floating Mini-Browser Window opens standalone, is mov
   // Close mini window (single tap toggle minimize)
   shell.closeFloatingMini();
   assert.equal(shell.state.isFloatingMiniOpen, false);
+});
+
+test('Browser navigation controls: back, forward, and reload work without a native controller', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, isMobile: false, initialUrl: 'yayra://newtab' });
+  await shell.initialize();
+  shell.render(container);
+
+  shell.navigateActiveTab('https://example.com/one');
+  shell.navigateActiveTab('https://example.com/two');
+  assert.equal(shell.getActiveTab().canGoBack, true);
+
+  container.querySelector('.fb-nav-back').click();
+  assert.equal(shell.getActiveTab().url, 'https://example.com/one');
+  assert.equal(shell.getActiveTab().canGoForward, true);
+
+  container.querySelector('.fb-nav-forward').click();
+  assert.equal(shell.getActiveTab().url, 'https://example.com/two');
+
+  shell.getActiveTab().isLoading = false;
+  shell.render(container);
+  const reloadButton = container.querySelector('.fb-nav-reload');
+  reloadButton.click();
+  assert.equal(shell.getActiveTab().isLoading, true);
 });
 
 test('Requirement 3 & 13: Omnibox Security Lock opens Search Engine Selector with Google Default', async () => {
@@ -383,6 +415,7 @@ test('Requirement 5 & 7: New Tab Developer Ad Badges Showcase above Logo without
   const sponsored = container.querySelector('.fb-dev-ad-showcase');
   assert.ok(sponsored, 'Developer ad badges showcase must render above logo');
   assert.ok(container.querySelectorAll('.fb-dev-ad-card').length >= 4, 'Developer ad badges should be present');
+  assert.ok(container.querySelectorAll('.fb-dev-ad-label').length >= 4, 'Developer ad links should show as a horizontal labelled row');
 });
 
 test('Requirement 11: Downloads page includes Visit File Location button and List vs Card View Toggle', async () => {

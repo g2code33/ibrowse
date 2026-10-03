@@ -2321,27 +2321,116 @@ body {
   position: relative;
 }
 
-/* Developer Advertisement Links Badge Showcase (Sleek & Non-Overshadowing) */
-.fb-dev-ad-showcase {
+/* The mini browser uses the same tab strip and omnibox language as the main browser. */
+.fb-mini-tabstrip {
+  flex: 0 0 36px;
+  height: 36px;
+  padding: 0 8px;
+  align-items: flex-end;
+}
+
+.fb-mini-tabstrip .fb-tabs-scroll-container {
+  max-width: 100%;
+  width: 100%;
+}
+
+.fb-mini-tabstrip .fb-tab-item {
+  height: 30px;
+  min-width: 150px;
+  max-width: 280px;
+  padding: 0 10px;
+  font-size: 0.78rem;
+}
+
+.fb-mini-tabstrip .fb-btn-newtab {
+  margin-bottom: 1px;
+}
+
+.fb-mini-navbar {
+  flex: 0 0 46px;
+  height: 46px;
+  min-width: 0;
+  padding: 0 8px;
+  gap: 6px;
+}
+
+.fb-mini-navbar .fb-nav-controls,
+.fb-mini-navbar .fb-toolbar-actions {
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.fb-mini-navbar .fb-nav-btn,
+.fb-mini-navbar .fb-action-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.fb-mini-navbar .fb-omnibox-container {
+  min-width: 0;
+  height: 32px;
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.fb-mini-navbar .fb-toolbar-brand {
+  gap: 4px;
+  padding: 2px 4px;
+  margin-right: 0;
+}
+
+.fb-mini-navbar .fb-toolbar-brand-text {
+  display: none;
+}
+
+.fb-mini-navbar .fb-mode-pill {
+  width: 28px;
+  height: 28px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+}
+
+.fb-mini-navbar .fb-omnibox-input {
+  min-width: 0;
+  font-size: 0.8rem;
+}
+
+/* Developer Advertisement Links Badge Showcase (Sleek & Non-Overshadowing) */
+.fb-dev-ad-showcase {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
   margin: 0 auto 16px auto;
-  padding: 6px 16px;
+  padding: 6px 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 30px;
   backdrop-filter: blur(12px);
+  scrollbar-width: none;
+}
+
+.fb-dev-ad-showcase::-webkit-scrollbar {
+  display: none;
 }
 
 .fb-dev-ad-card {
-  display: flex;
+  display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 32px;
+  gap: 6px;
+  min-width: max-content;
   height: 32px;
-  border-radius: 50%;
+  padding: 0 10px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
   cursor: pointer;
@@ -2351,7 +2440,7 @@ body {
 }
 
 .fb-dev-ad-card:hover {
-  transform: scale(1.18);
+  transform: translateY(-1px);
   background: rgba(255, 255, 255, 0.18);
   border-color: rgba(6, 182, 212, 0.6);
   box-shadow: 0 4px 16px rgba(6, 182, 212, 0.35);
@@ -2360,8 +2449,20 @@ body {
 .fb-dev-ad-icon {
   width: 18px;
   height: 18px;
+  flex: 0 0 18px;
   border-radius: 50%;
   object-fit: contain;
+}
+
+.fb-dev-ad-label {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--fb-text-secondary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fb-dev-ad-tooltip {

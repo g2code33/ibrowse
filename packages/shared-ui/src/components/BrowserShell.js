@@ -156,6 +156,8 @@ export class BrowserShell {
       updatePromptShown: false
     };
 
+    this.state.tabs.forEach((tab) => this.ensureNavigationState(tab));
+
     // DOM Elements
     this.rootElement = null;
     this.tabStripElement = null;
@@ -488,7 +490,10 @@ export class BrowserShell {
     backBtn.setAttribute('aria-label', 'Back');
     backBtn.disabled = !activeTab.canGoBack;
     backBtn.innerHTML = Icons.arrowLeft;
-    backBtn.addEventListener('click', () => this.goBack());
+    backBtn.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
     navControls.appendChild(backBtn);
 
     const fwdBtn = document.createElement('button');
@@ -497,7 +502,10 @@ export class BrowserShell {
     fwdBtn.setAttribute('aria-label', 'Forward');
     fwdBtn.disabled = !activeTab.canGoForward;
     fwdBtn.innerHTML = Icons.arrowRight;
-    fwdBtn.addEventListener('click', () => this.goForward());
+    fwdBtn.addEventListener('click', () => {
+      this.goForward();
+      this.render();
+    });
     navControls.appendChild(fwdBtn);
 
     const reloadBtn = document.createElement('button');
@@ -689,14 +697,20 @@ export class BrowserShell {
     bBack.className = 'fb-mobile-nav-btn';
     bBack.innerHTML = Icons.arrowLeft;
     bBack.disabled = !activeTab.canGoBack;
-    bBack.addEventListener('click', () => this.goBack());
+    bBack.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
     bottomBar.appendChild(bBack);
 
     const bFwd = document.createElement('button');
     bFwd.className = 'fb-mobile-nav-btn';
     bFwd.innerHTML = Icons.arrowRight;
     bFwd.disabled = !activeTab.canGoForward;
-    bFwd.addEventListener('click', () => this.goForward());
+    bFwd.addEventListener('click', () => {
+      this.goForward();
+      this.render();
+    });
     bottomBar.appendChild(bFwd);
 
     const bShare = document.createElement('button');
@@ -806,6 +820,7 @@ export class BrowserShell {
       sponsoredSection.innerHTML = adLinks.map((item) => `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
           <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${item.domain || item.url}&sz=32'" alt="${item.title}" />
+          <span class="fb-dev-ad-label">${item.title}</span>
           <span class="fb-dev-ad-tooltip">${item.title}</span>
         </a>
       `).join('');
@@ -2052,6 +2067,19 @@ export class BrowserShell {
     handle.addEventListener('pointercancel', stopDrag);
   }
 
+  toggleMiniDrawer(win) {
+    const body = win?.querySelector('.fb-floating-popup-body');
+    if (!body) return;
+    const current = body.querySelector('.fb-side-drawer-menu');
+    if (current) {
+      this.state.isSideDrawerOpen = false;
+      current.remove();
+      return;
+    }
+    this.state.isSideDrawerOpen = true;
+    this.renderSideDrawer(body);
+  }
+
   renderFloatingMiniWindow() {
     if (typeof document === 'undefined') return;
     const existing = document.getElementById('yayra-floating-popup-window');
@@ -2076,19 +2104,42 @@ export class BrowserShell {
           <button class="fb-floating-popup-btn fb-mini-close-btn" title="Close">${Icons.close}</button>
         </div>
       </header>
+      <div class="fb-mini-tabstrip fb-chrome-tabstrip" role="tablist" aria-label="Mini browser tabs">
+        <div class="fb-tabs-scroll-container">
+          ${this.state.tabs.map((tab) => `
+            <div class="fb-tab-item fb-mini-tab-item ${tab.id === this.state.activeTabId ? 'active' : ''}" role="tab" aria-selected="${tab.id === this.state.activeTabId ? 'true' : 'false'}" data-tab-id="${tab.id}">
+              <span class="fb-tab-favicon">${this.getTabFavicon(tab)}</span>
+              <span class="fb-tab-title">${tab.title || 'New Tab'}</span>
+              <button class="fb-tab-close-btn fb-mini-tab-close" data-tab-id="${tab.id}" title="Close tab" aria-label="Close tab">${Icons.close}</button>
+            </div>
+          `).join('')}
+          <button class="fb-btn-newtab fb-mini-newtab-btn" title="New Tab (Ctrl+T)" aria-label="Create new tab">${Icons.plus}</button>
+        </div>
+      </div>
+      <nav class="fb-mini-navbar fb-chrome-navbar" role="toolbar" aria-label="Mini navigation and address bar">
+        <div class="fb-nav-controls">
+          <button class="fb-nav-btn fb-mini-back-btn" title="Back" aria-label="Back" ${activeTab.canGoBack ? '' : 'disabled'}>${Icons.arrowLeft}</button>
+          <button class="fb-nav-btn fb-mini-fwd-btn" title="Forward" aria-label="Forward" ${activeTab.canGoForward ? '' : 'disabled'}>${Icons.arrowRight}</button>
+          <button class="fb-nav-btn fb-mini-reload-btn" title="Reload" aria-label="Reload">${Icons.refresh}</button>
+        </div>
+        <div class="fb-omnibox-container fb-mini-omnibox-container">
+          <div class="fb-toolbar-brand" title="Yayra">
+            <span class="fb-toolbar-brand-orb">${Icons.logoOrb}</span>
+            <span class="fb-toolbar-brand-text">yayra</span>
+          </div>
+          <button class="fb-omnibox-security fb-mini-security-btn" title="Site security" aria-label="Site security">${activeTab.isSecure ? Icons.lock : Icons.alertTriangle}</button>
+          <input type="text" class="fb-omnibox-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search with ${(this.state.settings.searchEngine || 'Google').replace(/^./, (letter) => letter.toUpperCase())} or enter address" aria-label="Mini address and search bar" />
+          <button class="fb-omnibox-star fb-mini-star-btn" title="Bookmark" aria-label="Bookmark">${this.state.isBookmarked ? Icons.starFilled : Icons.star}</button>
+        </div>
+        <div class="fb-toolbar-actions">
+          <button class="fb-action-btn fb-toolbar-action-btn fb-mini-download-btn" title="Downloads" aria-label="Downloads">${Icons.download}</button>
+          <button class="fb-action-btn fb-toolbar-action-btn fb-mini-extensions-btn" title="Extensions and Shields" aria-label="Extensions and Shields">${Icons.shield}</button>
+          <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span></button>
+          <button class="fb-action-btn fb-menu-btn fb-toolbar-action-btn fb-mini-drawer-btn" title="Customize and control Yayra" aria-label="Main menu">${Icons.moreVertical}</button>
+        </div>
+      </nav>
       <div class="fb-floating-popup-body">
-        <!-- Mini Toolbar -->
-        <div style="display:flex; align-items:center; gap:6px; padding:6px 8px; background:rgba(0,0,0,0.35); border-bottom:1px solid rgba(255,255,255,0.08);">
-          <button class="fb-btn fb-btn-secondary fb-mini-back-btn" style="padding:4px;" title="Back">${Icons.arrowLeft}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-fwd-btn" style="padding:4px;" title="Forward">${Icons.arrowRight}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-reload-btn" style="padding:4px;" title="Reload">${Icons.refresh}</button>
-          <input type="text" class="fb-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search with ${this.state.settings.searchEngine || 'Google'} or type URL" style="flex:1; height:30px; font-size:0.825rem;" />
-          <button class="fb-btn fb-btn-secondary fb-mini-star-btn" style="padding:4px;" title="Bookmark">${this.state.isBookmarked ? Icons.starFilled : Icons.star}</button>
-          <button class="fb-btn fb-btn-secondary fb-mini-drawer-btn" style="padding:4px;" title="Menu">${Icons.moreVertical}</button>
-        </div>
-        <!-- Mini Viewport -->
-        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow-y:auto; position:relative;">
-        </div>
+        <div class="fb-mini-viewport" style="flex:1; display:flex; flex-direction:column; overflow-y:auto; position:relative;"></div>
       </div>
     `;
 
@@ -2117,27 +2168,67 @@ export class BrowserShell {
     // Toolbar Navigation
     win.querySelector('.fb-mini-back-btn')?.addEventListener('click', () => {
       this.goBack();
-      this.renderFloatingMiniWindow();
+      this.render();
     });
 
     win.querySelector('.fb-mini-fwd-btn')?.addEventListener('click', () => {
       this.goForward();
-      this.renderFloatingMiniWindow();
+      this.render();
     });
 
     win.querySelector('.fb-mini-reload-btn')?.addEventListener('click', () => {
-      this.reloadActiveTab();
-      this.renderFloatingMiniWindow();
+      this.reload();
     });
 
     win.querySelector('.fb-mini-star-btn')?.addEventListener('click', async () => {
       await this.toggleBookmarkCurrentTab();
-      this.renderFloatingMiniWindow();
+      this.render();
+    });
+
+    win.querySelector('.fb-mini-download-btn')?.addEventListener('click', () => {
+      this.openInternalPage('yayra://downloads');
+    });
+
+    win.querySelector('.fb-mini-extensions-btn')?.addEventListener('click', () => {
+      this.openInternalPage('yayra://extensions');
+    });
+
+    win.querySelector('.fb-mini-mode-btn')?.addEventListener('click', () => {
+      this.toggleDesktopMode();
+    });
+
+    win.querySelector('.fb-mini-security-btn')?.addEventListener('click', () => {
+      const existingDropdown = win.querySelector('.fb-security-dropdown');
+      if (existingDropdown) {
+        existingDropdown.remove();
+        this.state.isSecurityDropdownOpen = false;
+      } else {
+        this.state.isSecurityDropdownOpen = true;
+        this.renderSecurityDropdown(win);
+      }
+    });
+
+    win.querySelectorAll('.fb-mini-tab-item').forEach((tabEl) => {
+      tabEl.addEventListener('click', (event) => {
+        if (event.target.closest('.fb-mini-tab-close')) return;
+        this.selectTab(tabEl.dataset.tabId);
+      });
+    });
+
+    win.querySelectorAll('.fb-mini-tab-close').forEach((closeBtn) => {
+      closeBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeTab(closeBtn.dataset.tabId);
+      });
+    });
+
+    win.querySelector('.fb-mini-newtab-btn')?.addEventListener('click', () => {
+      this.createNewTab();
     });
 
     win.querySelector('.fb-mini-drawer-btn')?.addEventListener('click', () => {
-      this.state.isSideDrawerOpen = !this.state.isSideDrawerOpen;
-      this.render();
+      this.toggleMiniDrawer(win);
     });
 
     const omni = win.querySelector('.fb-mini-omnibox');
@@ -3586,6 +3677,23 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * NAVIGATION & OMNIBOX INTERPRETATION
    * ----------------------------------------------------------- */
+  ensureNavigationState(tab) {
+    if (!tab) return null;
+    const initialUrl = tab.url || 'yayra://newtab';
+    const current = tab.navigationState;
+    if (!current || !Array.isArray(current.historyStack) || current.historyStack.length === 0) {
+      tab.navigationState = {
+        historyStack: [initialUrl],
+        currentIndex: 0,
+        canGoBack: false,
+        canGoForward: false
+      };
+    }
+    tab.canGoBack = tab.navigationState.currentIndex > 0;
+    tab.canGoForward = tab.navigationState.currentIndex < tab.navigationState.historyStack.length - 1;
+    return tab.navigationState;
+  }
+
   navigateActiveTab(rawInput) {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
@@ -3594,10 +3702,20 @@ export class BrowserShell {
     if (!query) return;
 
     const targetUrl = this.interpretUrl(query);
+    const navigationState = this.ensureNavigationState(activeTab);
+    const currentUrl = navigationState.historyStack[navigationState.currentIndex];
+    if (currentUrl !== targetUrl) {
+      navigationState.historyStack = navigationState.historyStack.slice(0, navigationState.currentIndex + 1);
+      navigationState.historyStack.push(targetUrl);
+      navigationState.currentIndex = navigationState.historyStack.length - 1;
+    }
     activeTab.url = targetUrl;
     activeTab.title = this.getTabTitle(activeTab);
     activeTab.isSecure = targetUrl.startsWith('https://') || targetUrl.startsWith('yayra://');
-    activeTab.canGoBack = true;
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !targetUrl.startsWith('yayra://');
 
     this.state.urlInputValue = this.getDisplayUrl(targetUrl);
@@ -3667,20 +3785,46 @@ export class BrowserShell {
 
   goBack() {
     const activeTab = this.getActiveTab();
-    if (activeTab && activeTab.canGoBack) {
-      if (this.navigationController && typeof this.navigationController.goBack === 'function') {
-        this.navigationController.goBack();
-      }
+    if (!activeTab) return false;
+    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
+      this.navigationController.goBack();
+      return true;
     }
+    const navigationState = this.ensureNavigationState(activeTab);
+    if (navigationState.currentIndex <= 0) return false;
+    navigationState.currentIndex -= 1;
+    activeTab.url = navigationState.historyStack[navigationState.currentIndex];
+    activeTab.title = this.getTabTitle(activeTab);
+    activeTab.isSecure = activeTab.url.startsWith('https://') || activeTab.url.startsWith('yayra://');
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
+    activeTab.isLoading = !activeTab.url.startsWith('yayra://');
+    this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    return true;
   }
 
   goForward() {
     const activeTab = this.getActiveTab();
-    if (activeTab && activeTab.canGoForward) {
-      if (this.navigationController && typeof this.navigationController.goForward === 'function') {
-        this.navigationController.goForward();
-      }
+    if (!activeTab) return false;
+    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
+      this.navigationController.goForward();
+      return true;
     }
+    const navigationState = this.ensureNavigationState(activeTab);
+    if (navigationState.currentIndex >= navigationState.historyStack.length - 1) return false;
+    navigationState.currentIndex += 1;
+    activeTab.url = navigationState.historyStack[navigationState.currentIndex];
+    activeTab.title = this.getTabTitle(activeTab);
+    activeTab.isSecure = activeTab.url.startsWith('https://') || activeTab.url.startsWith('yayra://');
+    activeTab.canGoBack = navigationState.currentIndex > 0;
+    activeTab.canGoForward = navigationState.currentIndex < navigationState.historyStack.length - 1;
+    navigationState.canGoBack = activeTab.canGoBack;
+    navigationState.canGoForward = activeTab.canGoForward;
+    activeTab.isLoading = !activeTab.url.startsWith('yayra://');
+    this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    return true;
   }
 
   reload() {
@@ -3690,6 +3834,7 @@ export class BrowserShell {
       this.render();
       setTimeout(() => {
         this.updateTabLoading(activeTab.id, false);
+        this.render();
       }, 300);
     }
   }
