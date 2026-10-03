@@ -204,6 +204,46 @@ test('Mobile Safari-Style Layout: Top address pill, full viewport, bottom toolba
   assert.equal(shell.state.activeModal, null);
 });
 
+test('Mobile Refresh and Navigation: pull affordance, refresh button, and immediate back/forward history', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, isMobile: true, initialUrl: 'yayra://newtab' });
+  await shell.initialize();
+  shell.render(container);
+
+  shell.navigateActiveTab('https://example.com/one');
+  shell.navigateActiveTab('https://example.com/two');
+  assert.equal(shell.getActiveTab().url, 'https://example.com/two');
+
+  assert.equal(shell.goBack(), true);
+  assert.equal(shell.getActiveTab().url, 'https://example.com/one');
+  assert.equal(shell.getActiveTab().canGoForward, true);
+  assert.equal(shell.goForward(), true);
+  assert.equal(shell.getActiveTab().url, 'https://example.com/two');
+
+  shell.render(container);
+  assert.ok(container.querySelector('.fb-mobile-refresh-btn'), 'Mobile toolbar must have a refresh button');
+  assert.ok(container.querySelector('.fb-mobile-pull-indicator'), 'Mobile viewport must have pull-to-refresh affordance');
+
+  const controllerCalls = [];
+  const controlledShell = new BrowserShell({
+    container: document.createElement('div'),
+    navigationController: {
+      navigate: (url) => controllerCalls.push(['navigate', url]),
+      goBack: () => controllerCalls.push(['back']),
+      goForward: () => controllerCalls.push(['forward'])
+    }
+  });
+  await controlledShell.initialize();
+  controlledShell.navigateActiveTab('https://example.com/one');
+  controlledShell.navigateActiveTab('https://example.com/two');
+  assert.equal(controlledShell.goBack(), true);
+  assert.equal(controlledShell.getActiveTab().url, 'https://example.com/one');
+  assert.deepEqual(controllerCalls.at(-1), ['back']);
+  assert.equal(controlledShell.goForward(), true);
+  assert.equal(controlledShell.getActiveTab().url, 'https://example.com/two');
+  assert.deepEqual(controllerCalls.at(-1), ['forward']);
+});
+
 test('Bookmarks Toggle: Star updates bookmark status and persists to bookmarks repository', async () => {
   const bookmarks = [];
   const mockBookmarksRepo = {

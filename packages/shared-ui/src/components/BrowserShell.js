@@ -663,6 +663,67 @@ export class BrowserShell {
     this.viewportElement = viewport;
   }
 
+  attachMobilePullToRefresh(viewport) {
+    if (!viewport || typeof viewport.addEventListener !== 'function') return;
+
+    const indicator = document.createElement('div');
+    indicator.className = 'fb-mobile-pull-indicator';
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.innerHTML = `<span class="fb-mobile-pull-icon">${Icons.refresh}</span><span class="fb-mobile-pull-label">Pull to refresh</span>`;
+    viewport.appendChild(indicator);
+
+    let startY = null;
+    let distance = 0;
+    let tracking = false;
+    const reset = () => {
+      startY = null;
+      distance = 0;
+      tracking = false;
+      indicator.classList.remove('pulling', 'ready', 'refreshing');
+      indicator.style.setProperty('--fb-pull-distance', '0px');
+      const label = indicator.querySelector('.fb-mobile-pull-label');
+      if (label) label.textContent = 'Pull to refresh';
+    };
+
+    viewport.addEventListener('touchstart', (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      const scrollable = event.target?.closest?.('.fb-newtab-page, .fb-internal-page, .fb-mobile-viewport') || viewport;
+      if ((scrollable.scrollTop || 0) > 0) return;
+      startY = touch.clientY;
+      tracking = true;
+    }, { passive: true });
+
+    viewport.addEventListener('touchmove', (event) => {
+      if (!tracking || startY === null) return;
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      distance = Math.max(0, Math.min(112, touch.clientY - startY));
+      if (distance <= 0) return;
+      indicator.style.setProperty('--fb-pull-distance', `${distance}px`);
+      indicator.classList.add('pulling');
+      const ready = distance >= 72;
+      indicator.classList.toggle('ready', ready);
+      const label = indicator.querySelector('.fb-mobile-pull-label');
+      if (label) label.textContent = ready ? 'Release to refresh' : 'Pull to refresh';
+      if (event.cancelable && distance > 8) event.preventDefault();
+    }, { passive: false });
+
+    viewport.addEventListener('touchend', () => {
+      if (!tracking) return;
+      if (distance >= 72) {
+        indicator.classList.add('refreshing');
+        const label = indicator.querySelector('.fb-mobile-pull-label');
+        if (label) label.textContent = 'Refreshing…';
+        this.reload();
+        return;
+      }
+      reset();
+    }, { passive: true });
+
+    viewport.addEventListener('touchcancel', reset, { passive: true });
+  }
+
   /* -------------------------------------------------------------
    * MOBILE LAYOUT (SAFARI-STYLE BOTTOM BAR) (PHASE 2B)
    * ----------------------------------------------------------- */
@@ -700,6 +761,7 @@ export class BrowserShell {
     const viewport = document.createElement('main');
     viewport.className = 'fb-browser-viewport fb-mobile-viewport';
     this.renderViewportContent(viewport, activeTab);
+    this.attachMobilePullToRefresh(viewport);
     root.appendChild(viewport);
     this.viewportElement = viewport;
 
@@ -781,6 +843,18 @@ export class BrowserShell {
       this.render();
     });
     toolRow.appendChild(bFwd);
+
+    const bRefresh = document.createElement('button');
+    bRefresh.className = 'fb-mobile-nav-btn fb-mobile-refresh-btn';
+    bRefresh.type = 'button';
+    bRefresh.title = activeTab.isLoading ? 'Stop loading' : 'Refresh page';
+    bRefresh.setAttribute('aria-label', activeTab.isLoading ? 'Stop loading' : 'Refresh page');
+    bRefresh.innerHTML = activeTab.isLoading ? Icons.stop : Icons.refresh;
+    bRefresh.addEventListener('click', () => {
+      if (activeTab.isLoading) this.stopLoading();
+      else this.reload();
+    });
+    toolRow.appendChild(bRefresh);
 
     const bShare = document.createElement('button');
     bShare.className = 'fb-mobile-nav-btn';
@@ -4168,9 +4242,11 @@ export class BrowserShell {
   goBack() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return false;
+    // Notify a native engine when one is attached, but always advance the
+    // shell's own immediate history as well. Returning early here used to
+    // leave the UI on the start page after a native back/forward request.
     if (this.navigationController && typeof this.navigationController.goBack === 'function') {
       this.navigationController.goBack();
-      return true;
     }
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex <= 0) return false;
@@ -4192,7 +4268,6 @@ export class BrowserShell {
     if (!activeTab) return false;
     if (this.navigationController && typeof this.navigationController.goForward === 'function') {
       this.navigationController.goForward();
-      return true;
     }
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex >= navigationState.historyStack.length - 1) return false;

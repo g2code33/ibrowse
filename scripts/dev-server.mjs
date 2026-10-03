@@ -117,7 +117,7 @@ function serveBrowserApp(res) {
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#172554">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" type="image/jpeg" href="/assets/brand/mainlogo.JPG">
+  <link rel="icon" type="image/jpeg" href="/assets/brand/mainlogo1.jpg">
   <link rel="icon" sizes="32x32" href="/public/favicon-32x32.png">
   <link rel="stylesheet" href="/packages/shared-ui/src/theme/design-system.css?dev=${devToken}">
   <link rel="stylesheet" href="/packages/shared-ui/src/glassmorphism.css?dev=${devToken}">

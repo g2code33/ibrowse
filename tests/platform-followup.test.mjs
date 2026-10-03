@@ -6,8 +6,12 @@ const read = (path) => readFile(path, 'utf8');
 
 test('official branding and universal suggestion placement use the uploaded assets', async () => {
   const icons = await read('packages/shared-ui/src/icons/icons.js');
+  const index = await read('public/index.html');
+  const manifest = await read('public/manifest.webmanifest');
   const css = await read('packages/shared-ui/src/theme/design-system.css');
-  assert.match(icons, /assets\/brand\/mainlogo\.JPG/);
+  assert.match(icons, /assets\/brand\/mainlogo1\.jpg/);
+  assert.match(index, /assets\/brand\/mainlogo1\.jpg/);
+  assert.match(manifest, /assets\/brand\/mainlogo1\.jpg/);
   assert.match(icons, /assets\/brand\/yayrawriing\.PNG/);
   assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 8px\)/);
   assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 10px\)/);
