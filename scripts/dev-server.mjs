@@ -84,16 +84,25 @@ const server = http.createServer((req, res) => {
   }
 
   fs.stat(filePath, (err, stats) => {
-    if (err || !stats.isFile()) {
+    if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
     }
 
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store, max-age=0' });
-    fs.createReadStream(filePath).pipe(res);
+    const requestedFile = stats.isDirectory() ? path.join(filePath, 'index.html') : filePath;
+    fs.stat(requestedFile, (fileErr, fileStats) => {
+      if (fileErr || !fileStats.isFile()) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+
+      const ext = path.extname(requestedFile).toLowerCase();
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store, max-age=0' });
+      fs.createReadStream(requestedFile).pipe(res);
+    });
   });
 });
 
