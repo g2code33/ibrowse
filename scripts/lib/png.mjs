@@ -97,8 +97,20 @@ export function decodePng(buffer) {
     inOffset += 1;
     const row = raw.subarray(inOffset, inOffset + stride);
     inOffset += stride;
-    if (filter !== 0) throw new Error(`unsupported PNG filter ${filter}`);
-    row.copy(out, y * stride);
+    const decoded = Buffer.alloc(stride);
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= 4 ? decoded[x - 4] : 0;
+      const up = y > 0 ? out[(y - 1) * stride + x] : 0;
+      const upperLeft = y > 0 && x >= 4 ? out[(y - 1) * stride + x - 4] : 0;
+      const value = row[x];
+      if (filter === 0) decoded[x] = value;
+      else if (filter === 1) decoded[x] = (value + left) & 0xff;
+      else if (filter === 2) decoded[x] = (value + up) & 0xff;
+      else if (filter === 3) decoded[x] = (value + Math.floor((left + up) / 2)) & 0xff;
+      else if (filter === 4) decoded[x] = (value + paeth(left, up, upperLeft)) & 0xff;
+      else throw new Error(`unsupported PNG filter ${filter}`);
+    }
+    decoded.copy(out, y * stride);
   }
   return { width, height, data: out };
 }
@@ -118,6 +130,16 @@ export function resizeNearest(image, size) {
 export function dimensions(buffer) {
   if (!buffer.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error('not a PNG');
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function paeth(left, up, upperLeft) {
+  const estimate = left + up - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+  if (upDistance <= upperLeftDistance) return up;
+  return upperLeft;
 }
 
 function chunk(type, data) {

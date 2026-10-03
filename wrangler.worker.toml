@@ -1,0 +1,7 @@
+# Standalone Cloudflare Worker for the update/API endpoint.
+# Pages remains the frontend deployment; this Worker runs on the account's
+# workers.dev subdomain so it does not require a separate DNS zone.
+name = "yayra-updates-api"
+main = "worker/update-worker.mjs"
+compatibility_date = "2026-10-03"
+workers_dev = true

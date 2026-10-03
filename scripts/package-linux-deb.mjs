@@ -1,114 +1,52 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFile, writeFile, mkdir, cp, chmod } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 const root = process.cwd();
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-const version = pkg.version;
-const arch = 'amd64';
-const debName = `yayra_${version}_${arch}.deb`;
-const stagingDir = path.join(root, '.deb-staging', `yayra_${version}_${arch}`);
 const releaseDir = path.join(root, 'release');
+const expectedName = `yayra_${pkg.version}_amd64.deb`;
+const expectedPath = path.join(releaseDir, expectedName);
+const localElectronBuilder = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder');
+const electronBuilder = existsSync(localElectronBuilder)
+  ? { command: localElectronBuilder, args: [] }
+  : { command: process.platform === 'win32' ? 'npx.cmd' : 'npx', args: ['--yes', 'electron-builder'] };
 
-console.log(`[Linux DEB Packager] Staging 64-bit Debian package layout for Yayra v${version} (${arch})...`);
-
-await mkdir(path.join(stagingDir, 'DEBIAN'), { recursive: true });
-await mkdir(path.join(stagingDir, 'usr/bin'), { recursive: true });
-await mkdir(path.join(stagingDir, 'usr/share/applications'), { recursive: true });
-await mkdir(path.join(stagingDir, 'usr/share/doc/yayra'), { recursive: true });
-await mkdir(path.join(stagingDir, 'opt/yayra'), { recursive: true });
 await mkdir(releaseDir, { recursive: true });
+console.log(`[Linux DEB Packager] Building the self-contained Electron Debian application for Yayra v${pkg.version}...`);
 
-// Copy control and maintainer scripts
-let controlContent = await readFile(path.join(root, 'packages/platform-packaging/linux/control'), 'utf8');
-controlContent = controlContent.replace(/^Version:.*/m, `Version: ${version}`);
-await writeFile(path.join(stagingDir, 'DEBIAN/control'), controlContent);
-
-const postinst = path.join(root, 'packages/platform-packaging/linux/postinst');
-const prerm = path.join(root, 'packages/platform-packaging/linux/prerm');
-const postrm = path.join(root, 'packages/platform-packaging/linux/postrm');
-
-if (existsSync(postinst)) {
-  await cp(postinst, path.join(stagingDir, 'DEBIAN/postinst'));
-  await chmod(path.join(stagingDir, 'DEBIAN/postinst'), 0o755);
+const result = spawnSync(electronBuilder.command, [...electronBuilder.args, '--linux', 'deb', '--publish', 'never'], {
+  cwd: root,
+  stdio: 'inherit',
+  env: process.env
+});
+if (result.error) {
+  console.error(`[Linux DEB Packager] Could not start electron-builder: ${result.error.message}`);
+  process.exit(1);
 }
-if (existsSync(prerm)) {
-  await cp(prerm, path.join(stagingDir, 'DEBIAN/prerm'));
-  await chmod(path.join(stagingDir, 'DEBIAN/prerm'), 0o755);
-}
-if (existsSync(postrm)) {
-  await cp(postrm, path.join(stagingDir, 'DEBIAN/postrm'));
-  await chmod(path.join(stagingDir, 'DEBIAN/postrm'), 0o755);
-}
+if (result.status !== 0) process.exit(result.status ?? 1);
 
-// Copy desktop file
-const desktopFilePath = path.join(root, 'build/linux/yayra.desktop');
-if (!existsSync(desktopFilePath)) {
-  await mkdir(path.dirname(desktopFilePath), { recursive: true });
-  await writeFile(desktopFilePath, `[Desktop Entry]
-Name=yayra
-Exec=yayra %U
-Terminal=false
-Type=Application
-Icon=yayra
-StartupWMClass=yayra
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/yayra;
-Comment=Lightweight cross-platform floating browser with glassmorphism overlay
-`);
-}
-await cp(desktopFilePath, path.join(stagingDir, 'usr/share/applications/yayra.desktop'));
-
-// Copy all 9 hicolor icon resolutions
-for (const size of [16, 24, 32, 48, 64, 96, 128, 256, 512]) {
-  const iconSrc = path.join(root, `build/icons/hicolor/${size}x${size}/apps/yayra.png`);
-  if (existsSync(iconSrc)) {
-    const iconDestDir = path.join(stagingDir, `usr/share/icons/hicolor/${size}x${size}/apps`);
-    await mkdir(iconDestDir, { recursive: true });
-    await cp(iconSrc, path.join(iconDestDir, 'yayra.png'));
-  }
+const debFiles = (await Promise.all((await readdir(releaseDir))
+  .filter((name) => name.endsWith('.deb'))
+  .map(async (name) => ({ name, info: await stat(path.join(releaseDir, name)) }))))
+  .sort((a, b) => b.info.mtimeMs - a.info.mtimeMs);
+const built = debFiles[0];
+if (!built) {
+  console.error('[Linux DEB Packager] electron-builder did not produce a .deb file.');
+  process.exit(1);
 }
 
-// Copy launcher shell script
-const launcher = `#!/bin/sh
-set -e
-APP_DIR="/opt/yayra"
-if [ -x "\${APP_DIR}/yayra" ]; then
-    exec "\${APP_DIR}/yayra" "$@"
-fi
-if command -v node >/dev/null 2>&1 && [ -f "\${APP_DIR}/server.mjs" ]; then
-    exec node "\${APP_DIR}/server.mjs" "$@"
-fi
-if command -v xdg-open >/dev/null 2>&1 && [ -f "\${APP_DIR}/index.html" ]; then
-    exec xdg-open "\${APP_DIR}/index.html"
-fi
-echo "Error: Yayra application runtime could not be launched." >&2
-exit 1
-`;
-await writeFile(path.join(stagingDir, 'usr/bin/yayra'), launcher);
-await chmod(path.join(stagingDir, 'usr/bin/yayra'), 0o755);
+const builtPath = path.join(releaseDir, built.name);
+if (built.name !== expectedName) await copyFile(builtPath, expectedPath);
 
-// Copy dist files into /opt/yayra
-if (existsSync(path.join(root, 'dist'))) {
-  await cp(path.join(root, 'dist'), path.join(stagingDir, 'opt/yayra'), { recursive: true });
+const contents = spawnSync('dpkg-deb', ['--contents', expectedPath], { encoding: 'utf8' });
+const hasElectronExecutable = /\/opt\/yayra\/yayra(?:\s|$)/.test(contents.stdout);
+const hasBundledApp = contents.stdout.includes('/opt/yayra/resources/app.asar');
+if (contents.status !== 0 || !hasElectronExecutable || !hasBundledApp) {
+  console.error('[Linux DEB Packager] Refusing to publish a web-only package; the Debian archive must contain the Electron executable and resources/app.asar.');
+  process.exit(1);
 }
 
-// Create doc files
-await writeFile(path.join(stagingDir, 'usr/share/doc/yayra/copyright'), `Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: yayra
-Source: https://github.com/g2code33/yayra
-
-Files: *
-Copyright: 2026 Yayra Project <support@yayra.app>
-License: Proprietary / Local-First
-`);
-
-// Build deb package using dpkg-deb if available
-const build = spawnSync('dpkg-deb', ['--root-owner-group', '--build', stagingDir, path.join(releaseDir, debName)], { encoding: 'utf8' });
-if (build.status === 0) {
-  console.log(`[Linux DEB Packager] Successfully built ${path.join('release', debName)}`);
-} else {
-  console.warn(`[Linux DEB Packager] dpkg-deb failed or was not found: ${build.stderr || build.stdout}`);
-}
+console.log(`[Linux DEB Packager] Successfully built self-contained ${path.join('release', expectedName)}`);

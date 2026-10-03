@@ -81,12 +81,12 @@ This document describes the production packaging architecture, build targets, de
 
 ### 4.2 Filesystem Layout
 ```
-/usr/bin/yayra                                    -> Application launcher shell script
+/usr/bin/yayra                                    -> Electron application launcher
 /usr/share/applications/yayra.desktop             -> Freedesktop .desktop entry
 /usr/share/icons/hicolor/<size>x<size>/apps/yayra.png -> Full icon theme (16px to 512px)
 /usr/share/doc/yayra/copyright                    -> Debian machine-readable copyright
 /usr/share/doc/yayra/changelog.gz                 -> Compressed release history
-/opt/yayra/                                       -> Core application binaries & web bundles
+/opt/yayra/                                       -> Electron runtime and resources/app.asar
 ```
 
 ### 4.3 Maintainer Lifecycle Scripts

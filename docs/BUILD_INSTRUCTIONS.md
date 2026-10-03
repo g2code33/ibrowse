@@ -82,14 +82,14 @@ npm run verify:packaging
    ./packages/platform-packaging/scripts/build-deb.sh
    # Output: release/yayra_0.1.0_amd64.deb
    ```
-3. Package the Linux release targets (static DEB plus Electron AppImage):
+3. Package the Linux release targets (self-contained Electron DEB plus AppImage):
    ```bash
    npm run package:linux
    # Output: release/yayra_0.1.0_amd64.deb, release/yayra-0.1.0.AppImage
    ```
-   The AppImage is produced by electron-builder. The DEB uses the repository's
-   deterministic `dpkg-deb` packager so Linux builds do not depend on the
-   external Ruby/FPM toolchain.
+   Both artifacts are produced by electron-builder. The DEB embeds the Electron
+   runtime and `resources/app.asar`, so installing it opens a standalone Yayra
+   application window rather than delegating to a system browser.
 
 ### C. Windows (64-bit EXE & MSI)
 1. Build the web bundle:

@@ -19,4 +19,10 @@ const deploy = spawnSync(npm, [
   '--branch', 'main',
   '--commit-dirty=true'
 ], { stdio: 'inherit', env: process.env });
-process.exit(deploy.status ?? 1);
+if (deploy.status !== 0) process.exit(deploy.status ?? 1);
+
+const worker = spawnSync(process.execPath, ['scripts/deploy-cloudflare-worker.mjs'], {
+  stdio: 'inherit',
+  env: process.env
+});
+process.exit(worker.status ?? 1);

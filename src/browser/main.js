@@ -12,7 +12,10 @@ const storage = globalThis.localStorage || new MemoryStorage();
 const service = new UpdateService({
   target,
   installedVersion,
-  manifestUrl: '/updates/manifest.json',
+  // Keep local/dev previews on the bundled fallback manifest. Production
+  // checks go through the standalone Cloudflare Worker so update metadata is
+  // served independently of the static Pages deployment.
+  manifestUrl: getUpdateManifestUrl(),
   deviceId: storage.getItem('yayra:device-id') || ensureDeviceId(storage),
   storage,
   config: DEFAULT_UPDATE_CONFIG,
@@ -47,6 +50,13 @@ if (root) {
 }
 
 registerPwaUpdateHandler(DEFAULT_UPDATE_CONFIG);
+
+function getUpdateManifestUrl() {
+  if (typeof location !== 'undefined' && location.hostname === 'yayra.pages.dev') {
+    return 'https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json';
+  }
+  return '/updates/manifest.json';
+}
 
 function detectTarget() {
   const ua = navigator.userAgent || '';

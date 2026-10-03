@@ -663,6 +663,67 @@ export class BrowserShell {
     this.viewportElement = viewport;
   }
 
+  attachMobilePullToRefresh(viewport) {
+    if (!viewport || typeof viewport.addEventListener !== 'function') return;
+
+    const indicator = document.createElement('div');
+    indicator.className = 'fb-mobile-pull-indicator';
+    indicator.setAttribute('aria-live', 'polite');
+    indicator.innerHTML = `<span class="fb-mobile-pull-icon">${Icons.refresh}</span><span class="fb-mobile-pull-label">Pull to refresh</span>`;
+    viewport.appendChild(indicator);
+
+    let startY = null;
+    let distance = 0;
+    let tracking = false;
+    const reset = () => {
+      startY = null;
+      distance = 0;
+      tracking = false;
+      indicator.classList.remove('pulling', 'ready', 'refreshing');
+      indicator.style.setProperty('--fb-pull-distance', '0px');
+      const label = indicator.querySelector('.fb-mobile-pull-label');
+      if (label) label.textContent = 'Pull to refresh';
+    };
+
+    viewport.addEventListener('touchstart', (event) => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      const scrollable = event.target?.closest?.('.fb-newtab-page, .fb-internal-page, .fb-mobile-viewport') || viewport;
+      if ((scrollable.scrollTop || 0) > 0) return;
+      startY = touch.clientY;
+      tracking = true;
+    }, { passive: true });
+
+    viewport.addEventListener('touchmove', (event) => {
+      if (!tracking || startY === null) return;
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      distance = Math.max(0, Math.min(112, touch.clientY - startY));
+      if (distance <= 0) return;
+      indicator.style.setProperty('--fb-pull-distance', `${distance}px`);
+      indicator.classList.add('pulling');
+      const ready = distance >= 72;
+      indicator.classList.toggle('ready', ready);
+      const label = indicator.querySelector('.fb-mobile-pull-label');
+      if (label) label.textContent = ready ? 'Release to refresh' : 'Pull to refresh';
+      if (event.cancelable && distance > 8) event.preventDefault();
+    }, { passive: false });
+
+    viewport.addEventListener('touchend', () => {
+      if (!tracking) return;
+      if (distance >= 72) {
+        indicator.classList.add('refreshing');
+        const label = indicator.querySelector('.fb-mobile-pull-label');
+        if (label) label.textContent = 'Refreshing…';
+        this.reload();
+        return;
+      }
+      reset();
+    }, { passive: true });
+
+    viewport.addEventListener('touchcancel', reset, { passive: true });
+  }
+
   /* -------------------------------------------------------------
    * MOBILE LAYOUT (SAFARI-STYLE BOTTOM BAR) (PHASE 2B)
    * ----------------------------------------------------------- */
@@ -700,6 +761,7 @@ export class BrowserShell {
     const viewport = document.createElement('main');
     viewport.className = 'fb-browser-viewport fb-mobile-viewport';
     this.renderViewportContent(viewport, activeTab);
+    this.attachMobilePullToRefresh(viewport);
     root.appendChild(viewport);
     this.viewportElement = viewport;
 
@@ -709,18 +771,17 @@ export class BrowserShell {
     const addressRow = document.createElement('div');
     addressRow.className = 'fb-mobile-address-row';
 
-    const bBack = document.createElement('button');
-    bBack.className = 'fb-mobile-nav-btn';
-    bBack.type = 'button';
-    bBack.title = 'Back';
-    bBack.setAttribute('aria-label', 'Back');
-    bBack.innerHTML = Icons.arrowLeft;
-    bBack.disabled = !activeTab.canGoBack;
-    bBack.addEventListener('click', () => {
-      this.goBack();
-      this.render();
+    const bRefresh = document.createElement('button');
+    bRefresh.className = 'fb-mobile-nav-btn fb-mobile-refresh-btn';
+    bRefresh.type = 'button';
+    bRefresh.title = activeTab.isLoading ? 'Stop loading' : 'Refresh page';
+    bRefresh.setAttribute('aria-label', activeTab.isLoading ? 'Stop loading' : 'Refresh page');
+    bRefresh.innerHTML = activeTab.isLoading ? Icons.stop : Icons.refresh;
+    bRefresh.addEventListener('click', () => {
+      if (activeTab.isLoading) this.stopLoading();
+      else this.reload();
     });
-    addressRow.appendChild(bBack);
+    addressRow.appendChild(bRefresh);
 
     const addressPill = document.createElement('div');
     addressPill.className = 'fb-mobile-address-pill';
@@ -768,6 +829,19 @@ export class BrowserShell {
 
     const toolRow = document.createElement('div');
     toolRow.className = 'fb-mobile-secondary-tools';
+
+    const bBack = document.createElement('button');
+    bBack.className = 'fb-mobile-nav-btn';
+    bBack.type = 'button';
+    bBack.title = 'Back';
+    bBack.setAttribute('aria-label', 'Back');
+    bBack.innerHTML = Icons.arrowLeft;
+    bBack.disabled = !activeTab.canGoBack;
+    bBack.addEventListener('click', () => {
+      this.goBack();
+      this.render();
+    });
+    toolRow.appendChild(bBack);
 
     const bFwd = document.createElement('button');
     bFwd.className = 'fb-mobile-nav-btn';
@@ -889,7 +963,7 @@ export class BrowserShell {
       sponsoredSection.className = 'fb-dev-ad-showcase fb-sponsored-showcase';
       sponsoredSection.innerHTML = adLinks.map((item) => `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
-          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${item.domain || item.url}&sz=32'" alt="${item.title}" />
+          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" alt="${item.title}" />
           <span class="fb-dev-ad-label">${item.title}</span>
           <span class="fb-dev-ad-tooltip">${item.title}</span>
         </a>
@@ -2548,7 +2622,7 @@ export class BrowserShell {
       }
 
       // 2. Query GitHub Releases API from public repo
-      const ghRes = await fetch('https://api.github.com/repos/g2code33/yayra/releases/latest', {
+      const ghRes = await fetch('https://yayra-updates-api.g2code335.workers.dev/api/latest-release', {
         headers: { Accept: 'application/vnd.github.v3+json' }
       }).catch(() => null);
 
@@ -3208,7 +3282,7 @@ export class BrowserShell {
                 return `
                 <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; background:rgba(255,255,255,0.04); border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
                   <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
-                    <img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:16px; height:16px; border-radius:50%;" alt="" />
+                    <img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:16px; height:16px; border-radius:50%;" alt="" />
                     <span style="font-size:0.825rem; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">${bm.title || bm.url}</span>
                   </div>
                   <button class="fb-btn fb-btn-primary fb-add-bm-to-wheel-btn" data-url="${bm.url}" data-title="${bm.title || bm.url}" style="padding:2px 8px; font-size:11px;">+ Add</button>
@@ -3264,7 +3338,7 @@ export class BrowserShell {
           id: `site-${Date.now()}`,
           title,
           url,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
+          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
           x,
           y,
           type: 'site'
@@ -3293,7 +3367,7 @@ export class BrowserShell {
           id: `custom-${Date.now()}`,
           title,
           url: fullUrl,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
+          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
           x,
           y,
           type: 'site'
@@ -3647,9 +3721,8 @@ export class BrowserShell {
     try {
       this.searchSuggestionController?.abort();
       this.searchSuggestionController = typeof AbortController === 'function' ? new AbortController() : null;
-      const response = await fetch(`https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=${encodeURIComponent(query)}`, {
+      const response = await fetch(`https://yayra-updates-api.g2code335.workers.dev/api/suggestions?q=${encodeURIComponent(query)}`, {
         headers: { accept: 'application/json' },
-        mode: 'cors',
         signal: this.searchSuggestionController?.signal
       });
       if (!response.ok) return local;
@@ -4168,10 +4241,9 @@ export class BrowserShell {
   goBack() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return false;
-    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
-      this.navigationController.goBack();
-      return true;
-    }
+    // Move the active tab's local history first. A native controller may
+    // update its own model synchronously, so delegating before this step can
+    // overwrite the shell state or jump straight back to the new-tab page.
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex <= 0) return false;
     navigationState.currentIndex -= 1;
@@ -4184,16 +4256,15 @@ export class BrowserShell {
     navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !activeTab.url.startsWith('yayra://');
     this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    if (this.navigationController && typeof this.navigationController.goBack === 'function') {
+      this.navigationController.goBack();
+    }
     return true;
   }
 
   goForward() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return false;
-    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
-      this.navigationController.goForward();
-      return true;
-    }
     const navigationState = this.ensureNavigationState(activeTab);
     if (navigationState.currentIndex >= navigationState.historyStack.length - 1) return false;
     navigationState.currentIndex += 1;
@@ -4206,6 +4277,9 @@ export class BrowserShell {
     navigationState.canGoForward = activeTab.canGoForward;
     activeTab.isLoading = !activeTab.url.startsWith('yayra://');
     this.state.urlInputValue = this.getDisplayUrl(activeTab.url);
+    if (this.navigationController && typeof this.navigationController.goForward === 'function') {
+      this.navigationController.goForward();
+    }
     return true;
   }
 

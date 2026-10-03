@@ -38,7 +38,7 @@ Follow this rigorous verification checklist before cutting and publishing any pr
 - [ ] Verify package architecture `amd64` and dependencies (`libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libc6`).
 - [ ] Verify desktop entry at `/usr/share/applications/yayra.desktop`.
 - [ ] Verify all 9 standard hicolor icon resolutions in `/usr/share/icons/hicolor/`.
-- [ ] Verify launcher script at `/usr/bin/yayra` with executable permissions (0755).
+- [ ] Verify the Electron launcher entrypoint at `/usr/bin/yayra` with executable permissions (0755) and confirm `/opt/yayra/resources/app.asar` is present.
 - [ ] Verify user configuration preservation in `~/.config/yayra` during upgrade/removal.
 
 ---

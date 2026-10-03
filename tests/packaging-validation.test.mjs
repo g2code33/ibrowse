@@ -128,7 +128,8 @@ test('Linux Packaging: Builds valid 64-bit .deb archive with complete filesystem
   const stdout = contents.stdout;
   assert.match(stdout, /\.\/usr\/bin\/yayra/);
   assert.match(stdout, /\.\/usr\/share\/applications\/yayra\.desktop/);
-  assert.match(stdout, /\.\/usr\/share\/doc\/yayra\/copyright/);
+  assert.match(stdout, /\.\/opt\/yayra\/yayra(?:\s|$)/, 'Debian package must contain the Electron executable');
+  assert.match(stdout, /\.\/opt\/yayra\/resources\/app\.asar/, 'Debian package must contain the Electron app, not only a web bundle');
 
   // Verify all 9 icon resolutions are present in the package
   for (const size of [16, 24, 32, 48, 64, 96, 128, 256, 512]) {
@@ -141,6 +142,16 @@ test('Linux Packaging: Builds valid 64-bit .deb archive with complete filesystem
   assert.match(info.stdout, /Package: yayra/);
   assert.match(info.stdout, new RegExp(`Version: ${pkg.version}`));
   assert.match(info.stdout, /Architecture: amd64/);
+});
+
+test('Packaging Scripts: Linux packaging is native Electron-only and never delegates to an external browser', async () => {
+  const linuxPackager = await readFile(path.join(root, 'scripts/package-linux-deb.mjs'), 'utf8');
+  const legacyLinuxEntry = await readFile(path.join(root, 'packages/platform-packaging/scripts/build-deb.sh'), 'utf8');
+  const externalBrowserOpener = ['xdg', 'open'].join('-');
+  assert.doesNotMatch(linuxPackager, new RegExp(externalBrowserOpener));
+  assert.doesNotMatch(legacyLinuxEntry, new RegExp(externalBrowserOpener));
+  assert.ok(linuxPackager.includes('hasElectronExecutable'));
+  assert.ok(linuxPackager.includes('/opt/yayra/resources/app.asar'));
 });
 
 test('Packaging Scripts: Automated packagers for Android, Windows, and Linux execute cleanly', async () => {

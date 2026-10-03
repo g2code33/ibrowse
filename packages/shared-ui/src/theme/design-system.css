@@ -975,6 +975,52 @@ html {
   cursor: pointer;
 }
 
+.fb-mobile-pull-indicator {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 999px;
+  color: var(--fb-text-secondary);
+  background: var(--fb-bg-surface-elevated);
+  box-shadow: var(--fb-shadow-surface);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -52px);
+  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease;
+}
+
+.fb-mobile-pull-indicator.pulling,
+.fb-mobile-pull-indicator.refreshing {
+  opacity: 1;
+  transform: translate(-50%, var(--fb-pull-distance, 0px));
+}
+
+.fb-mobile-pull-indicator.ready,
+.fb-mobile-pull-indicator.refreshing {
+  color: var(--fb-accent-primary);
+  border-color: var(--fb-border-glass-highlight);
+}
+
+.fb-mobile-pull-icon {
+  display: inline-flex;
+}
+
+.fb-mobile-pull-indicator.refreshing .fb-mobile-pull-icon {
+  animation: fb-spin 0.8s linear infinite;
+}
+
+@keyframes fb-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .fb-mobile-viewport {
   flex: 1;
 }

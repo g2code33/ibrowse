@@ -14,3 +14,34 @@ textarea { display: block; min-height: 6rem; width: min(100%, 42rem); }
 .sheet-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 #toast { margin-top: 1rem; min-height: 1.5rem; }
 @media (prefers-color-scheme: dark) { body { background: #020617; color: #e2e8f0; } section, .sheet-card, .mobile-update-sheet.preview, .update-menu { background: #0f172a; color: #e2e8f0; border-color: #334155; } }
+
+/* The shared browser shell owns the viewport. Override the legacy page
+   scaffold above so the production PWA does not render as a centered 960px
+   card with a large blank gutter on desktop. */
+#app {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 100vh;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  box-sizing: border-box;
+}
+
+#app .fb-browser-shell,
+#app .fb-browser-viewport {
+  max-width: none;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+#app .fb-browser-shell {
+  width: 100%;
+  min-width: 0;
+}
+
+#app .fb-browser-viewport {
+  padding: 0;
+}
