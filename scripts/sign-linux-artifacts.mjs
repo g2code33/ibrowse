@@ -17,53 +17,47 @@ const files = (await readdir(releaseDir))
   .sort();
 if (!files.length) throw new Error(`no .deb or .AppImage files found under ${releaseDir}`);
 
-const home = await mkdtemp(path.join(os.tmpdir(), 'yayra-gpg-'));
-const keyFile = path.join(home, 'signing-key');
+const tempDir = await mkdtemp(path.join(os.tmpdir(), 'yayra-openssl-'));
+const keyFile = path.join(tempDir, 'linux-signing-key.pem');
+const publicKeyFile = path.join(releaseDir, 'linux-signing-public-key.pem');
 try {
   await writeFile(keyFile, decodeSecret(signingKey), { mode: 0o600 });
-  run(['--batch', '--import', keyFile], home);
-  const keyId = run(['--batch', '--with-colons', '--list-secret-keys'], home)
-    .split('\n')
-    .map((line) => line.split(':'))
-    .find((fields) => fields[0] === 'sec')?.[4];
-  if (!keyId) throw new Error('LINUX_SIGNING_KEY did not contain a usable private GPG key');
+  const keyArgs = ['pkey', '-in', keyFile];
+  if (signingPassword) keyArgs.push('-passin', 'env:LINUX_SIGNING_KEY_PASSWORD');
+  run(keyArgs.concat(['-pubout', '-out', publicKeyFile]), { LINUX_SIGNING_KEY_PASSWORD: signingPassword });
 
   for (const file of files) {
-    const output = `${file}.asc`;
-    const args = [
-      '--batch', '--yes', '--armor', '--detach-sign',
-      '--local-user', keyId,
-      '--output', output,
-    ];
-    if (signingPassword) args.push('--pinentry-mode', 'loopback', '--passphrase-fd', '0');
+    const output = `${file}.sig`;
+    const args = ['dgst', '-sha256', '-sign', keyFile, '-out', output];
+    if (signingPassword) args.push('-passin', 'env:LINUX_SIGNING_KEY_PASSWORD');
     args.push(file);
-    run(args, home, signingPassword ? `${signingPassword}\n` : '');
+    run(args, { LINUX_SIGNING_KEY_PASSWORD: signingPassword });
     console.log(`signed ${path.basename(file)} -> ${path.basename(output)}`);
   }
 } finally {
-  await rm(home, { recursive: true, force: true });
+  await rm(tempDir, { recursive: true, force: true });
 }
 
 function decodeSecret(value) {
   const trimmed = value.trim();
-  if (/-----BEGIN PGP PRIVATE KEY BLOCK-----/.test(trimmed)) return Buffer.from(trimmed);
+  if (/-----BEGIN (?:RSA |EC |)PRIVATE KEY-----/.test(trimmed)) return Buffer.from(trimmed);
   try {
     const decoded = Buffer.from(trimmed, 'base64');
-    if (decoded.includes(Buffer.from('-----BEGIN PGP PRIVATE KEY BLOCK-----'))) return decoded;
+    if (decoded.includes(Buffer.from('PRIVATE KEY'))) return decoded;
   } catch {
-    // Fall through to treating the secret as an armored key.
+    // Fall through to treating the secret as PEM text.
   }
   return Buffer.from(value);
 }
 
-function run(args, home, input = '') {
-  const result = spawnSync('gpg', ['--homedir', home, ...args], {
+function run(args, extraEnv = {}) {
+  const result = spawnSync('openssl', args, {
     encoding: 'utf8',
-    input,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.status !== 0) {
-    throw new Error(`gpg failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+    throw new Error(`openssl failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
   }
   return result.stdout || '';
 }

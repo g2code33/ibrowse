@@ -4,6 +4,7 @@ release/
 .artifacts/
 .release-upload/
 .deb-staging/
+.signing/
 /android/
 /ios/
 *.log

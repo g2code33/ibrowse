@@ -47,7 +47,7 @@ Unsigned artifacts include `-unsigned` in the artifact name. Each artifact direc
 |---|---|---|---|
 | `web` | `ubuntu-latest` | `ibrowse-pwa-<version>.tar.gz`, `SHA256SUMS.txt`, `build-info.json` | PWA bundle is not code-signed; integrity is represented by SHA256. |
 | `desktop-win` | `windows-latest` | NSIS installer `.exe`, portable `.exe`, sums/info | Signed when Windows cert secrets exist; otherwise uploaded as `-unsigned`. |
-| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, detached `.asc` signatures, sums/info | GPG-signs both Linux packages when `LINUX_SIGNING_KEY` exists; otherwise uploaded as `-unsigned`. |
+| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, detached `.sig` signatures, public key, sums/info | OpenSSL-signs both Linux packages when `LINUX_SIGNING_KEY` exists; otherwise uploaded as `-unsigned`. |
 | `android` | `ubuntu-latest` | release APK, sums/info | Signed when Android keystore secrets exist; otherwise uploaded as `-unsigned`. |
 | `ios` | `macos-14` | `.ipa` for signed export or `.xcarchive` for unsigned archive, sums/info | Signed/exported when Apple/App Store Connect secrets exist; otherwise unsigned archive artifact. |
 
@@ -67,10 +67,11 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 |---|---|---|
 | `WINDOWS_CERTIFICATE_BASE64` | Windows | NSIS and portable `.exe` are built unsigned; artifact name includes `-unsigned`. |
 | `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Same as above. |
-| `LINUX_SIGNING_KEY` | Linux | Base64-encoded or armored GPG private key used to create detached `.asc` signatures; without it the artifact name includes `-unsigned`. |
-| `LINUX_SIGNING_KEY_PASSWORD` | Linux | Optional passphrase for the GPG private key. |
-| `ANDROID_KEYSTORE_BASE64` | Android | Keystore used to sign the release APK; without it the artifact name includes `-unsigned`. |
-| `ANDROID_KEYSTORE_PASSWORD` | Android | Same as above. |
+| `LINUX_SIGNING_KEY` | Linux | Base64-encoded or PEM RSA/EC private key used to create detached `.sig` signatures; without it the artifact name includes `-unsigned`. |
+| `LINUX_SIGNING_KEY_PASSWORD` | Linux | Optional passphrase for the Linux private key. |
+| `ANDROID_KEYSTORE_BASE64` | Android | Base64-encoded keystore used to sign the release APK; without it the artifact name includes `-unsigned`. |
+| `ANDROID_KEYSTORE_PASSWORD` | Android | Keystore password. |
+| `ANDROID_KEYSTORE_TYPE` | Android | Keystore type such as `JKS` or `PKCS12`; the generated free keystore uses `PKCS12`. |
 | `ANDROID_KEY_ALIAS` | Android | Same as above. |
 | `ANDROID_KEY_PASSWORD` | Android | Same as above. |
 | `APPLE_TEAM_ID` | iOS | CI performs unsigned archive attempt; artifact name includes `-unsigned`. |
@@ -83,6 +84,10 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 | `CLOUDFLARE_ACCOUNT_ID` | Web publish | Same as above. |
 | `CLOUDFLARE_PROJECT_NAME` | Web publish | Same as above. |
 | `GH_TOKEN`/`${{ github.token }}` | Release publish | Required by `gh`; if auth fails the script exits and asks for GitHub reconnection. |
+
+## Free Android and Linux signing
+
+A free self-generated Android PKCS#12 keystore and encrypted Linux RSA key can be generated locally for sideloaded Android and Linux releases. Keep the generated `.signing/` directory private; it is ignored by Git. Copy the values from `.signing/actions-secrets.env` into the corresponding GitHub Actions secrets, then use `targets: desktop-linux,android`. Google Play distribution and Apple/Windows trust programs are separate from artifact signing.
 
 ## Cutting a release
 
