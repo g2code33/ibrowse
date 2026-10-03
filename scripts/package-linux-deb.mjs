@@ -15,6 +15,23 @@ const electronBuilder = existsSync(localElectronBuilder)
   : { command: process.platform === 'win32' ? 'npx.cmd' : 'npx', args: ['--yes', 'electron-builder'] };
 
 await mkdir(releaseDir, { recursive: true });
+
+// electron-builder's "files" config bundles dist/**/* into resources/app.asar.
+// This script is invoked standalone (npm run package:linux:deb), from the
+// release CI job (which restores a prebuilt dist/ artifact first), AND from
+// tests/packaging-validation.test.mjs as part of `npm test` — which, per
+// package.json/CI workflow ordering, runs BEFORE `npm run build:web`. Without
+// this guard, a test-time build here would silently package an empty/stale
+// dist directory, producing an app.asar missing dist/index.html that only
+// scripts/verify-packaging.mjs's later asar inspection would ever catch.
+const distIndexPath = path.join(root, 'dist', 'index.html');
+if (!existsSync(distIndexPath)) {
+  console.log('[Linux DEB Packager] dist/index.html missing; building the web bundle first...');
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const webBuild = spawnSync(npm, ['run', 'build:web'], { cwd: root, stdio: 'inherit', env: process.env });
+  if (webBuild.status !== 0) process.exit(webBuild.status ?? 1);
+}
+
 console.log(`[Linux DEB Packager] Building the self-contained Electron Debian application for Yayra v${pkg.version}...`);
 
 const result = spawnSync(electronBuilder.command, [...electronBuilder.args, '--linux', 'deb', '--publish', 'never'], {
