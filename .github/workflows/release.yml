@@ -3,20 +3,20 @@ name: Release build and publish
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version_override:
-        description: 'Semver override to apply to all manifests for this run (blank uses package.json)'
+        description: "Semver override to apply to all manifests for this run (blank uses package.json)"
         required: false
         type: string
       publish:
-        description: 'Publish draft-first release and update manifest'
+        description: "Publish draft-first release and update manifest"
         required: true
         type: boolean
         default: false
       targets:
-        description: 'Comma-separated targets: web,desktop-win,desktop-linux,android,ios or all'
+        description: "Comma-separated targets: web,desktop-win,desktop-linux,android,ios or all"
         required: true
         type: string
         default: desktop-linux,android
@@ -50,7 +50,7 @@ jobs:
           if [ -n "${{ inputs.version_override }}" ]; then node scripts/version.mjs "${{ inputs.version_override }}"; fi
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Refuse duplicate version in release feed
-        if: github.ref == 'refs/heads/main' || inputs.publish == true
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/check-version-not-released.mjs
@@ -78,7 +78,9 @@ jobs:
     name: linux deb and AppImage
     runs-on: ubuntu-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-linux') || contains(inputs.targets, 'linux')
+    # Every push (including pushes to main) is a release build. Manual
+    # dispatches can still select a narrower target set.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-linux') || contains(inputs.targets, 'linux')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -98,7 +100,7 @@ jobs:
         shell: bash
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
-          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$LINUX_SIGNING_KEY" ]; then
             if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
@@ -140,9 +142,9 @@ jobs:
     name: windows NSIS and portable
     runs-on: windows-latest
     needs: web
-    # Windows remains an explicit later-release option; current pushes/tags are
-    # Android/Linux only, as documented by the release scope.
-    if: github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows'))
+    # Main pushes build and publish Windows together with Android and Linux.
+    # Manual dispatches can still select Windows explicitly.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -160,29 +162,29 @@ jobs:
           name: yayra-web-dist-${{ github.sha }}
           path: dist
       - id: signing
-        shell: bash
+        shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
-          if [ -z "$WINDOWS_CERTIFICATE_BASE64" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
-            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
-              echo "::error:: Windows release signing requires WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD before publishing"
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            if ($env:RELEASE_REQUIRES_SIGNING -eq 'true') {
+              Write-Error 'Windows release signing requires WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD before publishing'
               exit 1
-            fi
-            echo "::warning:: Windows signing skipped: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not configured"
-            {
-              echo "## Signing skipped"
-              echo "Windows: certificate secrets are absent, so NSIS and portable .exe artifacts are unsigned. Artifact name includes unsigned."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "$WINDOWS_CERTIFICATE_BASE64" | base64 -d > windows-cert.pfx
-            echo "CSC_LINK=$PWD/windows-cert.pfx" >> "$GITHUB_ENV"
-            echo "CSC_KEY_PASSWORD=$WINDOWS_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-          fi
+            }
+            Write-Warning 'Windows signing skipped: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not configured'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '## Signing skipped'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Windows: certificate secrets are absent, so NSIS and portable .exe artifacts are unsigned. Artifact name includes unsigned.'
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            $certificatePath = Join-Path $env:RUNNER_TEMP 'yayra-windows-signing.pfx'
+            $certificateBase64 = $env:WINDOWS_CERTIFICATE_BASE64 -replace '\s', ''
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($certificateBase64))
+            "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CSC_KEY_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
       - run: npm run package:win
       - name: Verify Windows executables
         shell: pwsh
@@ -206,7 +208,7 @@ jobs:
     name: android release APK
     runs-on: ubuntu-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'android')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'android')))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -230,7 +232,7 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEYSTORE_TYPE: ${{ secrets.ANDROID_KEYSTORE_TYPE }}
-          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
+          RELEASE_REQUIRES_SIGNING: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
             if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
@@ -387,7 +389,7 @@ jobs:
     name: draft release, verify assets, publish live
     runs-on: ubuntu-latest
     needs: [web, desktop-linux, desktop-win, android, ios]
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+    if: always() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
     environment: release
     steps:
       - uses: actions/checkout@v4
@@ -410,7 +412,7 @@ jobs:
         run: |
           targets="pwa,linux,android"
           requested="${{ inputs.targets }}"
-          if [[ "$requested" == "all" || "$requested" == *"desktop-win"* || "$requested" == *"windows"* ]]; then
+          if [[ "${{ github.event_name }}" == "push" || "$requested" == "all" || "$requested" == *"desktop-win"* || "$requested" == *"windows"* ]]; then
             targets="$targets,windows"
           fi
           echo "RELEASE_TARGETS=$targets" >> "$GITHUB_ENV"
