@@ -17,6 +17,7 @@
     "build:web": "node scripts/build-web.mjs",
     "build": "npm run build:web",
     "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "deploy:cloudflare:worker": "node scripts/deploy-cloudflare-worker.mjs",
     "link:cloudflare": "bash scripts/link-cloudflare.sh",
     "setup:cloudflare": "bash scripts/setup-cloudflare.sh",
     "refresh:branding": "node scripts/branding.mjs --write",

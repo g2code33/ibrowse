@@ -108,7 +108,8 @@ jobs:
             exit 0
           fi
           npx --yes wrangler@4 pages deploy dist --project-name "$CLOUDFLARE_PROJECT_NAME" --branch main --commit-dirty=true
-          echo "manifest_url=https://${CLOUDFLARE_PROJECT_NAME}.pages.dev/updates/manifest.json" >> "$GITHUB_OUTPUT"
+          node scripts/deploy-cloudflare-worker.mjs
+          echo "manifest_url=https://updates.yayra.app/updates/manifest.json" >> "$GITHUB_OUTPUT"
 
   desktop-linux:
     name: linux deb and AppImage
@@ -472,6 +473,10 @@ jobs:
         with:
           path: .artifacts
           merge-multiple: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: yayra-web-dist-${{ github.sha }}
+          path: dist
       - run: node scripts/ci-summary.mjs .artifacts
       - name: Refuse to publish unsigned artifacts
         run: node scripts/assert-release-signed.mjs .artifacts
@@ -492,6 +497,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/publish-release.mjs "v${{ needs.web.outputs.version }}" .artifacts
+      - name: Deploy final release manifest to Pages and API Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
+            echo "::warning:: Final Cloudflare manifest deployment skipped: configure the Cloudflare secrets"
+            exit 0
+          fi
+          npx --yes wrangler@4 pages deploy dist --project-name "$CLOUDFLARE_PROJECT_NAME" --branch main --commit-dirty=true
+          node scripts/deploy-cloudflare-worker.mjs
       - name: Verify live release and manifest contract
         env:
           GH_TOKEN: ${{ github.token }}

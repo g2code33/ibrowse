@@ -10,6 +10,9 @@ test('official branding and universal suggestion placement use the uploaded asse
   const manifest = await read('public/manifest.webmanifest');
   const devServer = await read('scripts/dev-server.mjs');
   const publicStyles = await read('public/styles.css');
+  const main = await read('src/browser/main.js');
+  const worker = await read('worker/update-worker.mjs');
+  const workerConfig = await read('wrangler.worker.toml');
   const css = await read('packages/shared-ui/src/theme/design-system.css');
   assert.match(icons, /assets\/brand\/logomain1\.jpg/);
   assert.match(index, /assets\/brand\/logomain1\.jpg/);
@@ -19,6 +22,10 @@ test('official branding and universal suggestion placement use the uploaded asse
   assert.match(publicStyles, /#app\s*\{[\s\S]*max-width:\s*none/);
   assert.match(publicStyles, /#app \.fb-browser-shell\s*,?\s*\n?#app \.fb-browser-viewport/);
   assert.match(icons, /assets\/brand\/yayrawriing\.PNG/);
+  assert.match(main, /https:\/\/updates\.yayra\.app\/updates\/manifest\.json/);
+  assert.match(worker, /UPDATES_MANIFEST_JSON/);
+  assert.match(workerConfig, /name\s*=\s*"yayra-updates-api"/);
+  assert.match(workerConfig, /pattern\s*=\s*"updates\.yayra\.app"/);
   assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 8px\)/);
   assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 10px\)/);
 });

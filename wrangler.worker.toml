@@ -1,0 +1,12 @@
+# Standalone Cloudflare Worker for the update/API endpoint.
+# Pages remains the frontend deployment; this Worker owns updates.yayra.app.
+name = "yayra-updates-api"
+main = "worker/update-worker.mjs"
+compatibility_date = "2026-10-03"
+workers_dev = true
+
+# Cloudflare provisions the certificate and DNS mapping for this subdomain.
+# The account must already contain the yayra.app zone.
+[[routes]]
+pattern = "updates.yayra.app"
+custom_domain = true
