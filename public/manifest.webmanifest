@@ -11,6 +11,12 @@
   "cacheVersion": "0.1.8",
   "icons": [
     {
+      "src": "assets/brand/logomain1-transparent.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
       "src": "assets/brand/logomain1.jpg",
       "sizes": "1024x1024",
       "type": "image/jpeg",

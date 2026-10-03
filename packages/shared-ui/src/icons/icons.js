@@ -36,7 +36,7 @@ export const Icons = Object.freeze({
   // Official uploaded Yayra branding. logomain1.jpg is the app logo; the
   // uploaded yayrawriing.PNG asset is used wherever the brand name is shown.
   // The build copies assets/brand into dev, PWA, Electron, and Android output.
-  officialOrb: '<img class="fb-official-brand-orb" src="./assets/brand/logomain1.jpg" alt="yayra" />',
+  officialOrb: '<img class="fb-official-brand-orb" src="./assets/brand/logomain1-transparent.png" data-official-brand-source="./assets/brand/logomain1.jpg" alt="yayra" />',
   officialWordmark: '<img class="fb-official-brand-wordmark" src="./assets/brand/yayrawriing.PNG" alt="yayra" />',
 
   globe: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20M12 2a14.5 14.5 0 0 1 0 20M2 12h20"/></svg>`,

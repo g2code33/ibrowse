@@ -963,7 +963,7 @@ export class BrowserShell {
       sponsoredSection.className = 'fb-dev-ad-showcase fb-sponsored-showcase';
       sponsoredSection.innerHTML = adLinks.map((item) => `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
-          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${item.domain || item.url}&sz=32'" alt="${item.title}" />
+          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" alt="${item.title}" />
           <span class="fb-dev-ad-label">${item.title}</span>
           <span class="fb-dev-ad-tooltip">${item.title}</span>
         </a>
@@ -2622,7 +2622,7 @@ export class BrowserShell {
       }
 
       // 2. Query GitHub Releases API from public repo
-      const ghRes = await fetch('https://api.github.com/repos/g2code33/yayra/releases/latest', {
+      const ghRes = await fetch('https://updates.yayra.app/api/latest-release', {
         headers: { Accept: 'application/vnd.github.v3+json' }
       }).catch(() => null);
 
@@ -3282,7 +3282,7 @@ export class BrowserShell {
                 return `
                 <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; background:rgba(255,255,255,0.04); border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
                   <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
-                    <img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:16px; height:16px; border-radius:50%;" alt="" />
+                    <img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:16px; height:16px; border-radius:50%;" alt="" />
                     <span style="font-size:0.825rem; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">${bm.title || bm.url}</span>
                   </div>
                   <button class="fb-btn fb-btn-primary fb-add-bm-to-wheel-btn" data-url="${bm.url}" data-title="${bm.title || bm.url}" style="padding:2px 8px; font-size:11px;">+ Add</button>
@@ -3338,7 +3338,7 @@ export class BrowserShell {
           id: `site-${Date.now()}`,
           title,
           url,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
+          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
           x,
           y,
           type: 'site'
@@ -3367,7 +3367,7 @@ export class BrowserShell {
           id: `custom-${Date.now()}`,
           title,
           url: fullUrl,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
+          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
           x,
           y,
           type: 'site'
@@ -3721,9 +3721,8 @@ export class BrowserShell {
     try {
       this.searchSuggestionController?.abort();
       this.searchSuggestionController = typeof AbortController === 'function' ? new AbortController() : null;
-      const response = await fetch(`https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=${encodeURIComponent(query)}`, {
+      const response = await fetch(`https://updates.yayra.app/api/suggestions?q=${encodeURIComponent(query)}`, {
         headers: { accept: 'application/json' },
-        mode: 'cors',
         signal: this.searchSuggestionController?.signal
       });
       if (!response.ok) return local;

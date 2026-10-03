@@ -14,7 +14,9 @@ test('official branding and universal suggestion placement use the uploaded asse
   const worker = await read('worker/update-worker.mjs');
   const workerConfig = await read('wrangler.worker.toml');
   const css = await read('packages/shared-ui/src/theme/design-system.css');
+  assert.match(icons, /assets\/brand\/logomain1-transparent\.png/);
   assert.match(icons, /assets\/brand\/logomain1\.jpg/);
+  assert.match(index, /assets\/brand\/logomain1-transparent\.png/);
   assert.match(index, /assets\/brand\/logomain1\.jpg/);
   assert.match(manifest, /assets\/brand\/logomain1\.jpg/);
   assert.match(devServer, /assets\/brand\/logomain1\.jpg/);

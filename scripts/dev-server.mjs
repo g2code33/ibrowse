@@ -68,6 +68,7 @@ const server = http.createServer((req, res) => {
       background_color: '#060b19',
       theme_color: '#172554',
       icons: [
+        { src: '/assets/brand/logomain1-transparent.png', sizes: '1024x1024', type: 'image/png', purpose: 'any' },
         { src: '/assets/brand/logomain1.jpg', sizes: '1024x1024', type: 'image/jpeg', purpose: 'any' }
       ]
     }));
@@ -116,6 +117,7 @@ function serveBrowserApp(res) {
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#172554">
   <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="1024x1024" href="/assets/brand/logomain1-transparent.png">
   <link rel="icon" type="image/jpeg" sizes="1024x1024" href="/assets/brand/logomain1.jpg">
   <link rel="stylesheet" href="/packages/shared-ui/src/theme/design-system.css?dev=${devToken}">
   <link rel="stylesheet" href="/packages/shared-ui/src/glassmorphism.css?dev=${devToken}">

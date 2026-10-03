@@ -18,25 +18,76 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.protocol !== 'https:' && url.hostname !== 'localhost') return new Response('HTTPS required', { status: 400 });
-    if (!url.pathname.endsWith('/updates/manifest.json')) return new Response('not found', { status: 404 });
+    if (!['/updates/manifest.json', '/api/suggestions', '/api/latest-release'].includes(url.pathname)) {
+      return new Response('not found', { status: 404 });
+    }
+
+    const headers = baseHeaders();
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
     const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-    if (!take(ip, Date.now())) return new Response('rate limited', { status: 429, headers: baseHeaders() });
-    const manifest = env?.UPDATES_MANIFEST_JSON ? JSON.parse(env.UPDATES_MANIFEST_JSON) : DEFAULT_MANIFEST;
-    const body = JSON.stringify(manifest, null, 2);
-    const etag = await sha256Etag(body);
-    console.log(`[updates] manifest check ip=${ip} etag=${etag}`);
-    const headers = { ...baseHeaders(), ETag: etag };
-    if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
-    if (request.method === 'HEAD') return new Response(null, { status: 200, headers });
-    if (request.method !== 'GET') return new Response('method not allowed', { status: 405, headers });
-    return new Response(body, { status: 200, headers });
+    if (!take(ip, Date.now())) return new Response('rate limited', { status: 429, headers });
+
+    if (url.pathname === '/api/suggestions') return proxySuggestions(request, url, headers);
+    if (url.pathname === '/api/latest-release') return proxyLatestRelease(request, headers);
+    return serveManifest(request, env, headers);
   }
 };
+
+async function serveManifest(request, env, headers) {
+  const manifest = readManifest(env);
+  const body = JSON.stringify(manifest, null, 2);
+  const etag = await sha256Etag(body);
+  console.log(`[updates] manifest check ip=${request.headers.get('cf-connecting-ip') || 'unknown'} etag=${etag}`);
+  const responseHeaders = { ...headers, ETag: etag, 'cache-control': 'public, max-age=300' };
+  if (request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers: responseHeaders });
+  if (request.method === 'HEAD') return new Response(null, { status: 200, headers: responseHeaders });
+  if (request.method !== 'GET') return new Response('method not allowed', { status: 405, headers: responseHeaders });
+  return new Response(body, { status: 200, headers: responseHeaders });
+}
+
+async function proxySuggestions(request, url, headers) {
+  if (request.method !== 'GET') return new Response('method not allowed', { status: 405, headers });
+  const query = (url.searchParams.get('q') || '').trim().slice(0, 200);
+  if (!query) return new Response(JSON.stringify(['', []]), { status: 200, headers });
+  const upstreamUrl = `https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=${encodeURIComponent(query)}`;
+  return proxyJson(upstreamUrl, headers);
+}
+
+async function proxyLatestRelease(request, headers) {
+  if (request.method !== 'GET') return new Response('method not allowed', { status: 405, headers });
+  return proxyJson('https://api.github.com/repos/g2code33/yayra/releases/latest', headers, {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'yayra-updates-api'
+  });
+}
+
+async function proxyJson(target, headers, requestHeaders = {}) {
+  try {
+    const upstream = await fetch(target, { headers: requestHeaders });
+    const body = await upstream.text();
+    return new Response(body, {
+      status: upstream.ok ? 200 : 502,
+      headers: { ...headers, 'cache-control': 'public, max-age=60' }
+    });
+  } catch {
+    return new Response(JSON.stringify({ error: 'upstream unavailable' }), { status: 502, headers });
+  }
+}
+
+function readManifest(env) {
+  if (!env?.UPDATES_MANIFEST_JSON) return DEFAULT_MANIFEST;
+  try {
+    return JSON.parse(env.UPDATES_MANIFEST_JSON);
+  } catch {
+    return DEFAULT_MANIFEST;
+  }
+}
 
 function baseHeaders() {
   return {
     'access-control-allow-origin': '*',
-    'cache-control': 'public, max-age=300',
+    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-headers': 'Accept, Content-Type',
     'content-type': 'application/json; charset=utf-8'
   };
 }
