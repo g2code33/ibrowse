@@ -1,10 +1,21 @@
 export const DESKTOP_CUSTOM_SCHEME = 'yayra';
 export const ASSET_ORIGINS = Object.freeze(['https://yayra.pages.dev']);
-export const API_ORIGINS = Object.freeze(['https://updates.yayra.app']);
+export const API_ORIGINS = Object.freeze([
+  'https://updates.yayra.app',
+  'https://suggestqueries.google.com'
+]);
 
 export function buildContentSecurityPolicy() {
   const scheme = `${DESKTOP_CUSTOM_SCHEME}:`;
-  const imgSources = [`'self'`, 'data:', 'blob:', scheme, ...ASSET_ORIGINS];
+  const imgSources = [
+    `'self'`,
+    'data:',
+    'blob:',
+    scheme,
+    ...ASSET_ORIGINS,
+    'https://icons.duckduckgo.com',
+    'https://www.google.com'
+  ];
   const connectSources = [`'self'`, scheme, ...API_ORIGINS];
   return [
     `default-src 'self' ${scheme}`,

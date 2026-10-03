@@ -3446,3 +3446,375 @@ body {
   margin: 0 !important;
   color: var(--fb-text-muted) !important;
 }
+
+/* Google-style omnibox suggestions. Every Yayra search field uses this same
+   component so suggestions feel consistent in the desktop, mini, PWA, and
+   Android presentations. */
+.fb-omnibox-container,
+.fb-newtab-searchbox {
+  position: relative;
+}
+
+.fb-search-suggestions {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 18px;
+  background: var(--fb-bg-surface-elevated);
+  color: var(--fb-text-primary);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+}
+
+.fb-search-suggestions-heading {
+  padding: 5px 10px 8px;
+  color: var(--fb-text-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.fb-search-suggestion-row {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fb-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fb-search-suggestion-row:hover,
+.fb-search-suggestion-row:focus-visible,
+.fb-search-suggestion-row.active {
+  background: var(--fb-bg-glass-input);
+  outline: none;
+}
+
+.fb-search-suggestion-icon {
+  display: inline-flex;
+  flex: 0 0 22px;
+  color: var(--fb-text-primary);
+}
+
+.fb-search-suggestion-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.95rem;
+}
+
+.fb-search-suggestion-fill {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 50%;
+  color: var(--fb-text-muted);
+}
+
+.fb-search-suggestion-fill svg {
+  width: 16px;
+  height: 16px;
+  transform: rotate(45deg);
+}
+
+.fb-newtab-searchbox .fb-search-suggestions {
+  top: calc(100% + 10px);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Keyboard-aware mobile search sheet, modeled on the supplied iPhone
+   Suggestions screen. visualViewport sizing is synchronized in JavaScript so
+   the entry bar stays immediately above the native keyboard. */
+.fb-mobile-search-backdrop {
+  align-items: stretch;
+  justify-content: stretch;
+  background: var(--fb-bg-app);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  overflow: hidden;
+}
+
+.fb-mobile-search-overlay {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: var(--fb-bg-app);
+  box-shadow: none;
+  animation: none;
+}
+
+.fb-mobile-search-page {
+  min-height: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: max(18px, env(safe-area-inset-top, 0px)) 16px calc(10px + env(safe-area-inset-bottom, 0px));
+  color: var(--fb-text-primary);
+}
+
+.fb-mobile-search-topbar {
+  flex: 0 0 auto;
+  padding: 10px 44px 12px 44px;
+  text-align: left;
+}
+
+.fb-mobile-search-heading {
+  color: var(--fb-text-secondary);
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.fb-mobile-search-context {
+  margin-top: 28px;
+  color: var(--fb-text-secondary);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.fb-mobile-search-results {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 14px 12px;
+}
+
+.fb-mobile-search-results .fb-search-suggestions {
+  position: static;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.fb-mobile-search-results .fb-search-suggestions-heading {
+  display: none;
+}
+
+.fb-mobile-search-results .fb-search-suggestion-row {
+  min-height: 58px;
+  padding: 9px 0;
+  border-radius: 12px;
+  gap: 14px;
+  font-size: 1.05rem;
+}
+
+.fb-mobile-search-results .fb-search-suggestion-row:hover,
+.fb-mobile-search-results .fb-search-suggestion-row:focus-visible,
+.fb-mobile-search-results .fb-search-suggestion-row.active {
+  background: transparent;
+}
+
+.fb-mobile-search-results .fb-search-suggestion-icon {
+  flex-basis: 32px;
+  color: #111827;
+}
+
+.fb-mobile-search-results .fb-search-suggestion-icon svg {
+  width: 28px;
+  height: 28px;
+  stroke-width: 1.8;
+}
+
+.fb-mobile-search-results .fb-search-suggestion-text {
+  font-size: 1.06rem;
+  color: var(--fb-text-primary);
+}
+
+.fb-mobile-search-results .fb-search-suggestion-fill {
+  width: 30px;
+  height: 30px;
+  flex-basis: 30px;
+  color: var(--fb-text-muted);
+  border-color: var(--fb-border-glass);
+}
+
+.fb-mobile-search-entry-area {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.fb-mobile-search-entry-form {
+  min-width: 0;
+  flex: 1;
+  height: 58px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 16px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 29px;
+  background: var(--fb-bg-surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.fb-mobile-search-entry-icon {
+  display: inline-flex;
+  color: var(--fb-text-primary);
+}
+
+.fb-mobile-search-input {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fb-text-primary);
+  font: inherit;
+  font-size: 1.05rem;
+}
+
+.fb-mobile-search-clear,
+.fb-mobile-search-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  cursor: pointer;
+}
+
+.fb-mobile-search-clear {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--fb-bg-app);
+  background: var(--fb-text-primary);
+}
+
+.fb-mobile-search-clear svg {
+  width: 17px;
+  height: 17px;
+}
+
+.fb-mobile-search-dismiss {
+  width: 60px;
+  height: 60px;
+  flex: 0 0 60px;
+  padding: 0;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 50%;
+  color: var(--fb-text-primary);
+  background: var(--fb-bg-surface);
+}
+
+.fb-mobile-search-dismiss svg {
+  width: 28px;
+  height: 28px;
+}
+
+@media (max-width: 480px) {
+  .fb-mobile-search-topbar {
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+
+  .fb-mobile-search-results {
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+}
+
+/* Official Yayra branding assets from assets/brand, copied into the web
+   bundle by build-web.mjs. The SVG icon remains a safe fallback for offline
+   or legacy shells. */
+.fb-official-brand-logo {
+  display: inline-flex;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  border-radius: 50%;
+}
+
+.fb-official-brand-fallback {
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.fb-toolbar-brand-orb .fb-official-brand-logo,
+.fb-toolbar-brand-orb .fb-official-brand-fallback {
+  width: 24px;
+  height: 24px;
+}
+
+.fb-newtab-logo .fb-official-brand-logo {
+  border-radius: 18px;
+}
+
+.fb-about-logo .fb-official-brand-logo {
+  border-radius: 22px;
+}
+
+.fb-inline-site-logo,
+.fb-inline-drawer-logo {
+  width: 24px;
+  height: 24px;
+}
+
+.fb-inline-drawer-logo {
+  flex: 0 0 24px;
+}
+
+.fb-official-bubble-logo {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+}
+
+.fb-toolbar-brand-text {
+  display: inline-flex;
+  align-items: center;
+  min-width: 62px;
+}
+
+.fb-official-wordmark {
+  display: inline-block;
+  width: 68px;
+  height: 25px;
+  object-fit: contain;
+  object-position: center;
+}
+
+.fb-official-wordmark-fallback {
+  color: var(--fb-text-primary);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}

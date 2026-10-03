@@ -41,9 +41,10 @@ import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract
  */
 export const DEVELOPER_AD_LINKS = [
   { id: 'ad-rx-store', title: 'RX Store — Developer Sponsor', url: 'https://rx-store-web.pages.dev', domain: 'rx-store-web.pages.dev' },
-  { id: 'ad-google', title: 'Google AI & Cloud', url: 'https://cloud.google.com', domain: 'cloud.google.com' },
-  { id: 'ad-github', title: 'GitHub Developers', url: 'https://github.com', domain: 'github.com' },
-  { id: 'ad-duckduckgo', title: 'DuckDuckGo Privacy', url: 'https://duckduckgo.com', domain: 'duckduckgo.com' }
+  { id: 'ad-pharmatrack', title: 'PharmaTrack', url: 'https://pharmatrack-web.pages.dev/', domain: 'pharmatrack-web.pages.dev' },
+  { id: 'ad-coderxsociety', title: 'Coder X Society', url: 'https://coderxsociety.pages.dev/', domain: 'coderxsociety.pages.dev' },
+  { id: 'ad-cgpapilot', title: 'CGPA Pilot', url: 'https://cgpapilot.pages.dev/', domain: 'cgpapilot.pages.dev' },
+  { id: 'ad-clinicalrx30', title: 'ClinicalRx30', url: 'https://clinicalrx30.vercel.app/', domain: 'clinicalrx30.vercel.app' }
 ];
 
 export class BrowserShell {
@@ -179,6 +180,8 @@ export class BrowserShell {
     this.boundResizeHandler = () => this.handleViewportResize();
     this.boundKeyHandler = (e) => this.handleGlobalKeyDown(e);
     this._bookmarkCheckId = 0;
+    this.searchSuggestionCache = new Map();
+    this.mobileSearchViewportCleanup = null;
 
     if (typeof window !== 'undefined') {
       setTimeout(() => {
@@ -348,6 +351,14 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * DESKTOP LAYOUT (COMPACT TABS, OMNIBOX, BRANDING, NO-BLUR DRAWER)
    * ----------------------------------------------------------- */
+  getOfficialLogoMarkup(className = '') {
+    return `<img class="fb-official-brand-logo ${className}" src="./brand/yayra-orb.png" alt="yayra logo" draggable="false" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';" /><span class="fb-official-brand-fallback" style="display:none;">${Icons.logoOrb}</span>`;
+  }
+
+  getOfficialWordmarkMarkup() {
+    return `<img class="fb-official-wordmark" src="./brand/yayra-wordmark.PNG" alt="yayra" draggable="false" onerror="this.style.display='none';this.nextElementSibling.style.display='inline';" /><span class="fb-official-wordmark-fallback" style="display:none;">yayra</span>`;
+  }
+
   renderDesktopLayout(root, activeTab) {
     // 1. Top Tab Strip (Requirement 8: Compact, Low-Profile, Cute Tabs)
     const tabStrip = document.createElement('header');
@@ -541,8 +552,8 @@ export class BrowserShell {
     const toolbarBrand = document.createElement('div');
     toolbarBrand.className = 'fb-toolbar-brand';
     toolbarBrand.innerHTML = `
-      <span class="fb-toolbar-brand-orb">${Icons.logoOrb}</span>
-      <span class="fb-toolbar-brand-text">yayra</span>
+      <span class="fb-toolbar-brand-orb">${this.getOfficialLogoMarkup()}</span>
+      <span class="fb-toolbar-brand-text">${this.getOfficialWordmarkMarkup()}</span>
     `;
     toolbarBrand.setAttribute('title', 'Yayra Floating Browser v0.1.0');
     toolbarBrand.addEventListener('click', () => this.openInternalPage('yayra://newtab'));
@@ -590,6 +601,7 @@ export class BrowserShell {
 
     omnibox.appendChild(omniboxInput);
     this.omniboxInput = omniboxInput;
+    this.bindSearchSuggestions(omniboxInput, { host: omnibox, variant: 'desktop' });
 
     // Bookmark Star Icon
     const starBtn = document.createElement('button');
@@ -911,7 +923,7 @@ export class BrowserShell {
 
     const logoOrb = document.createElement('div');
     logoOrb.className = 'fb-newtab-logo';
-    logoOrb.innerHTML = Icons.logoOrb;
+    logoOrb.innerHTML = this.getOfficialLogoMarkup();
     hero.appendChild(logoOrb);
 
     const title = document.createElement('h1');
@@ -938,6 +950,7 @@ export class BrowserShell {
       <input type="text" placeholder="${activeTab.isPrivate ? 'Search securely in Incognito' : `Search with ${engineCap} or type a URL`}" class="fb-newtab-input fb-newtab-search-input" autofocus />
     `;
     newTabPage.appendChild(searchForm);
+    this.bindSearchSuggestions(searchForm.querySelector('input'), { host: searchForm, variant: this.state.isMobile ? 'mobile-start' : 'desktop' });
 
     if (this.state.isMobile && !activeTab.isPrivate) {
       this.renderMobileSafariExtensionCard(newTabPage);
@@ -959,7 +972,7 @@ export class BrowserShell {
         { title: 'DuckDuckGo', url: 'https://duckduckgo.com', icon: Icons.duckduckgo },
         { title: 'Wikipedia', url: 'https://wikipedia.org', icon: Icons.wikipedia },
         { title: 'GitHub', url: 'https://github.com', icon: Icons.github },
-        { title: 'Yayra Docs', url: 'https://github.com/g2code33/yayra', icon: Icons.logoOrb },
+        { title: 'Yayra Docs', url: 'https://github.com/g2code33/yayra', icon: this.getOfficialLogoMarkup('fb-inline-site-logo') },
         { title: 'Google', url: 'https://google.com', icon: Icons.google }
       ];
 
@@ -1950,7 +1963,7 @@ export class BrowserShell {
     page.innerHTML = `
       <div class="fb-internal-container">
         <div class="fb-about-hero">
-          <div class="fb-about-logo">${Icons.logoOrb}</div>
+          <div class="fb-about-logo">${this.getOfficialLogoMarkup()}</div>
           <h1 class="fb-about-appname">yayra</h1>
           <span class="fb-about-version fb-about-version-badge">Version 0.1.0 (Stable 64-bit Release)</span>
           <p style="max-width:480px; color:var(--fb-text-secondary); font-size:0.9rem; margin:8px 0 16px;">
@@ -2164,7 +2177,7 @@ export class BrowserShell {
     dupWin.innerHTML = `
       <header class="fb-floating-popup-header">
         <div class="fb-floating-popup-brand">
-          <span style="width:20px; height:20px; display:inline-flex;">${Icons.logoOrb}</span>
+          <span style="width:20px; height:20px; display:inline-flex;">${this.getOfficialLogoMarkup()}</span>
           <span>yayra mini #${dupCount + 1}</span>
         </div>
         <div class="fb-floating-popup-actions">
@@ -2270,7 +2283,7 @@ export class BrowserShell {
     win.innerHTML = `
       <header class="fb-floating-popup-header">
         <div class="fb-floating-popup-brand">
-          <span style="width:20px; height:20px; display:inline-flex;">${Icons.logoOrb}</span>
+          <span style="width:20px; height:20px; display:inline-flex;">${this.getOfficialLogoMarkup()}</span>
           <span>yayra mini</span>
         </div>
         <div class="fb-floating-popup-actions">
@@ -2300,8 +2313,8 @@ export class BrowserShell {
         </div>
         <div class="fb-omnibox-container fb-mini-omnibox-container">
           <div class="fb-toolbar-brand" title="Yayra">
-            <span class="fb-toolbar-brand-orb">${Icons.logoOrb}</span>
-            <span class="fb-toolbar-brand-text">yayra</span>
+            <span class="fb-toolbar-brand-orb">${this.getOfficialLogoMarkup()}</span>
+            <span class="fb-toolbar-brand-text">${this.getOfficialWordmarkMarkup()}</span>
           </div>
           <button class="fb-omnibox-security fb-mini-security-btn" title="Site security" aria-label="Site security">${activeTab.isSecure ? Icons.lock : Icons.alertTriangle}</button>
           <input type="text" class="fb-omnibox-input fb-mini-omnibox" value="${this.getDisplayUrl(activeTab.url)}" placeholder="Search with ${(this.state.settings.searchEngine || 'Google').replace(/^./, (letter) => letter.toUpperCase())} or enter address" aria-label="Mini address and search bar" />
@@ -2415,6 +2428,7 @@ export class BrowserShell {
         this.renderFloatingMiniWindow();
       }
     });
+    this.bindSearchSuggestions(omni, { host: omni?.parentElement, variant: 'mini' });
 
     // Render In-Mini Viewport Content (Full features of Yayra)
     const miniViewport = win.querySelector('.fb-mini-viewport');
@@ -2769,7 +2783,7 @@ export class BrowserShell {
             ${Icons.help} <span>Help</span> <span class="fb-submenu-arrow">${Icons.chevronRight}</span>
           </button>
           <div class="fb-drawer-submenu">
-            <button class="fb-drawer-item fb-dr-about">${Icons.logoOrb} <span>About yayra</span></button>
+            <button class="fb-drawer-item fb-dr-about">${this.getOfficialLogoMarkup('fb-inline-drawer-logo')} <span>About yayra</span></button>
             <button class="fb-drawer-item fb-dr-whatsnew">${Icons.whatNew} <span>What's New</span></button>
             <button class="fb-drawer-item fb-dr-help-center">${Icons.help} <span>Help center</span></button>
             <button class="fb-drawer-item fb-dr-report-issue">${Icons.report} <span>Report an issue...</span> <kbd>Alt+Shift+I</kbd></button>
@@ -3103,7 +3117,7 @@ export class BrowserShell {
     if (!this.state.activeModal) return;
 
     const backdrop = document.createElement('div');
-    backdrop.className = 'fb-modal-backdrop';
+    backdrop.className = `fb-modal-backdrop ${this.state.activeModal === 'search-overlay' ? 'fb-mobile-search-backdrop' : ''}`;
     backdrop.addEventListener('click', (e) => {
       if (e.target === backdrop) this.closeModal();
     });
@@ -3600,32 +3614,234 @@ export class BrowserShell {
     });
   }
 
+  async fetchGoogleSearchSuggestions(query) {
+    const normalized = query.trim();
+    if (!normalized || (this.state.settings.searchEngine || 'google') !== 'google') return [];
+    const cached = this.searchSuggestionCache.get(normalized);
+    if (cached) return cached;
+    if (typeof fetch !== 'function') return [];
+
+    try {
+      const endpoint = `https://suggestqueries.google.com/complete/search?client=firefox&hl=en&q=${encodeURIComponent(normalized)}`;
+      const response = await fetch(endpoint, { headers: { accept: 'application/json' } });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      const suggestions = Array.isArray(payload?.[1])
+        ? payload[1].filter((item) => typeof item === 'string' && item.trim()).slice(0, 8)
+        : [];
+      this.searchSuggestionCache.set(normalized, suggestions);
+      return suggestions;
+    } catch {
+      // Search remains usable offline through local history and fallback rows.
+      return [];
+    }
+  }
+
+  getLocalSearchSuggestions(query) {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return [];
+    const local = [];
+    const add = (value) => {
+      if (typeof value !== 'string' || !value.trim()) return;
+      if (!local.some((item) => item.toLowerCase() === value.toLowerCase())) local.push(value);
+    };
+
+    (this.state.historyItems || []).forEach((item) => {
+      add(item.title);
+      add(item.url);
+    });
+    (this.state.bookmarksItems || []).forEach((item) => {
+      add(item.title);
+      add(item.url);
+    });
+
+    const fallback = [
+      `${query} website`,
+      `${query} near me`,
+      `${query} news`,
+      `${query} latest`
+    ];
+    fallback.forEach(add);
+    return local.filter((item) => item.toLowerCase().includes(normalized) || item.startsWith(query)).slice(0, 8);
+  }
+
+  bindSearchSuggestions(input, { host = input?.parentElement, variant = 'desktop' } = {}) {
+    if (!input || !host || typeof document === 'undefined') return null;
+    const list = document.createElement('div');
+    list.className = `fb-search-suggestions fb-search-suggestions-${variant}`;
+    list.setAttribute('role', 'listbox');
+    list.hidden = true;
+    host.appendChild(list);
+
+    let activeIndex = -1;
+    let requestId = 0;
+    let blurTimer = null;
+
+    const render = (items, query) => {
+      list.replaceChildren();
+      activeIndex = Math.min(activeIndex, items.length - 1);
+      if (!query || !items.length) {
+        list.hidden = true;
+        return;
+      }
+      list.hidden = false;
+      const heading = document.createElement('div');
+      heading.className = 'fb-search-suggestions-heading';
+      heading.textContent = 'Google Suggestions';
+      list.appendChild(heading);
+
+      items.slice(0, 8).forEach((suggestion, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `fb-search-suggestion-row ${index === activeIndex ? 'active' : ''}`;
+        row.setAttribute('role', 'option');
+        row.setAttribute('aria-selected', index === activeIndex ? 'true' : 'false');
+        row.innerHTML = `
+          <span class="fb-search-suggestion-icon">${Icons.search}</span>
+          <span class="fb-search-suggestion-text"></span>
+          <span class="fb-search-suggestion-fill" aria-hidden="true">${Icons.arrowLeft}</span>
+        `;
+        row.querySelector('.fb-search-suggestion-text').textContent = suggestion;
+        row.addEventListener('mousedown', (event) => event.preventDefault());
+        row.addEventListener('click', () => {
+          input.value = suggestion;
+          list.hidden = true;
+          this.closeModalIfSearchOverlay();
+          this.navigateActiveTab(suggestion);
+        });
+        row.querySelector('.fb-search-suggestion-fill')?.addEventListener('click', (event) => {
+          event.stopPropagation();
+          input.value = suggestion;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+        });
+        list.appendChild(row);
+      });
+    };
+
+    const update = async () => {
+      const query = input.value.trim();
+      const currentRequest = ++requestId;
+      activeIndex = -1;
+      if (!query) {
+        render([], '');
+        return;
+      }
+      render(this.getLocalSearchSuggestions(query), query);
+      const remote = await this.fetchGoogleSearchSuggestions(query);
+      if (currentRequest !== requestId) return;
+      const merged = [...remote, ...this.getLocalSearchSuggestions(query)]
+        .filter((item, index, values) => values.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index)
+        .slice(0, 8);
+      render(merged, query);
+    };
+
+    input.addEventListener('input', update);
+    input.addEventListener('focus', () => {
+      if (blurTimer) clearTimeout(blurTimer);
+      if (input.value.trim() && list.children.length) list.hidden = false;
+    });
+    input.addEventListener('blur', () => {
+      blurTimer = setTimeout(() => { list.hidden = true; }, 180);
+    });
+    input.addEventListener('keydown', (event) => {
+      const rows = [...list.querySelectorAll('.fb-search-suggestion-row')];
+      if (event.key === 'ArrowDown' && rows.length) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        activeIndex = Math.min(activeIndex + 1, rows.length - 1);
+        rows.forEach((row, index) => row.classList.toggle('active', index === activeIndex));
+        rows[activeIndex]?.scrollIntoView?.({ block: 'nearest' });
+      } else if (event.key === 'ArrowUp' && rows.length) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        rows.forEach((row, index) => row.classList.toggle('active', index === activeIndex));
+      } else if (event.key === 'Enter' && activeIndex >= 0 && rows[activeIndex]) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const selected = rows[activeIndex].querySelector('.fb-search-suggestion-text')?.textContent;
+        if (selected) {
+          input.value = selected;
+          this.closeModalIfSearchOverlay();
+          this.navigateActiveTab(selected);
+        }
+      }
+    }, true);
+
+    return list;
+  }
+
+  closeModalIfSearchOverlay() {
+    if (this.state.activeModal === 'search-overlay') this.closeModal();
+  }
+
   renderMobileSearchOverlay(modal) {
+    const currentValue = this.state.urlInputValue && this.state.urlInputValue !== 'yayra://newtab'
+      ? this.state.urlInputValue
+      : '';
+
     modal.className = 'fb-modal-card fb-mobile-search-overlay';
     modal.innerHTML = `
-      <div class="fb-modal-header">
-        <h2 class="fb-modal-title">${Icons.search} Search or enter address</h2>
-        <button class="fb-modal-close-btn">${Icons.close}</button>
-      </div>
-      <div class="fb-modal-body">
-        <form id="fb-mobile-search-form" style="display:flex; gap:8px;">
-          <input type="text" id="fb-mobile-search-input" value="${this.state.urlInputValue || ''}" placeholder="Search or type URL" class="fb-input" style="flex:1;" />
-          <button type="submit" class="fb-btn fb-btn-primary">Go</button>
-        </form>
+      <div class="fb-mobile-search-page">
+        <div class="fb-mobile-search-topbar">
+          <div class="fb-mobile-search-heading">Google Suggestions</div>
+          <div class="fb-mobile-search-context">Bookmarks, History, and Tabs</div>
+        </div>
+        <div class="fb-mobile-search-results" id="fb-mobile-search-results" role="listbox" aria-label="Google Suggestions"></div>
+        <div class="fb-mobile-search-entry-area">
+          <form id="fb-mobile-search-form" class="fb-mobile-search-entry-form">
+            <span class="fb-mobile-search-entry-icon">${Icons.search}</span>
+            <input type="text" id="fb-mobile-search-input" value="${currentValue.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" placeholder="Search or enter website address" class="fb-mobile-search-input" autocomplete="off" autocapitalize="sentences" spellcheck="false" aria-label="Search or enter website address" />
+            <button type="button" class="fb-mobile-search-clear" aria-label="Clear search" title="Clear search">${Icons.close}</button>
+          </form>
+          <button type="button" class="fb-mobile-search-dismiss" aria-label="Close search">${Icons.close}</button>
+        </div>
       </div>
     `;
 
-    modal.querySelector('.fb-modal-close-btn')?.addEventListener('click', () => this.closeModal());
-    modal.querySelector('#fb-mobile-search-form')?.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const val = modal.querySelector('#fb-mobile-search-input')?.value;
-      if (val) {
+    const closeSearch = () => this.closeModal();
+    modal.querySelector('.fb-mobile-search-dismiss')?.addEventListener('click', closeSearch);
+    modal.querySelector('.fb-mobile-search-clear')?.addEventListener('click', () => {
+      const input = modal.querySelector('#fb-mobile-search-input');
+      if (!input) return;
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus();
+    });
+    modal.querySelector('#fb-mobile-search-form')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = modal.querySelector('#fb-mobile-search-input');
+      if (input?.value.trim()) {
         this.closeModal();
-        this.navigateActiveTab(val);
+        this.navigateActiveTab(input.value);
       }
     });
 
     const input = modal.querySelector('#fb-mobile-search-input');
+    this.bindSearchSuggestions(input, {
+      host: modal.querySelector('#fb-mobile-search-results'),
+      variant: 'mobile-search'
+    });
+
+    const visualViewport = typeof window !== 'undefined' ? window.visualViewport : null;
+    if (visualViewport) {
+      const syncVisualViewport = () => {
+        const height = Math.max(320, Math.round(visualViewport.height));
+        const backdrop = modal.parentElement;
+        if (backdrop) backdrop.style.height = `${height}px`;
+        modal.style.height = `${height}px`;
+      };
+      syncVisualViewport();
+      visualViewport.addEventListener('resize', syncVisualViewport);
+      visualViewport.addEventListener('scroll', syncVisualViewport);
+      this.mobileSearchViewportCleanup = () => {
+        visualViewport.removeEventListener('resize', syncVisualViewport);
+        visualViewport.removeEventListener('scroll', syncVisualViewport);
+        this.mobileSearchViewportCleanup = null;
+      };
+    }
+
     setTimeout(() => {
       input?.focus();
       input?.select();
@@ -3718,7 +3934,7 @@ export class BrowserShell {
     bubble.innerHTML = `
       ${hasLoadingTab ? '<div class="yayra-bubble-loading-ring"></div>' : ''}
       <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; pointer-events:none;">
-        ${Icons.logoOrb}
+        ${this.getOfficialLogoMarkup('fb-official-bubble-logo')}
       </div>
       <span class="yayra-circle-badge" style="position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; padding:0 4px; font-size:10px; border-radius:9px; background:var(--fb-accent-primary); color:#ffffff; font-weight:700; display:flex; align-items:center; justify-content:center;">
         ${this.state.tabs.length}
@@ -3736,7 +3952,7 @@ export class BrowserShell {
     overlay.innerHTML = `
       <div class="yayra-floating-bubble yayra-floating-orb" role="button" aria-label="Restore Yayra Browser" tabindex="0">
         <div style="width:36px; height:36px; display:flex; align-items:center; justify-content:center;">
-          ${Icons.logoOrb}
+          ${this.getOfficialLogoMarkup('fb-official-bubble-logo')}
         </div>
         <span class="yayra-bubble-badge">${this.state.tabs.length}</span>
       </div>
@@ -4136,6 +4352,7 @@ export class BrowserShell {
   }
 
   closeModal() {
+    this.mobileSearchViewportCleanup?.();
     this.state.activeModal = null;
     this.render();
   }
@@ -4360,6 +4577,7 @@ export class BrowserShell {
   }
 
   destroy() {
+    this.mobileSearchViewportCleanup?.();
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.boundResizeHandler);
       window.removeEventListener('keydown', this.boundKeyHandler);
