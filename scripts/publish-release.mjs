@@ -50,13 +50,18 @@ async function stageReleaseFiles(dir) {
   }
   return out;
 }
-async function collectFiles(dir) {
+async function collectFiles(dir, isArtifactRoot = true) {
   const out = [];
   if (!existsSync(dir)) return out;
   for (const entry of await readdir(dir)) {
+    // This is the raw web bundle used as an inter-job transfer artifact. The
+    // prepared PWA tarball is the release asset; uploading every source file
+    // from this directory creates a huge release and can prevent later target
+    // assets, including Windows, from being uploaded.
+    if (isArtifactRoot && entry.startsWith('yayra-web-dist-')) continue;
     const absolute = path.join(dir, entry);
     const info = await stat(absolute);
-    if (info.isDirectory()) out.push(...await collectFiles(absolute));
+    if (info.isDirectory()) out.push(...await collectFiles(absolute, false));
     else out.push(absolute);
   }
   return out;
