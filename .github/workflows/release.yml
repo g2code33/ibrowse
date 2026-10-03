@@ -439,7 +439,10 @@ jobs:
       - run: node scripts/ci-summary.mjs .artifacts
       - name: Refuse to publish unsigned artifacts
         run: node scripts/assert-release-signed.mjs .artifacts
-      - run: node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
+      - name: Generate and stage the release update manifest
+        run: |
+          node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
+          cp dist/updates/manifest.json ".artifacts/updates-manifest-${{ needs.web.outputs.version }}.json"
       - name: Select release verification targets
         shell: bash
         run: |
@@ -450,6 +453,7 @@ jobs:
           fi
           echo "RELEASE_TARGETS=$targets" >> "$GITHUB_ENV"
       - name: Deploy web to Cloudflare Pages when configured
+        id: web_deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -458,11 +462,13 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ] || [ -z "$CLOUDFLARE_PROJECT_NAME" ]; then
             echo "::warning:: Web deploy skipped: Cloudflare Pages secrets are not configured"
             {
-              echo "## Signing skipped"
-              echo "Web deploy: Cloudflare Pages credentials are absent. Release assets are still prepared."
+              echo "## Web deploy skipped"
+              echo "Cloudflare Pages credentials are absent; the release-hosted manifest will be verified instead."
             } >> "$GITHUB_STEP_SUMMARY"
+            echo "manifest_url=https://github.com/${{ github.repository }}/releases/download/v${{ needs.web.outputs.version }}/updates-manifest-${{ needs.web.outputs.version }}.json" >> "$GITHUB_OUTPUT"
           else
             npx wrangler pages deploy dist --project-name "$CLOUDFLARE_PROJECT_NAME"
+            echo "manifest_url=https://updates.yayra.app/updates/manifest.json" >> "$GITHUB_OUTPUT"
           fi
       - name: Publish draft-first GitHub Release
         env:
@@ -471,5 +477,5 @@ jobs:
       - name: Verify live release and manifest contract
         env:
           GH_TOKEN: ${{ github.token }}
-          UPDATE_MANIFEST_URL: https://updates.yayra.app/updates/manifest.json
+          UPDATE_MANIFEST_URL: ${{ steps.web_deploy.outputs.manifest_url }}
         run: node scripts/release-verify.mjs "v${{ needs.web.outputs.version }}"
