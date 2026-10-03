@@ -111,8 +111,20 @@ jobs:
           fi
       - run: npm run package:linux
       - run: npm run verify:packaging
+      - name: Sign Linux packages and AppImage
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_PASSWORD: ${{ secrets.LINUX_SIGNING_KEY_PASSWORD }}
+        run: node scripts/sign-linux-artifacts.mjs release
       - id: artifact
-        run: node scripts/prepare-artifact.mjs --target linux --signed ${{ steps.signing.outputs.signed }} --why-not "LINUX_SIGNING_KEY not configured"
+        shell: bash
+        run: |
+          input="release/*.deb,release/*.AppImage"
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            input="$input,release/*.deb.asc,release/*.AppImage.asc"
+          fi
+          node scripts/prepare-artifact.mjs --target linux --input "$input" --signed "${{ steps.signing.outputs.signed }}" --why-not "LINUX_SIGNING_KEY not configured"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.artifact_name }}
@@ -215,6 +227,7 @@ jobs:
             echo "signed=false" >> "$GITHUB_OUTPUT"
           else
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-release.keystore
+            echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android-release.keystore" >> "$GITHUB_ENV"
             echo "signed=true" >> "$GITHUB_OUTPUT"
           fi
       - run: npm run build:android
@@ -267,10 +280,59 @@ jobs:
           fi
       - run: node scripts/ensure-capacitor-platform.mjs ios
       - run: npx cap sync ios
+      - name: Install Apple signing credentials
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/yayra-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          P12_PATH="$RUNNER_TEMP/yayra-signing.p12"
+          PRIVATE_KEY_DIR="$RUNNER_TEMP/private_keys"
+          PRIVATE_KEY_PATH="$PRIVATE_KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          python3 - "$P12_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          value = os.environ["APPLE_CERTIFICATE_P12_BASE64"]
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(value))
+          PY
+          security import "$P12_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          mkdir -p "$PRIVATE_KEY_DIR"
+          python3 - "$PRIVATE_KEY_PATH" <<'PY'
+          import base64, os, pathlib, sys
+          value = os.environ["APP_STORE_CONNECT_PRIVATE_KEY"].replace('\\n', '\n')
+          if "BEGIN PRIVATE KEY" not in value:
+              value = base64.b64decode(value).decode()
+          pathlib.Path(sys.argv[1]).write_text(value)
+          PY
+          echo "APPLE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "APPLE_AUTH_KEY_PATH=$PRIVATE_KEY_PATH" >> "$GITHUB_ENV"
+          cat > ios/exportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+          </dict></plist>
+          EOF
       - name: Build signed or unsigned archive
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-            npm run build:ios
+            xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -authenticationKeyPath "$APPLE_AUTH_KEY_PATH" -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" -archivePath build/yayra.xcarchive archive
+            xcodebuild -exportArchive -archivePath build/yayra.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist -allowProvisioningUpdates -authenticationKeyPath "$APPLE_AUTH_KEY_PATH" -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
           else
             xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO archive -archivePath build/yayra.xcarchive
           fi
@@ -308,6 +370,8 @@ jobs:
           path: .artifacts
           merge-multiple: false
       - run: node scripts/ci-summary.mjs .artifacts
+      - name: Refuse to publish unsigned artifacts
+        run: node scripts/assert-release-signed.mjs .artifacts
       - run: node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
       - name: Deploy web to Cloudflare Pages when configured
         env:

@@ -47,7 +47,7 @@ Unsigned artifacts include `-unsigned` in the artifact name. Each artifact direc
 |---|---|---|---|
 | `web` | `ubuntu-latest` | `ibrowse-pwa-<version>.tar.gz`, `SHA256SUMS.txt`, `build-info.json` | PWA bundle is not code-signed; integrity is represented by SHA256. |
 | `desktop-win` | `windows-latest` | NSIS installer `.exe`, portable `.exe`, sums/info | Signed when Windows cert secrets exist; otherwise uploaded as `-unsigned`. |
-| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, sums/info | Signed when Linux signing key exists; otherwise uploaded as `-unsigned`. |
+| `desktop-linux` | `ubuntu-latest` | `.deb`, `.AppImage`, detached `.asc` signatures, sums/info | GPG-signs both Linux packages when `LINUX_SIGNING_KEY` exists; otherwise uploaded as `-unsigned`. |
 | `android` | `ubuntu-latest` | release APK, sums/info | Signed when Android keystore secrets exist; otherwise uploaded as `-unsigned`. |
 | `ios` | `macos-14` | `.ipa` for signed export or `.xcarchive` for unsigned archive, sums/info | Signed/exported when Apple/App Store Connect secrets exist; otherwise unsigned archive artifact. |
 
@@ -67,8 +67,9 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 |---|---|---|
 | `WINDOWS_CERTIFICATE_BASE64` | Windows | NSIS and portable `.exe` are built unsigned; artifact name includes `-unsigned`. |
 | `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Same as above. |
-| `LINUX_SIGNING_KEY` | Linux | `.deb` and `.AppImage` are built unsigned; artifact name includes `-unsigned`. |
-| `ANDROID_KEYSTORE_BASE64` | Android | APK is assembled unsigned; artifact name includes `-unsigned`. |
+| `LINUX_SIGNING_KEY` | Linux | Base64-encoded or armored GPG private key used to create detached `.asc` signatures; without it the artifact name includes `-unsigned`. |
+| `LINUX_SIGNING_KEY_PASSWORD` | Linux | Optional passphrase for the GPG private key. |
+| `ANDROID_KEYSTORE_BASE64` | Android | Keystore used to sign the release APK; without it the artifact name includes `-unsigned`. |
 | `ANDROID_KEYSTORE_PASSWORD` | Android | Same as above. |
 | `ANDROID_KEY_ALIAS` | Android | Same as above. |
 | `ANDROID_KEY_PASSWORD` | Android | Same as above. |
@@ -96,7 +97,7 @@ All secrets are optional-but-honest. When a required secret is absent, the workf
 
 2. Push through the normal PR path. Do not tag or publish from a PR.
 3. After merge to `main`, release.yml builds all artifacts. It refuses to continue if the version already exists in GitHub Releases.
-4. To publish, run release.yml manually with `publish: true` and the desired `targets`, or push an approved `v*` tag. The publish job runs in Environment `release`.
+4. To publish, run release.yml manually with `publish: true` and the desired `targets`, or push an approved `v*` tag. The publish job runs in Environment `release` and refuses any artifact set whose `build-info.json` is unsigned.
 5. Publish sequence:
    - create or reuse draft release with `gh release create <tag> <files…> -t <title> -n <body> --draft`;
    - upload/replace assets with `gh release upload <tag> <files…> --clobber`;
