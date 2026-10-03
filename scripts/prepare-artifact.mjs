@@ -14,7 +14,7 @@ const version = process.env.VERSION_OVERRIDE || pkg.version;
 const sha = (process.env.GITHUB_SHA || git(['rev-parse', 'HEAD']) || 'unknown').slice(0, 7);
 const runner = process.env.RUNNER_OS || `${process.platform}-${process.arch}`;
 const builtAt = new Date().toISOString();
-const artifactName = `ibrowse-${target}-${version}-${sha}${signed ? '' : '-unsigned'}`;
+const artifactName = `yayra-${target}-${version}-${sha}${signed ? '' : '-unsigned'}`;
 const outDir = path.join('.artifacts', artifactName);
 await mkdir(outDir, { recursive: true });
 const files = await resolveInputs(input);
@@ -22,7 +22,7 @@ if (!files.length) throw new Error(`no files matched for target=${target} input=
 for (const file of files) {
   const info = await stat(file);
   if (info.isDirectory()) {
-    const archive = path.join(outDir, `ibrowse-${target}-${version}.tar.gz`);
+    const archive = path.join(outDir, `yayra-${target}-${version}.tar.gz`);
     const tar = spawnSync('tar', ['-czf', archive, '-C', path.dirname(file), path.basename(file)], { encoding: 'utf8' });
     if (tar.status !== 0) throw new Error(`tar failed for ${file}: ${tar.stderr || tar.stdout}`);
   } else {

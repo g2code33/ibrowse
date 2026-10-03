@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>com.ibrowse.app</string>
+  <string>com.yayra.app</string>
   <key>CFBundleDisplayName</key>
-  <string>ibrowse</string>
+  <string>yayra</string>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleVersion</key>

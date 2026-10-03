@@ -1,6 +1,6 @@
 {
-  "appId": "com.ibrowse.app",
-  "appName": "ibrowse",
+  "appId": "com.yayra.app",
+  "appName": "yayra",
   "webDir": "dist",
   "server": {
     "androidScheme": "https"

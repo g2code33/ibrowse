@@ -1,7 +1,7 @@
 {
-  "name": "ibrowse",
-  "short_name": "ibrowse",
-  "id": "com.ibrowse.app",
+  "name": "yayra",
+  "short_name": "yayra",
+  "id": "com.yayra.app",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

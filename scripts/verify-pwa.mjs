@@ -22,7 +22,7 @@ for (const ref of refs) {
   if (!existsSync(path.join(dist, clean))) fail(`index.html reference does not resolve: ${ref}`);
 }
 const sw = await readFile(path.join(dist, 'sw.js'), 'utf8');
-if (!sw.includes('ibrowse-') || !sw.includes('PRECACHE')) fail('sw.js does not contain the generated precache/cache version');
+if (!sw.includes('yayra-') || !sw.includes('PRECACHE')) fail('sw.js does not contain the generated precache/cache version');
 if (!html.includes("cache: 'no-store'") && !(await readFile(path.join(dist, 'src/services/updateService.js'), 'utf8')).includes("cache: 'no-store'")) {
   fail('manifest fetch is not visibly configured with cache: no-store');
 }

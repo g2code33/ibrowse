@@ -1,9 +1,9 @@
 import { DEFAULT_UPDATE_CONFIG, compareSemver, mergeWithUpdateDefaults } from '../config/updates.js';
 
-const LAST_GOOD_KEY = 'ibrowse:update:last-good-manifest';
-const STAGED_KEY = 'ibrowse:update:staged-download';
-const SNOOZE_PREFIX = 'ibrowse:update:snooze:';
-const SESSION_PROMPT_PREFIX = 'ibrowse:update:prompted:';
+const LAST_GOOD_KEY = 'yayra:update:last-good-manifest';
+const STAGED_KEY = 'yayra:update:staged-download';
+const SNOOZE_PREFIX = 'yayra:update:snooze:';
+const SESSION_PROMPT_PREFIX = 'yayra:update:prompted:';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export class MemoryStorage {

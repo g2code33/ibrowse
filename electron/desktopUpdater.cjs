@@ -6,11 +6,11 @@ const crypto = require('node:crypto');
 const UPDATE_LOG_PREFIX = '[updates]';
 
 function registerDesktopUpdateHandlers({ getWindow, logger = console.log }) {
-  ipcMain.handle('ibrowse:updates-check', async () => {
+  const handleCheck = async () => {
     logger(`${UPDATE_LOG_PREFIX} desktop manual check requested`);
     return { status: 'checking', autoDownload: false };
-  });
-  ipcMain.handle('ibrowse:updates-install', async () => {
+  };
+  const handleInstall = async () => {
     const win = getWindow();
     if (win && win.webContents && win.webContents.isLoading()) {
       logger(`${UPDATE_LOG_PREFIX} install delayed because renderer is busy`);
@@ -18,7 +18,12 @@ function registerDesktopUpdateHandlers({ getWindow, logger = console.log }) {
     }
     logger(`${UPDATE_LOG_PREFIX} install_started desktop relaunch requested`);
     return { status: 'install_started' };
-  });
+  };
+
+  ipcMain.handle('yayra:updates-check', handleCheck);
+  ipcMain.handle('yayra:updates-install', handleInstall);
+  ipcMain.handle('ibrowse:updates-check', handleCheck);
+  ipcMain.handle('ibrowse:updates-install', handleInstall);
 }
 
 function getStagingPath(version, target) {

@@ -1,11 +1,11 @@
-export const APP_ID = 'com.ibrowse.app';
-export const APP_NAME = 'ibrowse';
+export const APP_ID = 'com.yayra.app';
+export const APP_NAME = 'yayra';
 export const UPDATE_CHANNEL = 'stable';
 
 export const DEFAULT_UPDATE_CONFIG = Object.freeze({
   enabled: true,
   channel: 'stable',
-  notes: { en: 'Initial ibrowse release infrastructure.' },
+  notes: { en: 'Initial yayra release infrastructure.' },
   checkIntervalMinutes: 720,
   telemetry: false,
   minSupported: {
@@ -31,11 +31,11 @@ export const DEFAULT_UPDATE_CONFIG = Object.freeze({
   pwa: { reloadStrategy: 'prompt' },
   rollout: { percent: 100, allowlistRoles: ['admin'] },
   sources: {
-    windows: 'https://github.com/g2code33/iFLY/releases/latest',
-    linux: 'https://github.com/g2code33/iFLY/releases/latest',
-    android: 'https://github.com/g2code33/iFLY/releases/latest',
-    ios: 'https://testflight.apple.com/join/ibrowse',
-    pwa: 'https://ibrowse.pages.dev'
+    windows: 'https://github.com/g2code33/yayra/releases/latest',
+    linux: 'https://github.com/g2code33/yayra/releases/latest',
+    android: 'https://github.com/g2code33/yayra/releases/latest',
+    ios: 'https://testflight.apple.com/join/yayra',
+    pwa: 'https://yayra.pages.dev'
   }
 });
 

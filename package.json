@@ -1,16 +1,18 @@
 {
-  "name": "ibrowse",
-  "productName": "ibrowse",
+  "name": "yayra",
+  "productName": "yayra",
   "version": "0.1.0",
-  "description": "ibrowse cross-platform PWA, desktop, and mobile shell.",
+  "description": "Yayra cross-platform floating browser for Android, Windows, and Linux.",
   "type": "module",
   "main": "electron/main.cjs",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node scripts/dev-server.mjs",
+    "start": "node scripts/dev-server.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
     "lint": "node scripts/lint.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node scripts/branding.mjs --write && node --test tests/*.test.mjs",
     "prebuild:web": "npm run refresh:branding && npm run verify:versions",
     "build:web": "node scripts/build-web.mjs",
     "build": "npm run build:web",
@@ -20,12 +22,16 @@
     "verify:packaging": "node scripts/verify-packaging.mjs",
     "verify:updates": "node --test tests/update-service.test.mjs tests/admin-updates.test.mjs",
     "package:linux:dir": "electron-builder --linux dir --publish never",
+    "package:linux:deb": "node scripts/package-linux-deb.mjs",
     "package:linux": "electron-builder --linux deb AppImage --publish never",
     "package:win": "electron-builder --win nsis portable --publish never",
+    "package:windows": "node scripts/package-windows.mjs",
+    "package:android": "node scripts/package-android.mjs",
+    "package:all": "npm run package:android && npm run package:windows && npm run package:linux:deb",
     "build:desktop:linux": "npm run build:web && npm run package:linux",
     "build:desktop:win": "npm run build:web && npm run package:win",
     "build:android": "node scripts/ensure-capacitor-platform.mjs android && npx cap sync android && cd android && ./gradlew assembleRelease",
-    "build:ios": "node scripts/ensure-capacitor-platform.mjs ios && npx cap sync ios && xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS -archivePath build/ibrowse.xcarchive archive && xcodebuild -exportArchive -archivePath build/ibrowse.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist",
+    "build:ios": "node scripts/ensure-capacitor-platform.mjs ios && npx cap sync ios && xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS -archivePath build/yayra.xcarchive archive && xcodebuild -exportArchive -archivePath build/yayra.xcarchive -exportPath build/ios-export -exportOptionsPlist ios/exportOptions.plist",
     "smoke:desktop": "node scripts/smoke-desktop.mjs",
     "ci:gates": "npm run typecheck && npm run lint && npm test && npm run build:web && npm run verify:pwa && npm run verify:packaging && npm run verify:updates && npm run verify:branding && npm run smoke:desktop",
     "ci:clean-vm": "node scripts/clean-vm-check.mjs",
@@ -46,9 +52,9 @@
     "typescript": "5.6.3"
   },
   "build": {
-    "appId": "com.ibrowse.app",
-    "productName": "ibrowse",
-    "executableName": "ibrowse",
+    "appId": "com.yayra.app",
+    "productName": "yayra",
+    "executableName": "yayra",
     "artifactName": "${productName}-${os}-${arch}-${version}.${ext}",
     "asar": true,
     "directories": {
@@ -84,11 +90,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "ibrowse",
-      "uninstallDisplayName": "ibrowse",
+      "shortcutName": "yayra",
+      "uninstallDisplayName": "yayra",
       "installerIcon": "build/icons/installer.ico",
       "uninstallerIcon": "build/icons/uninstaller.ico",
-      "artifactName": "ibrowse-setup-${version}.${ext}"
+      "artifactName": "yayra-setup-${version}.${ext}"
     },
     "linux": {
       "target": [
@@ -96,7 +102,7 @@
         "AppImage"
       ],
       "category": "Network",
-      "executableName": "ibrowse",
+      "executableName": "yayra",
       "icon": "build/icons/hicolor",
       "syncDesktopName": true
     },
@@ -105,7 +111,7 @@
       "depends": []
     },
     "appImage": {
-      "artifactName": "ibrowse-${version}.${ext}"
+      "artifactName": "yayra-${version}.${ext}"
     },
     "electronVersion": "31.7.7"
   },
@@ -113,5 +119,5 @@
     "electron": "31.7.7"
   },
   "author": "g2code33",
-  "desktopName": "ibrowse"
+  "desktopName": "yayra"
 }

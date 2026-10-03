@@ -19,7 +19,7 @@ function renderSheet({ state, service, promptSession, force }) {
   const size = state.download?.bytes ? `${Math.ceil(state.download.bytes / 1024 / 1024)} MB` : 'size unavailable';
   sheet.innerHTML = `
     <div class="sheet-card">
-      <h2 id="mobile-update-title">Update ibrowse to ${escapeHtml(state.version)}</h2>
+      <h2 id="mobile-update-title">Update yayra to ${escapeHtml(state.version)}</h2>
       <p>${escapeHtml(size)} · ${escapeHtml(state.manifest?.publishedAt || 'date unavailable')}</p>
       <article>${escapeHtml(notes).slice(0, 2000)}</article>
       <div class="sheet-actions"></div>

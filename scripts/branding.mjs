@@ -34,7 +34,7 @@ async function main() {
   }
   expected.set('public/apple-touch-icon.png', encodePng(resizeNearest(source, 180)));
   for (const size of hicolorSizes) {
-    expected.set(`build/icons/hicolor/${size}x${size}/apps/ibrowse.png`, encodePng(resizeNearest(source, size)));
+    expected.set(`build/icons/hicolor/${size}x${size}/apps/yayra.png`, encodePng(resizeNearest(source, size)));
   }
   const ico = makeIco([16, 24, 32, 48, 64, 96, 128, 256].map((size) => ({ size, png: encodePng(resizeNearest(source, size)) })));
   expected.set('build/icons/icon.ico', ico);
@@ -111,8 +111,8 @@ function makeIco(images) {
 async function verifyInstalled(prefix, sourceBuffer) {
   const sourceDims = dimensions(sourceBuffer);
   const candidates = [
-    path.join(prefix, 'share/icons/hicolor/512x512/apps/ibrowse.png'),
-    path.join(prefix, 'ibrowse.png')
+    path.join(prefix, 'share/icons/hicolor/512x512/apps/yayra.png'),
+    path.join(prefix, 'yayra.png')
   ];
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
@@ -123,7 +123,7 @@ async function verifyInstalled(prefix, sourceBuffer) {
       return;
     }
   }
-  console.error(`installed branding verification failed: no ibrowse icon found under ${prefix}`);
+  console.error(`installed branding verification failed: no yayra icon found under ${prefix}`);
   process.exit(1);
 }
 

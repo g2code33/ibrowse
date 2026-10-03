@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "upgrade" ] || [ "$1" = "failed-upgrade" ]; then
+    # Update icon cache and desktop database after binary removal
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+    fi
+    # Note: User browsing history, settings, and local database stored in
+    # ~/.config/yayra or ~/.local/share/yayra are intentionally preserved.
+fi
+
+if [ "$1" = "purge" ]; then
+    # On explicit apt purge, remove system-wide configuration only
+    rm -rf /etc/yayra >/dev/null 2>&1 || true
+fi
+
+exit 0

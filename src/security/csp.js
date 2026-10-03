@@ -1,6 +1,6 @@
-export const DESKTOP_CUSTOM_SCHEME = 'ibrowse';
-export const ASSET_ORIGINS = Object.freeze(['https://ibrowse.pages.dev']);
-export const API_ORIGINS = Object.freeze(['https://updates.ibrowse.app']);
+export const DESKTOP_CUSTOM_SCHEME = 'yayra';
+export const ASSET_ORIGINS = Object.freeze(['https://yayra.pages.dev']);
+export const API_ORIGINS = Object.freeze(['https://updates.yayra.app']);
 
 export function buildContentSecurityPolicy() {
   const scheme = `${DESKTOP_CUSTOM_SCHEME}:`;

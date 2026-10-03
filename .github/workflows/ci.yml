@@ -31,7 +31,7 @@ jobs:
       - run: npm run verify:branding
       - uses: actions/upload-artifact@v4
         with:
-          name: ibrowse-web-dist-${{ github.sha }}
+          name: yayra-web-dist-${{ github.sha }}
           path: dist
           if-no-files-found: error
 
@@ -49,7 +49,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: ibrowse-web-dist-${{ github.sha }}
+          name: yayra-web-dist-${{ github.sha }}
           path: dist
       - name: Report unsigned Linux build
         run: |
@@ -75,7 +75,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: ibrowse-web-dist-${{ github.sha }}
+          name: yayra-web-dist-${{ github.sha }}
           path: dist
       - name: Report Windows signing status
         shell: bash
@@ -110,7 +110,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: ibrowse-web-dist-${{ github.sha }}
+          name: yayra-web-dist-${{ github.sha }}
           path: dist
       - name: Report Android signing status
         env:
@@ -139,7 +139,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: ibrowse-web-dist-${{ github.sha }}
+          name: yayra-web-dist-${{ github.sha }}
           path: dist
       - name: Report Apple signing status
         env:
@@ -155,4 +155,4 @@ jobs:
           fi
       - run: node scripts/ensure-capacitor-platform.mjs ios
       - run: npx cap sync ios
-      - run: xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO archive -archivePath build/ibrowse.xcarchive
+      - run: xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO archive -archivePath build/yayra.xcarchive

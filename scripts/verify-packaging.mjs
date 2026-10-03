@@ -10,30 +10,30 @@ const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const build = pkg.build;
 const failures = [];
 
-assert(build.appId === 'com.ibrowse.app', 'appId must be explicit');
-assert(build.productName === 'ibrowse', 'productName must be explicit');
-assert(build.executableName === 'ibrowse', 'executableName must be ibrowse');
+assert(build.appId === 'com.yayra.app', 'appId must be explicit');
+assert(build.productName === 'yayra', 'productName must be explicit');
+assert(build.executableName === 'yayra', 'executableName must be yayra');
 assert(build.win?.requestedExecutionLevel === 'asInvoker', 'Windows requestedExecutionLevel must be asInvoker');
 assert(build.nsis?.oneClick === false, 'NSIS oneClick must be false');
 assert(build.nsis?.allowToChangeInstallationDirectory === true, 'NSIS allowToChangeInstallationDirectory must be true');
-assert(build.nsis?.shortcutName === 'ibrowse', 'NSIS shortcutName must be explicit');
-assert(build.nsis?.uninstallDisplayName === 'ibrowse', 'NSIS uninstallDisplayName must be explicit');
+assert(build.nsis?.shortcutName === 'yayra', 'NSIS shortcutName must be explicit');
+assert(build.nsis?.uninstallDisplayName === 'yayra', 'NSIS uninstallDisplayName must be explicit');
 for (const icon of ['build/icons/icon.ico', 'build/icons/installer.ico', 'build/icons/uninstaller.ico']) assert(existsSync(path.join(root, icon)), `${icon} missing`);
 
-const desktop = parseDesktop(await readFile(path.join(root, 'build/linux/ibrowse.desktop'), 'utf8'));
-assert(desktop.Name === 'ibrowse', '.desktop Name must equal executableName');
-assert(desktop.StartupWMClass === 'ibrowse', '.desktop StartupWMClass must equal executableName');
-assert(desktop.Icon === 'ibrowse', '.desktop Icon must be ibrowse');
-const appImageDesktop = parseDesktop(await readFile(path.join(root, 'build/linux/ibrowse-appimage.desktop'), 'utf8'));
+const desktop = parseDesktop(await readFile(path.join(root, 'build/linux/yayra.desktop'), 'utf8'));
+assert(desktop.Name === 'yayra', '.desktop Name must equal executableName');
+assert(desktop.StartupWMClass === 'yayra', '.desktop StartupWMClass must equal executableName');
+assert(desktop.Icon === 'yayra', '.desktop Icon must be yayra');
+const appImageDesktop = parseDesktop(await readFile(path.join(root, 'build/linux/yayra-appimage.desktop'), 'utf8'));
 assert(appImageDesktop.StartupWMClass !== desktop.StartupWMClass, 'AppImage desktop file must not fight the deb StartupWMClass');
-const icon48 = path.join(root, 'build/icons/hicolor/48x48/apps/ibrowse.png');
+const icon48 = path.join(root, 'build/icons/hicolor/48x48/apps/yayra.png');
 assert(existsSync(icon48), '48x48 hicolor icon missing');
 if (existsSync(icon48)) {
   const dims = dimensions(await readFile(icon48));
   assert(dims.width === 48 && dims.height === 48, '48x48 hicolor icon dimensions do not resolve to 48x48');
 }
 for (const size of [16, 24, 32, 48, 64, 96, 128, 256, 512]) {
-  assert(existsSync(path.join(root, `build/icons/hicolor/${size}x${size}/apps/ibrowse.png`)), `hicolor ${size} icon missing`);
+  assert(existsSync(path.join(root, `build/icons/hicolor/${size}x${size}/apps/yayra.png`)), `hicolor ${size} icon missing`);
 }
 const hook = 'build/linux/after-install.sh';
 const hookText = await readFile(path.join(root, hook), 'utf8');

@@ -4,7 +4,7 @@ const DEFAULT_MANIFEST = {
   latest: { windows: '0.1.0', linux: '0.1.0', ios: '0.1.0', android: '0.1.0', pwa: '0.1.0' },
   minSupported: { windows: '0.1.0', linux: '0.1.0', ios: '0.1.0', android: '0.1.0', pwa: '0.1.0' },
   downloads: {},
-  notes: { en: 'Initial ibrowse release infrastructure.' },
+  notes: { en: 'Initial yayra release infrastructure.' },
   rollout: { percent: 100, allowlist: [] },
   publishedAt: '2026-10-02T00:00:00.000Z',
   ttlSeconds: 300

@@ -66,7 +66,7 @@ test('download verifies byte size and sha256 before staging', async () => {
     target: 'pwa',
     installedVersion: '1.0.0',
     fetchImpl: async (url) => {
-      if (String(url).includes('manifest')) return jsonResponse({ ...manifest, downloads: { pwa: { url: 'https://updates.ibrowse.app/payload', sha256: badSha, bytes: payload.byteLength } } });
+      if (String(url).includes('manifest')) return jsonResponse({ ...manifest, downloads: { pwa: { url: 'https://updates.yayra.app/payload', sha256: badSha, bytes: payload.byteLength } } });
       return bytesResponse(payload);
     },
     logger: () => {}

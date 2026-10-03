@@ -20,7 +20,7 @@ if (!checkOnly) {
 parseSemver(next);
 const files = [
   updateJson('package.json', (json) => { json.version = next; }),
-  updateJson('capacitor.config.json', (json) => { json.appId = 'com.ibrowse.app'; json.appName = 'ibrowse'; json.webDir = 'dist'; }),
+  updateJson('capacitor.config.json', (json) => { json.appId = 'com.yayra.app'; json.appName = 'yayra'; json.webDir = 'dist'; }),
   updateJson('public/manifest.webmanifest', (json) => { json.version = next; json.cacheVersion = next; }),
   updateJson('electron/app-version.json', (json) => { json.version = next; })
 ];
@@ -56,7 +56,7 @@ if (checkOnly) {
   console.log(`version lockstep passed: ${next}`);
 } else {
   console.log(`version updated to ${next}`);
-  console.log(`Commit with: git add package.json package-lock.json capacitor.config.json public/manifest.webmanifest native/android/version.gradle native/ios/Info.plist electron/app-version.json && git commit -m "chore: bump ibrowse to v${next} because release manifests must match"`);
+  console.log(`Commit with: git add package.json package-lock.json capacitor.config.json public/manifest.webmanifest native/android/version.gradle native/ios/Info.plist electron/app-version.json && git commit -m "chore: bump yayra to v${next} because release manifests must match"`);
 }
 
 function computeNext(version, bump) {

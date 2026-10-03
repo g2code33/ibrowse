@@ -3,6 +3,7 @@ dist/
 release/
 .artifacts/
 .release-upload/
+.deb-staging/
 /android/
 /ios/
 *.log

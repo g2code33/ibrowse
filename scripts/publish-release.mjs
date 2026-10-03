@@ -8,8 +8,8 @@ const tag = process.argv[2] || `v${JSON.parse(await readFile('package.json', 'ut
 const artifactRoot = process.argv[3] || '.artifacts';
 const files = await stageReleaseFiles(artifactRoot);
 if (!files.length) throw new Error(`no release files found under ${artifactRoot}`);
-const title = `ibrowse ${tag}`;
-const body = `Automated ibrowse release ${tag}. Assets are uploaded draft-first, verified, then published.`;
+const title = `yayra ${tag}`;
+const body = `Automated yayra release ${tag}. Assets are uploaded draft-first, verified, then published.`;
 const view = gh(['release', 'view', tag, '--json', 'isDraft', '--jq', '.isDraft'], { allowFailure: true });
 if (view.status === 0) {
   gh(['release', 'upload', tag, ...files, '--clobber']);

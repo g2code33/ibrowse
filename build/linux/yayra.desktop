@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=yayra
+Exec=yayra %U
+Terminal=false
+Type=Application
+Icon=yayra
+StartupWMClass=yayra
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/yayra;
+Comment=Lightweight cross-platform floating browser with glassmorphism overlay

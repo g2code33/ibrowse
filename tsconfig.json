@@ -10,6 +10,6 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.js", "worker/**/*.mjs"],
+  "include": ["packages/**/*.js", "packages/**/*.ts", "src/**/*.js", "worker/**/*.mjs"],
   "exclude": ["dist", "release", "node_modules"]
 }

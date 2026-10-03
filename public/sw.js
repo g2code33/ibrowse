@@ -1,6 +1,6 @@
 const BUILD_VERSION = '__BUILD_VERSION__';
 const BUILD_HASH = '__BUILD_SHA__';
-const CACHE_NAME = `ibrowse-${BUILD_VERSION}-${BUILD_HASH}`;
+const CACHE_NAME = `yayra-${BUILD_VERSION}-${BUILD_HASH}`;
 const PRECACHE = __PRECACHE_MANIFEST__;
 
 self.addEventListener('install', (event) => {
@@ -8,7 +8,7 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('ibrowse-') && key !== CACHE_NAME).map((key) => caches.delete(key)))));
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith('yayra-') && key !== CACHE_NAME).map((key) => caches.delete(key)))));
 });
 
 self.addEventListener('message', (event) => {
@@ -23,4 +23,4 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(caches.match(request).then((cached) => cached || fetch(request)));
 });
 
-self.__IBROWSE_BUILD = { version: BUILD_VERSION, hash: BUILD_HASH, precache: PRECACHE };
+self.__YAYRA_BUILD = { version: BUILD_VERSION, hash: BUILD_HASH, precache: PRECACHE };

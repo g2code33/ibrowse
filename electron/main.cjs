@@ -4,13 +4,13 @@ const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
 
-const CUSTOM_SCHEME = 'ibrowse';
+const CUSTOM_SCHEME = 'yayra';
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 let mainWindow;
 let lastLoadError = null;
 
 protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
-if (process.env.IBROWSE_SMOKE === '1') {
+if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.commandLine.appendSwitch('headless');
   app.disableHardwareAcceleration();
 }
@@ -36,7 +36,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    show: process.env.IBROWSE_SMOKE !== '1',
+    show: process.env.YAYRA_SMOKE !== '1' && process.env.IBROWSE_SMOKE !== '1',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -45,6 +45,12 @@ function createWindow() {
     }
   });
   registerDesktopUpdateHandlers({ getWindow: () => mainWindow });
+  ipcMain.handle('yayra:get-launch-info', () => ({
+    version: app.getVersion(),
+    updateState: 'diagnostics-ready',
+    flags: process.argv.filter((arg) => arg.startsWith('--')),
+    lastLoadError
+  }));
   ipcMain.handle('ibrowse:get-launch-info', () => ({
     version: app.getVersion(),
     updateState: 'diagnostics-ready',
@@ -53,19 +59,20 @@ function createWindow() {
   }));
   mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
     lastLoadError = { code, description, url };
-    console.error(`[ibrowse] renderer load failed; retrying file fallback code=${code} url=${url}`);
+    console.error(`[yayra] renderer load failed; retrying file fallback code=${code} url=${url}`);
     if (!mainWindow.webContents.isDestroyed()) mainWindow.loadFile(path.join(DIST_DIR, 'index.html'));
   });
-  const loadTarget = process.env.IBROWSE_FORCE_BAD_LOAD === '1' ? `${CUSTOM_SCHEME}://app/does-not-exist.html` : `${CUSTOM_SCHEME}://app/index.html`;
+  const isBadLoad = process.env.YAYRA_FORCE_BAD_LOAD === '1' || process.env.IBROWSE_FORCE_BAD_LOAD === '1';
+  const loadTarget = isBadLoad ? `${CUSTOM_SCHEME}://app/does-not-exist.html` : `${CUSTOM_SCHEME}://app/index.html`;
   mainWindow.loadURL(loadTarget);
-  if (process.env.IBROWSE_SMOKE === '1') {
+  if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
     mainWindow.webContents.once('did-finish-load', async () => {
       const result = await mainWindow.webContents.executeJavaScript('({ title: document.title, hasRoot: Boolean(document.getElementById("app")), headerControl: Boolean(document.getElementById("update-button") || document.getElementById("top-header")) })');
-      console.log(`[ibrowse-smoke] ${JSON.stringify(result)}`);
+      console.log(`[yayra-smoke] ${JSON.stringify(result)}`);
       app.quit();
     });
     setTimeout(() => {
-      console.error('[ibrowse-smoke] timeout waiting for renderer paint');
+      console.error('[yayra-smoke] timeout waiting for renderer paint');
       app.exit(1);
     }, 15000).unref();
   }

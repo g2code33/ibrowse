@@ -5,12 +5,12 @@ import { isJavaScriptMime, mimeTypeFor, normalizeAssetPath } from '../src/securi
 
 test('CSP is pinned to self, exact hosts, and desktop custom scheme', () => {
   const csp = buildContentSecurityPolicy();
-  assert.match(csp, /default-src 'self' ibrowse:/);
-  assert.match(csp, /script-src 'self' ibrowse:/);
-  assert.match(csp, /style-src 'self' 'unsafe-inline' ibrowse:/);
-  assert.match(csp, /img-src 'self' data: blob: ibrowse: https:\/\/ibrowse\.pages\.dev/);
-  assert.match(csp, /connect-src 'self' ibrowse: https:\/\/updates\.ibrowse\.app/);
-  assert.equal(DESKTOP_CUSTOM_SCHEME, 'ibrowse');
+  assert.match(csp, /default-src 'self' yayra:/);
+  assert.match(csp, /script-src 'self' yayra:/);
+  assert.match(csp, /style-src 'self' 'unsafe-inline' yayra:/);
+  assert.match(csp, /img-src 'self' data: blob: yayra: https:\/\/yayra\.pages\.dev/);
+  assert.match(csp, /connect-src 'self' yayra: https:\/\/updates\.yayra\.app/);
+  assert.equal(DESKTOP_CUSTOM_SCHEME, 'yayra');
 });
 
 test('local asset serving refuses traversal and preserves JS MIME type', () => {

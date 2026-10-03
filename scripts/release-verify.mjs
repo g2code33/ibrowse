@@ -24,7 +24,7 @@ for (const target of targets) {
     process.exit(1);
   }
 }
-const temp = await mkdtemp(path.join(tmpdir(), 'ibrowse-release-verify-'));
+const temp = await mkdtemp(path.join(tmpdir(), 'yayra-release-verify-'));
 try {
   gh(['release', 'download', tag, '-D', temp, '-p', '*SHA256SUMS.txt', '--clobber']);
   const sums = await readSums(temp);
