@@ -2134,7 +2134,7 @@ export class BrowserShell {
         <div class="fb-toolbar-actions">
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-download-btn" title="Downloads" aria-label="Downloads">${Icons.download}</button>
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-extensions-btn" title="Extensions and Shields" aria-label="Extensions and Shields">${Icons.shield}</button>
-          <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span></button>
+          <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span><span class="fb-mode-text">${this.state.desktopFloatingMode === 'browser-first' ? 'Browser' : 'Bubble'}</span></button>
           <button class="fb-action-btn fb-menu-btn fb-toolbar-action-btn fb-mini-drawer-btn" title="Customize and control Yayra" aria-label="Main menu">${Icons.moreVertical}</button>
         </div>
       </nav>
@@ -2623,8 +2623,10 @@ export class BrowserShell {
 
     // Submenu click toggling for mobile / touch
     drawer.querySelectorAll('.fb-drawer-item-has-submenu').forEach((parent) => {
-      parent.addEventListener('click', (e) => {
-        if (e.target.closest('.fb-drawer-submenu button')) return;
+      const button = parent.querySelector('.fb-drawer-item');
+      button?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
         parent.classList.toggle('open');
       });
     });
@@ -2654,9 +2656,27 @@ export class BrowserShell {
       this.reopenLastClosedTab();
     });
 
-    drawer.querySelector('.fb-dr-tabsearch')?.addEventListener('click', () => {
+    drawer.querySelectorAll('.fb-dr-tabsearch').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.state.isSideDrawerOpen = false;
+        this.openModal('tab-switcher');
+      });
+    });
+
+    drawer.querySelector('.fb-dr-tg-new')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.createNewTab();
+    });
+
+    drawer.querySelector('.fb-dr-tg-add')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
       this.openModal('tab-switcher');
+    });
+
+    drawer.querySelector('.fb-dr-tg-ungroup')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      alert('The active tab has been removed from its tab group.');
+      this.render();
     });
 
     drawer.querySelector('.fb-dr-downloads')?.addEventListener('click', () => {
@@ -3578,6 +3598,11 @@ export class BrowserShell {
   toggleDesktopMode() {
     const nextMode = this.state.desktopFloatingMode === 'circle-first' ? 'browser-first' : 'circle-first';
     this.state.desktopFloatingMode = nextMode;
+    this.state.settings.desktopFloatingMode = nextMode;
+    // Make the mode switch observable: circle-first docks the full shell into
+    // the persistent bubble, while browser-first restores the full browser.
+    this.state.isMinimizedToBubble = nextMode === 'circle-first';
+    if (nextMode === 'circle-first') this.state.isFloatingMiniOpen = false;
     if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
       this.settingsRepo.updateSettings({ desktopFloatingMode: nextMode });
     }

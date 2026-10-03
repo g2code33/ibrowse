@@ -41,7 +41,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (reqPath === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({
       app: 'Yayra FloatBrowse',
       version: '0.1.0',
@@ -71,7 +71,7 @@ const server = http.createServer((req, res) => {
 
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store, max-age=0' });
     fs.createReadStream(filePath).pipe(res);
   });
 });
@@ -127,7 +127,7 @@ function serveBrowserApp(res) {
 </body>
 </html>`;
 
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, max-age=0' });
   res.end(html);
 }
 

@@ -394,6 +394,14 @@ test('Requirement 5: 3-Dot Menu opens Full Right-Side Drawer without workspace b
   assert.ok(drawer.querySelector('.fb-dr-settings'));
   assert.ok(drawer.querySelector('.fb-dr-about'));
 
+  // Tab groups and More tools are real click-open submenus, not hover-only affordances.
+  const tabGroups = drawer.querySelector('.fb-dr-tabgroups-parent');
+  tabGroups.click();
+  assert.equal(tabGroups.parentElement.classList.contains('open'), true);
+  const moreTools = drawer.querySelector('.fb-dr-moretools-parent');
+  moreTools.click();
+  assert.equal(moreTools.parentElement.classList.contains('open'), true);
+
   // Close drawer
   shell.state.isSideDrawerOpen = false;
   shell.render(container);
