@@ -181,15 +181,48 @@ jobs:
             $certificatePath = Join-Path $env:RUNNER_TEMP 'yayra-windows-signing.pfx'
             $certificateBase64 = $env:WINDOWS_CERTIFICATE_BASE64 -replace '\s', ''
             [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($certificateBase64))
-            "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "CSC_KEY_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            # Build first without electron-builder's automatic signer. The
+            # resulting release executables are signed explicitly below with
+            # signtool so self-signed PFX certificates work consistently.
+            "WINDOWS_CERTIFICATE_PATH=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "CSC_IDENTITY_AUTO_DISCOVERY=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
       - run: npm run package:win
+      - name: Sign Windows executables with the configured PFX
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -File -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if ($null -eq $signTool) {
+            Write-Error 'Windows SDK signtool.exe was not found on the runner'
+            exit 1
+          }
+          $executables = @(Get-ChildItem -Path release -File -Filter '*.exe')
+          if ($executables.Count -eq 0) {
+            Write-Error 'no release executables were produced under release/'
+            exit 1
+          }
+          foreach ($exe in $executables) {
+            & $signTool.FullName sign /fd SHA256 /f $env:WINDOWS_CERTIFICATE_PATH /p $env:WINDOWS_CERTIFICATE_PASSWORD /d 'Yayra' $exe.FullName
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "signtool failed for $($exe.Name)"
+              exit $LASTEXITCODE
+            }
+            $signature = Get-AuthenticodeSignature -FilePath $exe.FullName
+            if ($null -eq $signature.SignerCertificate) {
+              Write-Error "no Authenticode signer was found on $($exe.Name)"
+              exit 1
+            }
+          }
       - name: Verify Windows executables
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path release -Recurse -File -Filter '*.exe' | Select-Object -First 1
+          $exe = Get-ChildItem -Path release -File -Filter '*.exe' | Select-Object -First 1
           if ($null -eq $exe) {
             Write-Error 'no exe produced under release/'
             exit 1
