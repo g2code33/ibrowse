@@ -241,9 +241,21 @@ jobs:
           else
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android-release.keystore
             echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android-release.keystore" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_TYPE=${ANDROID_KEYSTORE_TYPE:-PKCS12}" >> "$GITHUB_ENV"
             echo "signed=true" >> "$GITHUB_OUTPUT"
           fi
       - run: npm run build:android
+      - name: Verify Android release is actually signed
+        if: steps.signing.outputs.signed == 'true'
+        shell: bash
+        run: |
+          if find android/app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit | grep -q .; then
+            echo "::error:: Gradle produced an unsigned Android release APK despite signing secrets being configured"
+            exit 1
+          fi
       - id: artifact
         run: node scripts/prepare-artifact.mjs --target android --signed ${{ steps.signing.outputs.signed }} --why-not "Android keystore secrets not configured"
       - uses: actions/upload-artifact@v4
@@ -388,6 +400,15 @@ jobs:
       - name: Refuse to publish unsigned artifacts
         run: node scripts/assert-release-signed.mjs .artifacts
       - run: node scripts/generate-update-manifest.mjs dist/updates/manifest.json .artifacts
+      - name: Select release verification targets
+        shell: bash
+        run: |
+          targets="pwa,linux,android"
+          requested="${{ inputs.targets }}"
+          if [[ "$requested" == "all" || "$requested" == *"desktop-win"* || "$requested" == *"windows"* ]]; then
+            targets="$targets,windows"
+          fi
+          echo "RELEASE_TARGETS=$targets" >> "$GITHUB_ENV"
       - name: Deploy web to Cloudflare Pages when configured
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -410,6 +431,5 @@ jobs:
       - name: Verify live release and manifest contract
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TARGETS: pwa,linux,android
           UPDATE_MANIFEST_URL: https://updates.yayra.app/updates/manifest.json
         run: node scripts/release-verify.mjs "v${{ needs.web.outputs.version }}"
