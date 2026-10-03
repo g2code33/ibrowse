@@ -111,7 +111,7 @@
       ],
       "category": "Network",
       "executableName": "yayra",
-      "icon": "build/icons/hicolor/512x512/apps/yayra.png",
+      "icon": "build/icons/linux-set",
       "syncDesktopName": true
     },
     "deb": {
