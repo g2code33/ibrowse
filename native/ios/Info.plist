@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.yayra.app</string>
+  <key>CFBundleDisplayName</key>
+  <string>yayra</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1000</string>
+  <key>LSApplicationQueriesSchemes</key>
+  <array>
+    <string>itms-apps</string>
+  </array>
+</dict>
+</plist>

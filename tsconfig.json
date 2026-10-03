@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM", "WebWorker"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["packages/**/*.js", "packages/**/*.ts", "src/**/*.js", "worker/**/*.mjs"],
+  "exclude": ["dist", "release", "node_modules"]
+}

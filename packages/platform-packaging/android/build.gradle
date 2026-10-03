@@ -1,0 +1,94 @@
+// Yayra Floating Browser - Android Production Gradle Build Configuration
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+def getReleaseVersionCode() {
+    def version = project.hasProperty('versionOverride') ? project.property('versionOverride') : "0.1.0"
+    def parts = version.tokenize('.')
+    def major = parts.size() > 0 ? parts[0].toInteger() : 0
+    def minor = parts.size() > 1 ? parts[1].toInteger() : 1
+    def patch = parts.size() > 2 ? parts[2].tokenize('-')[0].toInteger() : 0
+    return (major * 10000) + (minor * 100) + patch
+}
+
+android {
+    namespace "com.yayra.app"
+    compileSdkVersion 34
+
+    defaultConfig {
+        applicationId "com.yayra.app"
+        minSdkVersion 24
+        targetSdkVersion 34
+        versionCode getReleaseVersionCode()
+        versionName project.hasProperty('versionOverride') ? project.property('versionOverride') : "0.1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables.useSupportLibrary = true
+    }
+
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH") ?: project.findProperty("ANDROID_KEYSTORE_PATH")
+            def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("ANDROID_KEYSTORE_PASSWORD")
+            def keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("ANDROID_KEY_ALIAS")
+            def keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("ANDROID_KEY_PASSWORD")
+
+            if (keystorePath && file(keystorePath).exists() && keystorePassword && keyAlias && keyPassword) {
+                storeFile file(keystorePath)
+                storePassword keystorePassword
+                keyAlias keyAlias
+                keyPassword keyPassword
+                v1SigningEnabled true
+                v2SigningEnabled true
+            } else {
+                // Secure fallback: do not fail local builds; produce unsigned artifact
+                println "NOTE: Android release signing secrets not found. Outputting unsigned artifact."
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (keystorePath && file(keystorePath).exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            debuggable true
+        }
+    }
+
+    bundle {
+        language { enableSplit = false }
+        density { enableSplit = true }
+        abi { enableSplit = true }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packagingOptions {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.webkit:webkit:1.10.0'
+}

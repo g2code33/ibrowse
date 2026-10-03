@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=yayra AppImage
+Exec=yayra %U
+Terminal=false
+Type=Application
+Icon=yayra
+StartupWMClass=yayra-appimage
+Categories=Network;WebBrowser;
