@@ -116,7 +116,10 @@
     },
     "deb": {
       "artifactName": "yayra_${version}_amd64.deb",
-      "afterInstall": "build/linux/after-install.sh"
+      "afterInstall": "build/linux/after-install.sh",
+      "fpm": [
+        "build/linux/usr-bin/yayra=/usr/bin/yayra"
+      ]
     },
     "appImage": {
       "artifactName": "yayra-${version}.${ext}"
