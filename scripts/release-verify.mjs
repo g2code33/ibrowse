@@ -10,7 +10,10 @@ if (!tag) {
   console.error('usage: scripts/release-verify.mjs <tag>');
   process.exit(2);
 }
-const targets = ['windows', 'linux', 'android', 'ios', 'pwa'];
+const targets = (process.env.RELEASE_TARGETS || 'windows,linux,android,ios,pwa')
+  .split(',')
+  .map((target) => target.trim())
+  .filter(Boolean);
 const latest = gh(['api', 'repos/{owner}/{repo}/releases/latest', '--jq', '.tag_name, .draft, .prerelease']).stdout.trim().split(/\r?\n/);
 if (latest[0] !== tag || latest[1] !== 'false') {
   console.error(`latest release mismatch: expected ${tag}/draft=false, got ${latest.join('/')}`);

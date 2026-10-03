@@ -410,5 +410,6 @@ jobs:
       - name: Verify live release and manifest contract
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TARGETS: pwa,linux,android
           UPDATE_MANIFEST_URL: https://updates.yayra.app/updates/manifest.json
         run: node scripts/release-verify.mjs "v${{ needs.web.outputs.version }}"
