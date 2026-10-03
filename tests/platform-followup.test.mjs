@@ -9,12 +9,15 @@ test('official branding and universal suggestion placement use the uploaded asse
   const index = await read('public/index.html');
   const manifest = await read('public/manifest.webmanifest');
   const devServer = await read('scripts/dev-server.mjs');
+  const publicStyles = await read('public/styles.css');
   const css = await read('packages/shared-ui/src/theme/design-system.css');
   assert.match(icons, /assets\/brand\/logomain1\.jpg/);
   assert.match(index, /assets\/brand\/logomain1\.jpg/);
   assert.match(manifest, /assets\/brand\/logomain1\.jpg/);
   assert.match(devServer, /assets\/brand\/logomain1\.jpg/);
   assert.doesNotMatch(devServer, /favicon-32x32|icons\/icon-192|icons\/icon-512/);
+  assert.match(publicStyles, /#app\s*\{[\s\S]*max-width:\s*none/);
+  assert.match(publicStyles, /#app \.fb-browser-shell\s*,?\s*\n?#app \.fb-browser-viewport/);
   assert.match(icons, /assets\/brand\/yayrawriing\.PNG/);
   assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 8px\)/);
   assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 10px\)/);

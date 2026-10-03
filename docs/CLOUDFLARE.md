@@ -11,11 +11,12 @@ npx --yes wrangler@4 login
 npx --yes wrangler@4 whoami
 ```
 
-For the local deploy and GitHub Actions, use a scoped Cloudflare API token with Pages edit/deploy access for the target account. Keep it in the shell environment only:
+For the local deploy and GitHub Actions, use a scoped Cloudflare API token with Pages edit/deploy access for the target account. Read the real token into the shell without writing it into this repository:
 
 ```bash
-export CLOUDFLARE_API_TOKEN='paste-the-token-here-in-your-terminal-only'
-export CLOUDFLARE_ACCOUNT_ID='your-account-id'
+read -rsp 'Cloudflare API token: ' CLOUDFLARE_API_TOKEN; echo
+export CLOUDFLARE_API_TOKEN
+export CLOUDFLARE_ACCOUNT_ID='fe5831c612073527054235c8d18f8e4c'
 export CLOUDFLARE_PROJECT_NAME='yayra'
 ```
 
@@ -44,11 +45,7 @@ gh auth login
 gh auth status
 ```
 
-To use a different project name without editing files:
-
-```bash
-CLOUDFLARE_PROJECT_NAME='another-pages-name' npm run setup:cloudflare
-```
+To use a different project, export its real Pages project name in the shell before running the setup command; do not write that value into this repository.
 
 ## 3. Terminal-only redeploys
 
@@ -61,8 +58,9 @@ npm run deploy:cloudflare
 The command requires the same three environment variables:
 
 ```bash
-export CLOUDFLARE_API_TOKEN='...'
-export CLOUDFLARE_ACCOUNT_ID='...'
+read -rsp 'Cloudflare API token: ' CLOUDFLARE_API_TOKEN; echo
+export CLOUDFLARE_API_TOKEN
+export CLOUDFLARE_ACCOUNT_ID='fe5831c612073527054235c8d18f8e4c'
 export CLOUDFLARE_PROJECT_NAME='yayra'
 npm run deploy:cloudflare
 ```
