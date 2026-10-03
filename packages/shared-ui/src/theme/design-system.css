@@ -3597,11 +3597,14 @@ body {
 
 #fb-mobile-search-form {
   position: relative;
-  display: block !important;
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
 }
 
 #fb-mobile-search-input {
-  width: 100%;
+  flex: 1;
+  width: auto;
   height: 54px;
   box-sizing: border-box;
   padding: 0 18px;
@@ -3619,17 +3622,31 @@ body {
   box-shadow: 0 0 0 3px var(--fb-accent-glow);
 }
 
-#fb-mobile-search-form > .fb-btn {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  min-height: 40px;
-  padding: 0 16px;
-  border-radius: 22px;
+#fb-mobile-search-form .fb-mobile-search-clear {
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fb-text-primary);
+  background: var(--fb-bg-surface);
+  cursor: pointer;
+}
+
+#fb-mobile-search-form .fb-mobile-search-clear:hover,
+#fb-mobile-search-form .fb-mobile-search-clear:focus-visible {
+  color: var(--fb-accent-primary);
+  border-color: var(--fb-accent-primary);
+  outline: none;
 }
 
 #fb-mobile-search-form .fb-search-suggestions {
   top: calc(100% + 10px);
+  right: 56px;
   max-height: min(56dvh, calc(var(--fb-search-visible-height, 100dvh) - 180px));
   overflow-y: auto;
   border-radius: 22px;
@@ -3671,5 +3688,10 @@ body {
 }
 
 .fb-search-backdrop {
-  min-height: var(--fb-search-visible-height, 100dvh);
+  top: auto;
+  bottom: 0;
+  height: var(--fb-search-visible-height, 100dvh);
+  min-height: 0;
+  max-height: 100dvh;
+  overflow: hidden;
 }

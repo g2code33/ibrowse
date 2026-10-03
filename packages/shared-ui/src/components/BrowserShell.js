@@ -3759,7 +3759,7 @@ export class BrowserShell {
       <div class="fb-modal-body">
         <form id="fb-mobile-search-form" style="display:flex; gap:8px;">
           <input type="text" id="fb-mobile-search-input" value="${this.state.urlInputValue && !this.state.urlInputValue.startsWith('yayra://') ? this.state.urlInputValue : ''}" placeholder="Search with Google or enter website address" class="fb-input" style="flex:1;" autocomplete="off" spellcheck="false" />
-          <button type="submit" class="fb-btn fb-btn-primary">Go</button>
+          <button type="button" class="fb-mobile-search-clear" aria-label="Clear search">${Icons.close}</button>
         </form>
       </div>
     `;
@@ -3777,9 +3777,17 @@ export class BrowserShell {
 
     const input = modal.querySelector('#fb-mobile-search-input');
     this.bindSearchSuggestions(input, { mobile: true });
+    modal.querySelector('.fb-mobile-search-clear')?.addEventListener('click', () => {
+      if (input) {
+        input.value = '';
+        input.dataset.selectedSuggestion = '';
+        input.focus();
+      }
+    });
     setTimeout(() => {
       input?.focus();
       input?.select();
+      input?.scrollIntoView?.({ block: 'nearest' });
     }, 50);
   }
 
