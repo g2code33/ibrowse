@@ -402,6 +402,13 @@ test('Requirement 5: 3-Dot Menu opens Full Right-Side Drawer without workspace b
   moreTools.click();
   assert.equal(moreTools.parentElement.classList.contains('open'), true);
 
+  // A tool inside the opened submenu must execute, not just reveal a hover state.
+  drawer.querySelector('.fb-dr-customize-yayra').click();
+  assert.equal(shell.state.activeModal, 'radial-customizer');
+  shell.closeModal();
+  shell.state.isSideDrawerOpen = true;
+  shell.render(container);
+
   // Close drawer
   shell.state.isSideDrawerOpen = false;
   shell.render(container);

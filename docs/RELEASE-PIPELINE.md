@@ -25,13 +25,15 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 ### `.github/workflows/release.yml` — main/release build
 
 - Triggers: push to `main`, tag `v*`, and `workflow_dispatch`.
+- Current release scope is Android and Linux. Pushes and tags do not run Windows or iOS jobs; those remain explicit later-release options through `workflow_dispatch`.
 - `workflow_dispatch` inputs:
   - `version_override`: exact semver applied to all manifests during the run.
   - `publish`: boolean, default `false`.
-  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`; the manual-release default is `desktop-linux,android` until platform certificates are configured. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
+  - `targets`: comma-separated target list (`web,desktop-win,desktop-linux,android,ios`) or `all`; the manual-release default is `desktop-linux,android`. GitHub Actions does not have a native multi-select input type, so the workflow uses a validated comma-separated list.
 - Concurrency: release/main runs never cancel one another.
-- Job fan-out: `web` builds once and uploads `ibrowse-web-dist-${sha}`; all platform jobs download that exact artifact before packaging.
+- Job fan-out: `web` builds once and uploads `ibrowse-web-dist-${sha}`; all selected platform jobs download that exact artifact before packaging.
 - Publish gate: only tag `v*` or `workflow_dispatch` with `publish: true`, under GitHub Environment `release`.
+- A publish run fails early when the required Android or Linux signing secrets are missing. Build-only pushes may produce diagnostic unsigned artifacts, but the publish job refuses them.
 
 ## Job and artifact map
 
@@ -61,7 +63,7 @@ At the end of publish, `scripts/ci-summary.mjs` writes this table shape into `$G
 
 ## Secrets
 
-All secrets are optional-but-honest. When a required secret is absent, the workflow emits `::warning::`, writes a `## Signing skipped` section to `$GITHUB_STEP_SUMMARY`, marks `build-info.json.unsigned: true`, and adds `-unsigned` to the artifact name.
+Build-only runs report missing secrets honestly and mark diagnostic artifacts as unsigned. A publish run is different: Android and Linux signing secrets are mandatory, and the workflow fails before packaging when either target cannot be signed. `scripts/assert-release-signed.mjs` also blocks any unsigned artifact from publication.
 
 | Secret | Target | Missing-secret result |
 |---|---|---|

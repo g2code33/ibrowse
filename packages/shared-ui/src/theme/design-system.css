@@ -2817,6 +2817,26 @@ body {
   animation: fb-submenu-fade 0.15s ease;
 }
 
+/* Click/tap activation uses an inline accordion. This keeps More tools and
+   other flyouts inside the scrollable drawer instead of clipping them at the
+   drawer-content overflow boundary. Hover-only desktop flyouts remain above. */
+.fb-drawer-item-has-submenu.open > .fb-drawer-submenu {
+  position: static;
+  width: auto;
+  max-height: none;
+  margin: 2px 8px 6px 24px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+  transform: none;
+}
+
+.fb-drawer-item-has-submenu.open > .fb-drawer-submenu .fb-drawer-item {
+  font-size: 0.82rem;
+  padding: 8px 10px;
+}
+
 @keyframes fb-submenu-fade {
   from { opacity: 0; transform: translateX(6px); }
   to { opacity: 1; transform: translateX(0); }

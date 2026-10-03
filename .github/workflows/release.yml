@@ -98,8 +98,13 @@ jobs:
         shell: bash
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$LINUX_SIGNING_KEY" ]; then
+            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
+              echo "::error:: Linux release signing requires LINUX_SIGNING_KEY before publishing"
+              exit 1
+            fi
             echo "::warning:: Linux signing skipped: LINUX_SIGNING_KEY is not configured; building unsigned .deb and .AppImage"
             {
               echo "## Signing skipped"
@@ -135,7 +140,9 @@ jobs:
     name: windows NSIS and portable
     runs-on: windows-latest
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows')
+    # Windows remains an explicit later-release option; current pushes/tags are
+    # Android/Linux only, as documented by the release scope.
+    if: github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'desktop-win') || contains(inputs.targets, 'windows'))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
@@ -218,8 +225,13 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEYSTORE_TYPE: ${{ secrets.ANDROID_KEYSTORE_TYPE }}
+          RELEASE_REQUIRES_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            if [ "$RELEASE_REQUIRES_SIGNING" = "true" ]; then
+              echo "::error:: Android release signing requires the keystore secrets before publishing"
+              exit 1
+            fi
             echo "::warning:: Android signing skipped: one or more Android keystore secrets are absent; release APK is unsigned"
             {
               echo "## Signing skipped"
@@ -244,7 +256,9 @@ jobs:
     name: iOS archive/export
     runs-on: macos-14
     needs: web
-    if: github.event_name != 'workflow_dispatch' || contains(inputs.targets, 'all') || contains(inputs.targets, 'ios')
+    # Apple remains an explicit later-release option; do not block the
+    # Android/Linux release on an Apple certificate or team.
+    if: github.event_name == 'workflow_dispatch' && (contains(inputs.targets, 'all') || contains(inputs.targets, 'ios'))
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
     steps:
