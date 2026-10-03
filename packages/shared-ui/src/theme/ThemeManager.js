@@ -2,13 +2,14 @@
  * FloatBrowse Design System - Theme Manager (JS runtime)
  */
 
-import { DarkThemeTokens, LightThemeTokens } from './colors.js';
+import { DarkThemeTokens, LightThemeTokens, AccentThemeTokens } from './colors.js';
 import { Radii, Blur } from './spacing.js';
 import { Typography } from './typography.js';
 
 export class ThemeManager {
   constructor(initialMode = 'dark', onModeChange) {
     this.currentMode = initialMode;
+    this.currentColorTheme = 'blue';
     this.listeners = new Set();
     if (onModeChange) {
       this.subscribe(onModeChange);
@@ -17,6 +18,20 @@ export class ThemeManager {
 
   getMode() {
     return this.currentMode;
+  }
+
+  getColorTheme() {
+    return this.currentColorTheme;
+  }
+
+  setColorTheme(colorTheme, rootElement) {
+    if (!Object.prototype.hasOwnProperty.call(AccentThemeTokens, colorTheme)) return this.currentColorTheme;
+    this.currentColorTheme = colorTheme;
+    if (rootElement || (typeof document !== 'undefined' && document.documentElement)) {
+      const root = rootElement || document.documentElement;
+      this.applyTokens(root);
+    }
+    return this.currentColorTheme;
   }
 
   getEffectiveMode() {
@@ -63,6 +78,9 @@ export class ThemeManager {
     for (const [key, value] of Object.entries(tokens)) {
       props[`--fb-${this.kebabCase(key)}`] = value;
     }
+    for (const [key, value] of Object.entries(AccentThemeTokens[this.currentColorTheme])) {
+      props[`--fb-${this.kebabCase(key)}`] = value;
+    }
 
     return props;
   }
@@ -80,10 +98,14 @@ export class ThemeManager {
     const tokens = isDark ? DarkThemeTokens : LightThemeTokens;
 
     root.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    root.setAttribute('data-color-theme', this.currentColorTheme);
 
     for (const [key, value] of Object.entries(tokens)) {
       const cssVar = `--fb-${this.kebabCase(key)}`;
       root.style.setProperty(cssVar, value);
+    }
+    for (const [key, value] of Object.entries(AccentThemeTokens[this.currentColorTheme])) {
+      root.style.setProperty(`--fb-${this.kebabCase(key)}`, value);
     }
   }
 

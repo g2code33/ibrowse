@@ -3097,3 +3097,352 @@ body {
   border-color: rgba(6, 182, 212, 0.4);
 }
 
+
+/* User-selectable accent themes. Blue remains the default theme. */
+[data-color-theme="purple"] {
+  --fb-accent-primary: #a78bfa;
+  --fb-accent-secondary: #7c3aed;
+  --fb-accent-glow: rgba(167, 139, 250, 0.34);
+  --fb-gradient-accent: linear-gradient(135deg, #c4b5fd 0%, #8b5cf6 52%, #6d28d9 100%);
+}
+
+[data-color-theme="green"] {
+  --fb-accent-primary: #34d399;
+  --fb-accent-secondary: #059669;
+  --fb-accent-glow: rgba(52, 211, 153, 0.32);
+  --fb-gradient-accent: linear-gradient(135deg, #6ee7b7 0%, #10b981 52%, #047857 100%);
+}
+
+[data-color-theme="rose"] {
+  --fb-accent-primary: #fb7185;
+  --fb-accent-secondary: #e11d48;
+  --fb-accent-glow: rgba(251, 113, 133, 0.32);
+  --fb-gradient-accent: linear-gradient(135deg, #fda4af 0%, #f43f5e 52%, #be123c 100%);
+}
+
+[data-color-theme="amber"] {
+  --fb-accent-primary: #fbbf24;
+  --fb-accent-secondary: #d97706;
+  --fb-accent-glow: rgba(251, 191, 36, 0.3);
+  --fb-gradient-accent: linear-gradient(135deg, #fde68a 0%, #f59e0b 52%, #b45309 100%);
+}
+
+[data-theme="dark"][data-color-theme="purple"] {
+  --fb-bg-app: #100b20;
+  --fb-bg-surface: rgba(35, 22, 70, 0.74);
+  --fb-bg-surface-elevated: rgba(53, 30, 105, 0.8);
+  --fb-bg-glass-card: rgba(42, 25, 84, 0.68);
+}
+
+[data-theme="dark"][data-color-theme="green"] {
+  --fb-bg-app: #061914;
+  --fb-bg-surface: rgba(8, 45, 35, 0.74);
+  --fb-bg-surface-elevated: rgba(10, 70, 52, 0.8);
+  --fb-bg-glass-card: rgba(8, 58, 44, 0.68);
+}
+
+[data-theme="dark"][data-color-theme="rose"] {
+  --fb-bg-app: #200b16;
+  --fb-bg-surface: rgba(67, 20, 39, 0.74);
+  --fb-bg-surface-elevated: rgba(105, 25, 55, 0.8);
+  --fb-bg-glass-card: rgba(82, 22, 46, 0.68);
+}
+
+[data-theme="dark"][data-color-theme="amber"] {
+  --fb-bg-app: #1f1606;
+  --fb-bg-surface: rgba(73, 48, 8, 0.74);
+  --fb-bg-surface-elevated: rgba(105, 67, 8, 0.8);
+  --fb-bg-glass-card: rgba(82, 53, 8, 0.68);
+}
+
+/* iPhone Safari-inspired tab rail and bottom address controls. */
+.fb-mobile-safari-tabbar {
+  width: min(100%, 520px);
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 999px;
+  background: var(--fb-bg-surface);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+
+.fb-mobile-safari-tab-btn {
+  min-height: 38px;
+  border: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fb-text-primary);
+  background: transparent;
+  cursor: pointer;
+  transition: var(--fb-transition);
+}
+
+.fb-mobile-safari-tab-btn:hover,
+.fb-mobile-safari-tab-btn:focus-visible,
+.fb-mobile-safari-tab-btn:first-child {
+  background: var(--fb-bg-surface-elevated);
+  color: var(--fb-accent-primary);
+  outline: none;
+}
+
+.fb-mobile-address-row,
+.fb-mobile-secondary-tools {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fb-mobile-address-row {
+  max-width: 680px;
+}
+
+.fb-mobile-secondary-tools {
+  max-width: 360px;
+  justify-content: space-around;
+  padding-top: 2px;
+}
+
+.fb-mobile-bottombar {
+  height: auto;
+  min-height: 76px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
+.fb-mobile-address-pill {
+  min-width: 0;
+  height: 40px;
+  justify-content: center;
+  background: var(--fb-bg-glass-input);
+  border-color: var(--fb-border-glass);
+  box-shadow: 0 4px 14px var(--fb-accent-glow);
+}
+
+.fb-mobile-pill-text {
+  min-width: 0;
+  flex: 1;
+  text-align: center;
+}
+
+.fb-mobile-pill-host,
+.fb-mobile-pill-sub {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fb-mobile-pill-host {
+  color: var(--fb-text-primary);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.fb-mobile-pill-sub {
+  color: var(--fb-text-muted);
+  font-size: 0.66rem;
+}
+
+.fb-mobile-nav-btn {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fb-text-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fb-mobile-nav-btn:hover,
+.fb-mobile-nav-btn:focus-visible,
+.fb-mobile-nav-btn.active {
+  color: var(--fb-accent-primary);
+  background: var(--fb-accent-glow);
+  outline: none;
+}
+
+.fb-mobile-nav-btn:disabled {
+  opacity: 0.3;
+}
+
+/* Safari start-page sections preserve Yayra's tools while adding familiar
+   iPhone-style Extensions, Favorites, Suggestions, Privacy, Reading List,
+   and Recently Closed surfaces. */
+.fb-mobile-safari-start-page {
+  justify-content: flex-start;
+  align-items: stretch;
+  overflow-y: auto;
+  padding: 20px 16px 28px;
+  gap: 12px;
+}
+
+.fb-mobile-safari-start-page .fb-newtab-hero {
+  margin-top: 4px;
+}
+
+.fb-mobile-safari-start-page .fb-newtab-title {
+  font-size: 1.65rem;
+  margin-bottom: 12px;
+}
+
+.fb-mobile-safari-start-page .fb-newtab-searchbox {
+  max-width: none;
+  margin-bottom: 8px;
+}
+
+.fb-mobile-safari-extension-card,
+.fb-mobile-safari-section {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 22px;
+  background: var(--fb-bg-surface);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: var(--fb-shadow-surface);
+}
+
+.fb-mobile-safari-extension-card {
+  padding: 18px;
+  text-align: center;
+}
+
+.fb-mobile-safari-extension-art {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--fb-accent-primary);
+}
+
+.fb-mobile-safari-extension-art span {
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  background: var(--fb-accent-glow);
+  border: 1px solid var(--fb-border-glass-highlight);
+}
+
+.fb-mobile-safari-extension-card h2,
+.fb-mobile-safari-section h2 {
+  margin: 0;
+  color: var(--fb-text-primary);
+  font-size: 1.15rem;
+}
+
+.fb-mobile-safari-extension-card p,
+.fb-mobile-safari-section p {
+  margin: 8px 0 14px;
+  color: var(--fb-text-secondary);
+  line-height: 1.45;
+}
+
+.fb-mobile-safari-extension-btn {
+  width: 100%;
+}
+
+.fb-mobile-safari-section {
+  padding: 16px;
+}
+
+.fb-mobile-safari-section > h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fb-mobile-safari-privacy-card .fb-mobile-safari-report-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fb-mobile-safari-report-body p {
+  margin: 0;
+}
+
+.fb-mobile-safari-report-icon,
+.fb-mobile-safari-list-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: var(--fb-accent-primary);
+  background: var(--fb-accent-glow);
+}
+
+.fb-mobile-safari-list-row,
+.fb-mobile-safari-closed-row {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--fb-border-glass);
+  padding: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  color: var(--fb-text-primary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fb-mobile-safari-list-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fb-mobile-safari-list-copy strong,
+.fb-mobile-safari-list-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fb-mobile-safari-list-copy small {
+  margin-top: 3px;
+  color: var(--fb-text-muted);
+}
+
+.fb-mobile-safari-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.fb-mobile-safari-section-heading h2 {
+  margin: 0;
+}
+
+.fb-mobile-safari-clear {
+  border: 0;
+  background: transparent;
+  color: var(--fb-accent-primary);
+  cursor: pointer;
+}
+
+.fb-mobile-safari-empty {
+  margin: 0 !important;
+  color: var(--fb-text-muted) !important;
+}

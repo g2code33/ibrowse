@@ -27,6 +27,7 @@ if (root) {
   const browserShell = new BrowserShell({
     container: root,
     platform: target,
+    isMobile: ['android', 'ios', 'pwa-installed'].includes(target),
     updateService: service,
     initialUrl: 'yayra://newtab'
   });
