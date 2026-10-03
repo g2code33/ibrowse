@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import worker from '../worker/update-worker.mjs';
 
 test('update worker serves manifest with cache, cors, etag and HEAD support', async () => {
-  const request = new Request('https://updates.yayra.app/updates/manifest.json');
+  const request = new Request('https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json');
   const response = await worker.fetch(request, {});
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'public, max-age=300');
@@ -11,7 +11,7 @@ test('update worker serves manifest with cache, cors, etag and HEAD support', as
   assert.ok(response.headers.get('etag'));
   const body = await response.json();
   assert.equal(body.schema, 1);
-  const head = await worker.fetch(new Request('https://updates.yayra.app/updates/manifest.json', { method: 'HEAD', headers: { 'if-none-match': response.headers.get('etag') } }), {});
+  const head = await worker.fetch(new Request('https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json', { method: 'HEAD', headers: { 'if-none-match': response.headers.get('etag') } }), {});
   assert.equal(head.status, 304);
 });
 
@@ -26,12 +26,12 @@ test('update worker proxies browser-safe suggestions and release metadata with C
     return new Response(JSON.stringify({ tag_name: 'v0.1.8', body: 'release notes' }), { status: 200 });
   };
   try {
-    const suggestions = await worker.fetch(new Request('https://updates.yayra.app/api/suggestions?q=ghana'), {});
+    const suggestions = await worker.fetch(new Request('https://yayra-updates-api.g2code335.workers.dev/api/suggestions?q=ghana'), {});
     assert.equal(suggestions.status, 200);
     assert.deepEqual(await suggestions.json(), ['gha', ['ghana', 'ghana news']]);
     assert.equal(suggestions.headers.get('access-control-allow-origin'), '*');
 
-    const release = await worker.fetch(new Request('https://updates.yayra.app/api/latest-release'), {});
+    const release = await worker.fetch(new Request('https://yayra-updates-api.g2code335.workers.dev/api/latest-release'), {});
     assert.equal(release.status, 200);
     assert.equal((await release.json()).tag_name, 'v0.1.8');
     assert.equal(requests.length, 2);

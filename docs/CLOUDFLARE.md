@@ -1,6 +1,6 @@
 # Cloudflare Pages and API Worker: terminal-only setup
 
-Yayra uses a static Cloudflare Pages project for the frontend and a standalone Cloudflare Worker for the update API. Pages serves `https://yayra.pages.dev`; the Worker serves `https://updates.yayra.app/updates/manifest.json`. The setup, first deployment, and GitHub Actions secret configuration can all be run from a terminal. No Cloudflare Pages dashboard project creation or GitHub settings clicks are required.
+Yayra uses a static Cloudflare Pages project for the frontend and a standalone Cloudflare Worker for the update API. Pages serves `https://yayra.pages.dev`; the Worker serves `https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json`. The setup, first deployment, and GitHub Actions secret configuration can all be run from a terminal. No Cloudflare Pages dashboard project creation or GitHub settings clicks are required.
 
 ## 1. Authenticate in the terminal
 
@@ -37,7 +37,7 @@ The command is idempotent. It will:
 2. Build the PWA into `dist/`.
 3. Deploy `dist/` to the `main` Pages deployment.
 4. Deploy the `yayra-updates-api` Worker from `worker/update-worker.mjs` using `wrangler.worker.toml`.
-5. Attach the Worker to the `updates.yayra.app` custom domain.
+5. Deploy the Worker to the account workers.dev subdomain shown in the configuration.
 6. Set `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_PROJECT_NAME` as GitHub Actions secrets using `gh`.
 
 If `CLOUDFLARE_API_TOKEN` is not already exported, the Bash wrapper prompts for it with hidden input. The setup command never prints the token or writes it to the repository. It requires GitHub CLI authentication:
@@ -63,7 +63,7 @@ To deploy only the update API Worker after changing its manifest or code:
 npm run deploy:cloudflare:worker
 ```
 
-The Worker configuration is committed in `wrangler.worker.toml`; it uses the custom domain `updates.yayra.app` and injects the built `dist/updates/manifest.json` as the non-secret `UPDATES_MANIFEST_JSON` variable.
+The Worker configuration is committed in `wrangler.worker.toml`; it uses the account workers.dev hostname and injects the built `dist/updates/manifest.json` as the non-secret `UPDATES_MANIFEST_JSON` variable.
 
 The command requires the same three environment variables:
 
@@ -77,7 +77,7 @@ npm run deploy:cloudflare
 
 ## 4. GitHub Actions behavior
 
-Every push to `main` builds the PWA, Android, Linux, and Windows artifacts. When the three Cloudflare secrets are present, the release workflow deploys the exact web bundle from the PWA build job to the Pages `main` branch and deploys `yayra-updates-api` to the `updates.yayra.app` custom domain. If the secrets are absent, the workflow records a warning instead of falsely claiming that a deployment occurred.
+Every push to `main` builds the PWA, Android, Linux, and Windows artifacts. When the three Cloudflare secrets are present, the release workflow deploys the exact web bundle from the PWA build job to the Pages `main` branch and deploys `yayra-updates-api` to the account workers.dev hostname. If the secrets are absent, the workflow records a warning instead of falsely claiming that a deployment occurred.
 
 Verify the configured secrets without revealing their values:
 

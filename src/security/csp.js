@@ -3,7 +3,7 @@ export const ASSET_ORIGINS = Object.freeze([
   'https://yayra.pages.dev',
   'https://icons.duckduckgo.com'
 ]);
-export const API_ORIGINS = Object.freeze(['https://updates.yayra.app']);
+export const API_ORIGINS = Object.freeze(['https://yayra-updates-api.g2code335.workers.dev']);
 
 export function buildContentSecurityPolicy() {
   const scheme = `${DESKTOP_CUSTOM_SCHEME}:`;

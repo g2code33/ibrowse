@@ -24,10 +24,10 @@ test('official branding and universal suggestion placement use the uploaded asse
   assert.match(publicStyles, /#app\s*\{[\s\S]*max-width:\s*none/);
   assert.match(publicStyles, /#app \.fb-browser-shell\s*,?\s*\n?#app \.fb-browser-viewport/);
   assert.match(icons, /assets\/brand\/yayrawriing\.PNG/);
-  assert.match(main, /https:\/\/updates\.yayra\.app\/updates\/manifest\.json/);
+  assert.match(main, /https:\/\/yayra-updates-api\.g2code335\.workers\.dev\/updates\/manifest\.json/);
   assert.match(worker, /UPDATES_MANIFEST_JSON/);
   assert.match(workerConfig, /name\s*=\s*"yayra-updates-api"/);
-  assert.match(workerConfig, /pattern\s*=\s*"updates\.yayra\.app"/);
+  assert.match(workerConfig, /workers_dev\s*=\s*true/);
   assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 8px\)/);
   assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 10px\)/);
 });

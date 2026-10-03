@@ -109,7 +109,7 @@ jobs:
           fi
           npx --yes wrangler@4 pages deploy dist --project-name "$CLOUDFLARE_PROJECT_NAME" --branch main --commit-dirty=true
           node scripts/deploy-cloudflare-worker.mjs
-          echo "manifest_url=https://updates.yayra.app/updates/manifest.json" >> "$GITHUB_OUTPUT"
+          echo "manifest_url=https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json" >> "$GITHUB_OUTPUT"
 
   desktop-linux:
     name: linux deb and AppImage

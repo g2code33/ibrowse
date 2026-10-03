@@ -2622,7 +2622,7 @@ export class BrowserShell {
       }
 
       // 2. Query GitHub Releases API from public repo
-      const ghRes = await fetch('https://updates.yayra.app/api/latest-release', {
+      const ghRes = await fetch('https://yayra-updates-api.g2code335.workers.dev/api/latest-release', {
         headers: { Accept: 'application/vnd.github.v3+json' }
       }).catch(() => null);
 
@@ -3721,7 +3721,7 @@ export class BrowserShell {
     try {
       this.searchSuggestionController?.abort();
       this.searchSuggestionController = typeof AbortController === 'function' ? new AbortController() : null;
-      const response = await fetch(`https://updates.yayra.app/api/suggestions?q=${encodeURIComponent(query)}`, {
+      const response = await fetch(`https://yayra-updates-api.g2code335.workers.dev/api/suggestions?q=${encodeURIComponent(query)}`, {
         headers: { accept: 'application/json' },
         signal: this.searchSuggestionController?.signal
       });

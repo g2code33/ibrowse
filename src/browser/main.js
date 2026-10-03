@@ -53,7 +53,7 @@ registerPwaUpdateHandler(DEFAULT_UPDATE_CONFIG);
 
 function getUpdateManifestUrl() {
   if (typeof location !== 'undefined' && location.hostname === 'yayra.pages.dev') {
-    return 'https://updates.yayra.app/updates/manifest.json';
+    return 'https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json';
   }
   return '/updates/manifest.json';
 }
