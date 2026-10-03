@@ -37,7 +37,7 @@ The command is idempotent. It will:
 3. Deploy `dist/` to the `main` Pages deployment.
 4. Set `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_PROJECT_NAME` as GitHub Actions secrets using `gh`.
 
-The setup command never prints the token or writes it to the repository. It requires GitHub CLI authentication:
+If `CLOUDFLARE_API_TOKEN` is not already exported, the Bash wrapper prompts for it with hidden input. The setup command never prints the token or writes it to the repository. It requires GitHub CLI authentication:
 
 ```bash
 gh auth login
