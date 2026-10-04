@@ -1,7 +1,24 @@
 # Yayra — Production Readiness Plan
 
-Status: **PROPOSED — awaiting approval before implementation begins.**
-Branch: `arena/01a105e3-yayra`. Baseline verified in sandbox on 2026-10-04:
+Status: **EXECUTED 2026-10-04** on branch `arena/01a105e3-yayra`.
+Outcome per item (details in each section; the plan text below is kept
+as originally approved):
+
+| Item | Status | Deliverable / notes |
+| --- | --- | --- |
+| A1 Web/PWA sign-in | ✅ Done | `src/services/googleAuthWeb.js` + worker exchange endpoint + tests; live consent round trip needs a human (real client IDs). |
+| A2 Capacitor sign-in | ✅ Done | `src/services/googleAuthCapacitor.js` + native scheme injection + tests; real-device runs need a human. |
+| B1 Dependency security | ✅ Done | `npm audit` = **0 vulnerabilities** (Electron 31→44, Capacitor 6→8, targeted overrides — `docs/PRODUCTION_CONFIG.md` §6). |
+| B2 Secrets/config hygiene | ✅ Done | `docs/PRODUCTION_CONFIG.md`; no secrets tracked; `.gitignore` extended. |
+| B3 Update pipeline audit | ✅ Done | Verified rollout/rollback/downgrade/sha256 chain; **gap fixed**: detached `.sig` now embedded in manifest and verified client-side against pinned `updatePublicKey` (fail-closed). Pinning the real key = human step. |
+| B4 CI/CD | ✅ Done | `ci.yml` web job gates on `npm audit --omit=dev` (zero) + full audit at high; `release.yml` already failed loudly on unsigned publishes (verified, not changed). |
+| B5 Signing requirements | ✅ Done | `docs/SIGNING_REQUIREMENTS.md` (no certs fabricated). |
+| B6 Monitoring proposal | ✅ Done | `docs/MONITORING_AND_CRASH_REPORTING.md` — audit + opt-in proposal; vendor/hosting is a human decision, no SDK wired. |
+| B7 Store readiness | ✅ Done | `docs/STORE_READINESS.md`; scopes confirmed still only `openid email profile`. |
+| B8 Manual QA checklist | ✅ Done | `docs/MANUAL_QA_CHECKLIST.md`. |
+| B9 Docs sweep | ✅ Done | README/RELEASE-PIPELINE/PRODUCTION_CONFIG cross-linked and corrected. |
+
+Baseline verified in sandbox on 2026-10-04 before work began:
 `npm test` = 298/299 pass (single failure is the known Linux `.deb` packaging
 test that needs native packaging tools absent from this sandbox);
 `npm audit` = 5 vulnerabilities (4 high, 1 critical), all in build-time

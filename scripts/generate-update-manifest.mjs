@@ -25,6 +25,16 @@ for (const recordPath of records) {
     if (!existsSync(absolute)) continue;
     const info = await stat(absolute);
     downloads[target] = { url: record.urlBase ? `${record.urlBase}/${file}` : `https://github.com/${releaseRepository}/releases/download/v${record.version}/${file}`, sha256, bytes: info.size };
+    // Detached artifact signature (scripts/sign-linux-artifacts.mjs writes
+    // `<artifact>.sig`, RSA-SHA256 over the artifact bytes). Embedding it
+    // base64 in the manifest lets UpdateService verify the download against
+    // a PINNED public key baked into the app - so even a compromised
+    // manifest host cannot push an artifact the release key never signed.
+    // See "signature verification" in src/services/updateService.js.
+    const sigFile = `${absolute}.sig`;
+    if (existsSync(sigFile)) {
+      downloads[target].sig = (await readFile(sigFile)).toString('base64');
+    }
     break;
   }
 }

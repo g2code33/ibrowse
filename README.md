@@ -73,6 +73,17 @@ Detailed architectural blueprints and decision records are available in `docs/`:
 * [Development Roadmap](docs/ROADMAP.md)
 * [Architecture Validation Checklist](docs/ARCHITECTURE_VALIDATION.md)
 
+Production deployment (deploying your own instance requires your own
+Cloudflare worker, Google OAuth client IDs, and signing keys):
+* [Production Configuration — every env var, secret, and binding](docs/PRODUCTION_CONFIG.md)
+* [Google Sign-In — per-platform architecture & console setup](docs/GOOGLE_SIGNIN.md)
+* [Release Pipeline — CI/CD, artifacts, update manifest](docs/RELEASE-PIPELINE.md)
+* [Code-Signing Requirements — certs/keys a human must obtain](docs/SIGNING_REQUIREMENTS.md)
+* [App-Store Readiness Checklist](docs/STORE_READINESS.md)
+* [Manual QA Checklist — what automation cannot verify](docs/MANUAL_QA_CHECKLIST.md)
+* [Monitoring & Crash Reporting — current state and opt-in proposal](docs/MONITORING_AND_CRASH_REPORTING.md)
+* [Production Readiness Plan — executed audit, item-by-item status](docs/PRODUCTION_READINESS_PLAN.md)
+
 ---
 
 ## 4. Local Quality Gates & Verification

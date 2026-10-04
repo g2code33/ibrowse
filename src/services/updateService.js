@@ -28,6 +28,16 @@ export class UpdateService {
     this.logger = options.logger || ((line) => console.info(line));
     this.telemetry = options.telemetry || null;
     this.config = mergeWithUpdateDefaults(options.config || DEFAULT_UPDATE_CONFIG);
+    // Optional artifact-signature pinning (SPKI PEM, RSA - the key pair
+    // scripts/sign-linux-artifacts.mjs signs with; its public half is
+    // published as linux-signing-public-key.pem). When set, every download
+    // MUST carry a valid `sig` in the manifest and verification FAILS
+    // CLOSED - a compromised manifest host can then no longer point
+    // clients at an artifact the release key never signed (sha256 alone
+    // can't give that guarantee, because whoever controls the manifest
+    // controls the sha256 too). When unset, behavior is unchanged:
+    // sha256+bytes verification against the TLS-served manifest.
+    this.updatePublicKey = options.updatePublicKey || null;
     this.state = { status: 'idle', installedVersion: this.installedVersion, target: this.target };
     this.inFlight = null;
     this.abortController = null;
@@ -152,6 +162,21 @@ export class UpdateService {
     if (this.state.download.sha256 && digest !== this.state.download.sha256) {
       return this.#transition({ ...this.state, status: 'error', reason: 'checksum:sha256-mismatch', expectedSha256: this.state.download.sha256, actualSha256: digest, keptOldFile: true }, 'install_failed');
     }
+    if (this.updatePublicKey) {
+      const signature = this.state.download.sig;
+      if (!signature) {
+        return this.#transition({ ...this.state, status: 'error', reason: 'signature:missing', keptOldFile: true }, 'install_failed');
+      }
+      let signatureValid = false;
+      try {
+        signatureValid = await verifyRsaSha256(this.updatePublicKey, bytes, signature);
+      } catch (error) {
+        return this.#transition({ ...this.state, status: 'error', reason: `signature:verify-error:${error?.message || error}`, keptOldFile: true }, 'install_failed');
+      }
+      if (!signatureValid) {
+        return this.#transition({ ...this.state, status: 'error', reason: 'signature:invalid', keptOldFile: true }, 'install_failed');
+      }
+    }
     const staged = {
       version: this.state.version,
       target: this.target,
@@ -271,6 +296,36 @@ export function stablePercent(deviceId) {
     hash = Math.imul(hash, 16777619);
   }
   return Math.abs(hash >>> 0) % 100;
+}
+
+/**
+ * Verifies a detached RSA-SHA256 signature (what
+ * `openssl dgst -sha256 -sign` in scripts/sign-linux-artifacts.mjs
+ * produces) against an SPKI PEM public key. Uses WebCrypto's
+ * RSASSA-PKCS1-v1_5 in browsers (universally supported, unlike Ed25519)
+ * and node:crypto elsewhere.
+ */
+export async function verifyRsaSha256(publicKeyPem, bytes, signatureBase64) {
+  const signature = base64ToBytes(signatureBase64);
+  if (globalThis.crypto?.subtle) {
+    const der = base64ToBytes(publicKeyPem.replace(/-----(BEGIN|END) PUBLIC KEY-----/g, '').replace(/\s+/g, ''));
+    const key = await globalThis.crypto.subtle.importKey('spki', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    return globalThis.crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, bytes);
+  }
+  const { createVerify } = await import('node:crypto');
+  const verifier = createVerify('sha256');
+  verifier.update(bytes);
+  return verifier.verify(publicKeyPem, signature);
+}
+
+function base64ToBytes(base64) {
+  if (typeof atob === 'function') {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  return new Uint8Array(Buffer.from(base64, 'base64'));
 }
 
 async function sha256Hex(bytes) {

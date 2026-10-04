@@ -28,6 +28,20 @@ environment, gitignored local config files, or GitHub Actions secrets.
 | `GITHUB_TOKEN` | Worker secret | `worker/update-worker.mjs` (`/api/latest-release`) | Raises GitHub API rate limits; read-only PAT with no scopes is sufficient. |
 | `UPDATE_MANIFEST_URL` | build-time env | `scripts/build-web.mjs` / `src/config/updates.js` | Points clients at your worker's `/updates/manifest.json`. |
 
+### Update-artifact signature pinning (recommended once a Linux key exists)
+
+`UpdateService` accepts an `updatePublicKey` option (SPKI public-key PEM —
+the `linux-signing-public-key.pem` that `scripts/sign-linux-artifacts.mjs`
+publishes alongside release artifacts). When configured, every downloaded
+update must carry a valid detached RSA-SHA256 signature (embedded in the
+manifest as `downloads.<target>.sig` by `scripts/generate-update-manifest.mjs`)
+and the client **fails closed** on a missing or invalid signature — this
+protects against a compromised manifest host, which plain sha256 cannot.
+Wiring the real key into app startup is a deliberate human step: generate
+the key per `docs/SIGNING_REQUIREMENTS.md`, commit the *public* PEM, and
+pass it where the app constructs its `UpdateService`. Until then, clients
+verify sha256 + byte length only (unchanged behavior).
+
 ## 3. Cloudflare deployment
 
 | Name | Where set | Used by |
@@ -44,7 +58,7 @@ credential. None of these may ever be committed.
 
 | Platform | Secrets |
 | --- | --- |
-| Linux | `LINUX_SIGNING_KEY` (ASCII-armored GPG private key), `LINUX_SIGNING_KEY_PASSWORD` |
+| Linux | `LINUX_SIGNING_KEY` (OpenSSL RSA/EC private key PEM, raw or base64-encoded — consumed by `scripts/sign-linux-artifacts.mjs` via `openssl dgst -sha256 -sign`), optional `LINUX_SIGNING_KEY_PASSWORD` passphrase |
 | Windows | `WINDOWS_CERTIFICATE_PATH`/`WINDOWS_CERTIFICATE_PASSWORD` (Authenticode PFX) |
 | Android | `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEYSTORE_TYPE`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` (via `scripts/configure-android-signing.mjs`) |
 | macOS / iOS | `APPLE_TEAM_ID`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_AUTH_KEY_PATH`, `APPLE_KEYCHAIN_PATH`/`KEYCHAIN_PASSWORD`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_PRIVATE_KEY` |

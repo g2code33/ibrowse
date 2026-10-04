@@ -129,6 +129,99 @@ test('mobile and pwa targets ignore path-inside-archive desktop logic', () => {
   assert.equal(resolvePackageAssetPath('windows', 'app.asar/dist/index.html'), 'dist/index.html');
 });
 
+// --- artifact signature verification (pinned release key) -----------------
+// scripts/sign-linux-artifacts.mjs signs artifacts (RSA-SHA256, detached);
+// scripts/generate-update-manifest.mjs embeds the signature base64 as
+// downloads.<target>.sig. When an UpdateService is constructed with the
+// pinned public key, verification is END-TO-END and FAILS CLOSED: a
+// compromised manifest host can rewrite url+sha256, but cannot produce a
+// signature the pinned release key never made.
+
+import { generateKeyPairSync, createSign } from 'node:crypto';
+import { verifyRsaSha256 } from '../src/services/updateService.js';
+
+function makeSigningFixture(payloadText = 'signed-release-payload') {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const payload = new TextEncoder().encode(payloadText);
+  const signer = createSign('sha256');
+  signer.update(payload);
+  const sig = signer.sign(privateKey).toString('base64');
+  return {
+    payload,
+    sig,
+    publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    sha256: createHash('sha256').update(payload).digest('hex')
+  };
+}
+
+function signedService(fixture, { sig = fixture.sig, updatePublicKey = fixture.publicKeyPem } = {}) {
+  const download = { url: 'https://yayra-updates-api.g2code335.workers.dev/payload', sha256: fixture.sha256, bytes: fixture.payload.byteLength };
+  if (sig !== null) download.sig = sig;
+  return new UpdateService({
+    target: 'pwa',
+    installedVersion: '1.0.0',
+    updatePublicKey,
+    fetchImpl: async (url) => {
+      if (String(url).includes('manifest')) return jsonResponse({ ...manifest, downloads: { pwa: download } });
+      return bytesResponse(fixture.payload);
+    },
+    logger: () => {}
+  });
+}
+
+test('download with a pinned public key stages only a correctly signed artifact', async () => {
+  const fixture = makeSigningFixture();
+  const service = signedService(fixture);
+  assert.equal((await service.check({ manual: true })).status, 'available');
+  const result = await service.download();
+  assert.equal(result.status, 'ready');
+  assert.equal(result.stagedDownload.sha256, fixture.sha256);
+});
+
+test('download with a pinned public key FAILS CLOSED on a missing or forged signature', async () => {
+  const missing = signedService(makeSigningFixture(), { sig: null });
+  assert.equal((await missing.check({ manual: true })).status, 'available');
+  const missingResult = await missing.download();
+  assert.equal(missingResult.status, 'error');
+  assert.equal(missingResult.reason, 'signature:missing');
+  assert.equal(missingResult.keptOldFile, true);
+
+  // A signature made by a DIFFERENT key (attacker-controlled manifest host
+  // signing with its own key) must be rejected even though url, bytes and
+  // sha256 are all self-consistent.
+  const fixture = makeSigningFixture();
+  const attacker = makeSigningFixture(); // same payload text, different key
+  const forged = signedService(fixture, { sig: attacker.sig });
+  assert.equal((await forged.check({ manual: true })).status, 'available');
+  const forgedResult = await forged.download();
+  assert.equal(forgedResult.status, 'error');
+  assert.equal(forgedResult.reason, 'signature:invalid');
+  assert.equal(forgedResult.keptOldFile, true);
+});
+
+test('download without a pinned key keeps the existing sha256-only behavior (no silent new requirement)', async () => {
+  const fixture = makeSigningFixture();
+  const service = signedService(fixture, { sig: null, updatePublicKey: null });
+  assert.equal((await service.check({ manual: true })).status, 'available');
+  assert.equal((await service.download()).status, 'ready');
+});
+
+test('verifyRsaSha256 works through both the WebCrypto and node:crypto paths', async () => {
+  const fixture = makeSigningFixture();
+  // WebCrypto path (globalThis.crypto.subtle exists in Node 20+).
+  assert.equal(await verifyRsaSha256(fixture.publicKeyPem, fixture.payload, fixture.sig), true);
+  assert.equal(await verifyRsaSha256(fixture.publicKeyPem, new TextEncoder().encode('tampered'), fixture.sig), false);
+  // node:crypto fallback path.
+  const subtle = globalThis.crypto;
+  delete globalThis.crypto;
+  try {
+    assert.equal(await verifyRsaSha256(fixture.publicKeyPem, fixture.payload, fixture.sig), true);
+    assert.equal(await verifyRsaSha256(fixture.publicKeyPem, new TextEncoder().encode('tampered'), fixture.sig), false);
+  } finally {
+    globalThis.crypto = subtle;
+  }
+});
+
 function jsonResponse(body) {
   return { ok: true, status: 200, json: async () => body };
 }

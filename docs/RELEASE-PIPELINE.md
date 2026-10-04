@@ -9,7 +9,7 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 | Web bundle | `npm run build:web` copies `public/` + `src/` to `dist/`, injects CSP, `dist/version.json`, and a service-worker precache list. |
 | Desktop | Electron `44.5.1` is pinned in `package.json#build.electronVersion`; electron-builder `26.15.3` creates Windows NSIS/portable and the Linux `.AppImage`, while the deterministic `dpkg-deb` packager creates the Linux `.deb`. |
 | Mobile | Capacitor `8.5.2`; CI creates native platform projects as needed, then runs `cap sync` against the already-built `dist/`. |
-| Updates | `src/services/updateService.js` implements client state/semver/checksum/snooze rules; `worker/update-worker.mjs` serves `/updates/manifest.json`; `scripts/generate-update-manifest.mjs` rewrites the manifest from artifact metadata. |
+| Updates | `src/services/updateService.js` implements client state/semver/checksum/snooze rules and, when constructed with a pinned `updatePublicKey` (SPKI PEM), verifies each download's detached RSA-SHA256 signature and fails closed; `worker/update-worker.mjs` serves `/updates/manifest.json`; `scripts/generate-update-manifest.mjs` rewrites the manifest from artifact metadata and embeds `downloads.<target>.sig` (base64 of the `.sig` produced by `scripts/sign-linux-artifacts.mjs`) when present. |
 | Branding | `assets/brand/source.png` is the source of truth; `npm run refresh:branding` generates favicon, PWA icons, hicolor icons, `.ico`, Android, and iOS icon assets. |
 | Versions | `scripts/version.mjs` updates/checks package, lockfile, web manifest, Electron metadata, Android version gradle, and iOS plist together. |
 
@@ -20,6 +20,7 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 - Trigger: `pull_request`.
 - Concurrency: PR runs cancel superseded PR runs.
 - Jobs: `web` first, then independent `desktop-linux`, `desktop-win`, `android`, and `ios` jobs all needing `web`.
+- Security gates in the `web` job: `npm audit --omit=dev` must report **zero** vulnerabilities (runtime dependencies), and the full `npm audit --audit-level=high` must be clean for dev/build chains (policy in `docs/PRODUCTION_CONFIG.md` §6).
 - Uploads only the shared `ibrowse-web-dist-${sha}` web build for fan-out; platform build artifacts are build-only in PR CI.
 
 ### `.github/workflows/release.yml` — main/release build
