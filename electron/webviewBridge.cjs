@@ -96,6 +96,39 @@ function requiresSystemBrowserAuth(rawUrl, hosts = SYSTEM_BROWSER_AUTH_HOSTS) {
 }
 
 /**
+ * History navigation helpers.
+ * Electron 32 deprecated webContents.canGoBack/goBack/canGoForward/goForward
+ * in favor of the webContents.navigationHistory object, and the legacy
+ * methods can be removed in any future major. Prefer the new API whenever
+ * the webContents exposes it, but keep the legacy call as a fallback so
+ * dependency-injected test doubles (and any embedder that still provides
+ * only the old shape) keep working unchanged.
+ */
+function historyCanGoBack(wc) {
+  const h = wc.navigationHistory;
+  if (h && typeof h.canGoBack === 'function') return h.canGoBack();
+  return typeof wc.canGoBack === 'function' ? wc.canGoBack() : false;
+}
+
+function historyCanGoForward(wc) {
+  const h = wc.navigationHistory;
+  if (h && typeof h.canGoForward === 'function') return h.canGoForward();
+  return typeof wc.canGoForward === 'function' ? wc.canGoForward() : false;
+}
+
+function historyGoBack(wc) {
+  const h = wc.navigationHistory;
+  if (h && typeof h.goBack === 'function') return h.goBack();
+  if (typeof wc.goBack === 'function') wc.goBack();
+}
+
+function historyGoForward(wc) {
+  const h = wc.navigationHistory;
+  if (h && typeof h.goForward === 'function') return h.goForward();
+  if (typeof wc.goForward === 'function') wc.goForward();
+}
+
+/**
  * Builds a Chrome-equivalent native right-click context menu template for a
  * WebContentsView, from the `params` Electron's own `context-menu` webContents
  * event already hands us (link/image/selection/editable info - no manual
@@ -155,8 +188,8 @@ function buildContextMenuTemplate({ params, wc, tabId, send, clipboard }) {
 
   if (template.length) template.push({ type: 'separator' });
   template.push(
-    { label: 'Back', enabled: wc.canGoBack(), click: () => wc.goBack() },
-    { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
+    { label: 'Back', enabled: historyCanGoBack(wc), click: () => historyGoBack(wc) },
+    { label: 'Forward', enabled: historyCanGoForward(wc), click: () => historyGoForward(wc) },
     { label: 'Reload', click: () => wc.reload() },
     { type: 'separator' },
     { label: 'Inspect', click: () => wc.inspectElement((params && params.x) || 0, (params && params.y) || 0) }
@@ -206,8 +239,8 @@ function createWebviewBridge({
 
   function navState(webContents) {
     return {
-      canGoBack: webContents.canGoBack(),
-      canGoForward: webContents.canGoForward()
+      canGoBack: historyCanGoBack(webContents),
+      canGoForward: historyCanGoForward(webContents)
     };
   }
 
@@ -334,13 +367,13 @@ function createWebviewBridge({
 
   function goBack(tabId) {
     withView(tabId, (view) => {
-      if (view.webContents.canGoBack()) view.webContents.goBack();
+      if (historyCanGoBack(view.webContents)) historyGoBack(view.webContents);
     });
   }
 
   function goForward(tabId) {
     withView(tabId, (view) => {
-      if (view.webContents.canGoForward()) view.webContents.goForward();
+      if (historyCanGoForward(view.webContents)) historyGoForward(view.webContents);
     });
   }
 

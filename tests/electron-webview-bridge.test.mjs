@@ -279,6 +279,32 @@ test('buildContextMenuTemplate: plain page click offers Back/Forward/Reload/Insp
   assert.ok(findItem(template, 'Inspect'));
 });
 
+test('buildContextMenuTemplate: prefers webContents.navigationHistory over the deprecated legacy methods (Electron 32+)', () => {
+  const calls = [];
+  const wc = {
+    // navigationHistory (modern API) says back IS possible...
+    navigationHistory: {
+      canGoBack: () => true,
+      canGoForward: () => true,
+      goBack: () => calls.push('history.goBack'),
+      goForward: () => calls.push('history.goForward')
+    },
+    // ...while the deprecated legacy methods disagree and must NOT be consulted.
+    canGoBack: () => { throw new Error('legacy canGoBack must not be called when navigationHistory exists'); },
+    canGoForward: () => { throw new Error('legacy canGoForward must not be called when navigationHistory exists'); },
+    goBack: () => calls.push('legacy.goBack'),
+    goForward: () => calls.push('legacy.goForward'),
+    reload: () => {},
+    inspectElement: () => {}
+  };
+  const template = buildContextMenuTemplate({ params: { x: 1, y: 1 }, wc, tabId: 't1', send: () => {}, clipboard: { writeText: () => {} } });
+  assert.equal(findItem(template, 'Back').enabled, true);
+  assert.equal(findItem(template, 'Forward').enabled, true);
+  findItem(template, 'Back').click();
+  findItem(template, 'Forward').click();
+  assert.deepEqual(calls, ['history.goBack', 'history.goForward']);
+});
+
 test('buildContextMenuTemplate: right-clicking a link offers Open Link in New Tab + Copy Link Address', () => {
   const written = [];
   const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {} };

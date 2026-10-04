@@ -57,21 +57,29 @@ credential. None of these may ever be committed.
 
 ## 6. Dependency security posture (kept current with `npm audit`)
 
+Current status: **`npm audit` reports 0 vulnerabilities** after:
+
+- **Electron `31.7.7` → `44.5.1`** (31.x was an EOL line with ~37 published
+  advisories including sandbox escapes and context-isolation bypasses; this
+  is the runtime shipped to users, so it was the highest-risk item). The
+  upgrade also removed the unpatchable `extract-zip` advisories, which only
+  affected Electron's own install-time extraction of its HTTPS-downloaded,
+  checksum-verified binary. `package.json#build.electronVersion` is kept in
+  lockstep. **Human follow-up required:** run `npm run smoke:desktop` and
+  the manual desktop QA checklist on a real machine — the unit suite is
+  dependency-injected pure Node and cannot exercise the Electron runtime.
+- **Capacitor `6.2.2` → `8.5.2`** (core/cli/android/ios, browser plugin
+  `^8.0.5`), which eliminated the critical `tar@6` advisory chain in the
+  CLI. `cap add android` + `cap sync android` verified working in-sandbox;
+  real Gradle/Xcode release builds need human verification (Capacitor 8
+  requires newer Android SDK / Xcode toolchains — see Capacitor's upgrade
+  guide).
+
 Targeted `overrides` in `package.json` (do not remove without re-auditing):
 
-- `tar: ^7.5.21` — patches a critical advisory chain; applied everywhere
-  **except** `@capacitor/cli`, which is pinned back to `tar ~6.2.1` because
-  Capacitor CLI 6 depends on tar v6's removed default-export API.
-  **Accepted residual risk:** `@capacitor/cli`'s only tar use is extracting
-  the platform template tarball that ships *inside* the npm-integrity-
-  verified `@capacitor/android`/`@capacitor/ios` packages — never
-  attacker-controlled input. Fully resolved by the Capacitor 7 upgrade
-  (tracked in `docs/PRODUCTION_READINESS_PLAN.md`).
+- `tar: ^7.5.21` — keeps the whole tree on the patched tar line
+  (electron-builder/node-gyp/@capacitor/cli all resolve to it).
 - `http-cache-semantics: ^4.3.0` — patches GHSA-ch52-4w7c-c8xp in the
   `electron → @electron/get → got` install chain.
-
-Known-open advisories requiring a major upgrade (deliberate decision, see
-plan): `electron@31.7.7` (EOL line with published CVEs — upgrade to a
-supported major; this also removes the unpatchable `extract-zip`
-advisories, which only affect Electron's own install-time zip extraction of
-its HTTPS-downloaded, checksum-verified binary).
+- `uuid: ^11.1.1` — patches GHSA-w5hq-g745-h8pq in `@capacitor/cli → xcode`
+  (build-time only; verified the CLI still works with the override).

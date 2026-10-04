@@ -46,14 +46,14 @@
     "test:no-network": "node --import ./tests/no-network-guard.mjs --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@capacitor/browser": "^6.0.6",
-    "@capacitor/core": "6.2.2"
+    "@capacitor/browser": "^8.0.5",
+    "@capacitor/core": "8.5.2"
   },
   "devDependencies": {
-    "@capacitor/android": "6.2.2",
-    "@capacitor/cli": "6.2.2",
-    "@capacitor/ios": "6.2.2",
-    "electron": "31.7.7",
+    "@capacitor/android": "8.5.2",
+    "@capacitor/cli": "8.5.2",
+    "@capacitor/ios": "8.5.2",
+    "electron": "44.5.1",
     "electron-builder": "26.15.3",
     "typescript": "5.6.3"
   },
@@ -125,7 +125,7 @@
     "appImage": {
       "artifactName": "yayra-${version}.${ext}"
     },
-    "electronVersion": "31.7.7"
+    "electronVersion": "44.5.1"
   },
   "author": {
     "name": "g2code33",
@@ -135,8 +135,6 @@
   "overrides": {
     "tar": "^7.5.21",
     "http-cache-semantics": "^4.3.0",
-    "@capacitor/cli": {
-      "tar": "~6.2.1"
-    }
+    "uuid": "^11.1.1"
   }
 }

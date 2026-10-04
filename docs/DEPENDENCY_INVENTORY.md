@@ -28,7 +28,7 @@ This document lists all development, runtime, and platform dependencies utilized
 | **Node.js** | `>= 22.0.0` | MIT | Cross-platform build scripts, verification, and tests |
 | **TypeScript** | `5.6.3` | Apache-2.0 | Static type checking and interface contracts |
 | **Electron-Builder** | `26.15.3` | MIT | Desktop bundle packaging for Windows & Linux |
-| **Capacitor CLI / Core** | `6.2.2` | MIT | Android native project sync and asset staging |
+| **Capacitor CLI / Core** | `8.5.2` | MIT | Android native project sync and asset staging |
 | **Android Gradle Plugin** | `8.2.0+` | Apache-2.0 | APK and AAB compilation |
 | **dpkg-deb** | Standard Debian/Ubuntu tool | GPL-2.0+ | Native `.deb` archive generation |
 | **NSIS** | `3.x` | zlib/libpng | Windows 64-bit EXE installer compilation |

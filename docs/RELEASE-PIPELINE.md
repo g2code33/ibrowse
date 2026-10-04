@@ -7,8 +7,8 @@ This repository starts from one web bundle and fans out to desktop, mobile, and 
 | Area | Implementation |
 |---|---|
 | Web bundle | `npm run build:web` copies `public/` + `src/` to `dist/`, injects CSP, `dist/version.json`, and a service-worker precache list. |
-| Desktop | Electron `31.7.7` is pinned in `package.json#build.electronVersion`; electron-builder `26.15.3` creates Windows NSIS/portable and the Linux `.AppImage`, while the deterministic `dpkg-deb` packager creates the Linux `.deb`. |
-| Mobile | Capacitor `6.2.2`; CI creates native platform projects as needed, then runs `cap sync` against the already-built `dist/`. |
+| Desktop | Electron `44.5.1` is pinned in `package.json#build.electronVersion`; electron-builder `26.15.3` creates Windows NSIS/portable and the Linux `.AppImage`, while the deterministic `dpkg-deb` packager creates the Linux `.deb`. |
+| Mobile | Capacitor `8.5.2`; CI creates native platform projects as needed, then runs `cap sync` against the already-built `dist/`. |
 | Updates | `src/services/updateService.js` implements client state/semver/checksum/snooze rules; `worker/update-worker.mjs` serves `/updates/manifest.json`; `scripts/generate-update-manifest.mjs` rewrites the manifest from artifact metadata. |
 | Branding | `assets/brand/source.png` is the source of truth; `npm run refresh:branding` generates favicon, PWA icons, hicolor icons, `.ico`, Android, and iOS icon assets. |
 | Versions | `scripts/version.mjs` updates/checks package, lockfile, web manifest, Electron metadata, Android version gradle, and iOS plist together. |
