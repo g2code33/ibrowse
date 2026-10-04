@@ -3113,6 +3113,11 @@ export class BrowserShell {
 
       // REAL "Frequently Used Sites" (visit-count driven, cap 5).
       const frequentSites = this.getFrequentSites();
+
+      // RECOVER-RECENT-TABS PROMPT FIRST: it renders ABOVE the tiles so
+      // the user cannot miss it (it used to sit below the fold).
+      this.appendContinueCard(newTabPage, frequentSites);
+
       if (frequentSites.length > 0) {
         const frequentSection = document.createElement('div');
         frequentSection.style.width = '100%';
@@ -3142,62 +3147,6 @@ export class BrowserShell {
 
         frequentSection.appendChild(frequentGrid);
         newTabPage.appendChild(frequentSection);
-      }
-
-      // Chrome's "Continue with these tabs" card: the previous run's
-      // tabs that were NOT closed manually (rolling session snapshot),
-      // topped up with frequently-opened sites ("You visit often").
-      const continueEntries = [];
-      const seenContinue = new Set(this.state.tabs.map((t) => t.url));
-      for (const t of (this.state.continueTabs || [])) {
-        if (seenContinue.has(t.url)) continue;
-        seenContinue.add(t.url);
-        continueEntries.push({ url: t.url, title: t.title || t.url, reason: 'From last session' });
-        if (continueEntries.length >= 5) break;
-      }
-      for (const site of frequentSites) {
-        if (continueEntries.length >= 5) break;
-        if (seenContinue.has(site.url)) continue;
-        seenContinue.add(site.url);
-        continueEntries.push({ url: site.url, title: site.title || site.url, reason: 'You visit often' });
-      }
-      // ALWAYS a real prompt: the user explicitly recovers or rejects.
-      // "No thanks" remembers the dismissed snapshot so the same session
-      // never re-prompts, while the NEXT session's tabs prompt again.
-      const continueSnapshotId = this.state.continueSavedAt || 'no-snapshot-id';
-      const continueDismissed = this.state.settings.continueDismissedAt === continueSnapshotId;
-      if (continueEntries.length > 0 && !continueDismissed) {
-        const continueCard = document.createElement('div');
-        continueCard.className = 'fb-continue-card';
-        continueCard.innerHTML = `
-          <div class="fb-continue-card-head">Continue with these tabs?</div>
-          ${continueEntries.map((entry) => {
-            let host = entry.url;
-            try { host = new URL(entry.url).hostname; } catch { /* keep url */ }
-            return `
-            <button class="fb-continue-item" data-url="${String(entry.url).replace(/"/g, '&quot;')}">
-              <img class="fb-continue-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
-              <span class="fb-continue-text">
-                <span class="fb-continue-title">${String(entry.title).replace(/</g, '&lt;')}</span>
-                <span class="fb-continue-meta">${host} &bull; ${entry.reason}</span>
-              </span>
-            </button>`;
-          }).join('')}
-          <div class="fb-continue-actions">
-            <button class="fb-continue-restore-btn">Restore all</button>
-            <button class="fb-continue-dismiss-btn">No thanks</button>
-          </div>
-        `;
-        continueCard.querySelectorAll('.fb-continue-item').forEach((item) => {
-          item.addEventListener('click', () => this.navigateActiveTab(item.dataset.url));
-        });
-        continueCard.querySelector('.fb-continue-restore-btn')?.addEventListener('click', () => {
-          this.restoreContinueTabs(continueEntries);
-        });
-        continueCard.querySelector('.fb-continue-dismiss-btn')?.addEventListener('click', () => {
-          this.dismissContinueTabs();
-        });
-        newTabPage.appendChild(continueCard);
       }
 
       // Recent History: a proper card (same design language as the
@@ -5673,9 +5622,22 @@ export class BrowserShell {
   queueSessionSnapshot() {
     if (!this.sessionRepo || typeof this.sessionRepo.saveSession !== 'function') return;
     if (typeof setTimeout !== 'function') return;
+    // The bubble's mini panel runs its OWN shell over the SAME profile
+    // storage: letting it snapshot its (empty) tab list silently wiped
+    // the main window's last session every time the bubble was used -
+    // the "recover recent tabs never comes" bug.
+    if (this.options?.isMiniShell) return;
     const tabs = (this.state.tabs || [])
       .filter((t) => t && !t.isPrivate && /^https?:\/\//i.test(String(t.url || '')))
       .map((t) => ({ url: t.url, title: t.title || t.url }));
+    // Launch-wipe protection: a fresh run opens on a lone newtab, and
+    // 600ms later used to OVERWRITE the previous session's snapshot
+    // with [] - if the user quit again without browsing (or the app
+    // auto-reopened after an update), the recover offer was gone
+    // forever. While the offer is still pending and this run has not
+    // browsed anywhere yet, the on-disk snapshot is left untouched.
+    if (tabs.length === 0 && !this._sessionHadRealTabs && (this.state.continueTabs || []).length > 0) return;
+    if (tabs.length > 0) this._sessionHadRealTabs = true;
     const json = JSON.stringify(tabs);
     if (json === this._lastSessionSnapshotJson) return;
     this._lastSessionSnapshotJson = json;
@@ -9565,6 +9527,12 @@ export class BrowserShell {
   /** "Restore all" on the continue-with-these-tabs prompt: open every entry. */
   restoreContinueTabs(entries) {
     const list = Array.isArray(entries) ? entries : [];
+    // The offer is being consumed: clear it and mark it answered so it
+    // neither re-prompts this session nor blocks the rolling snapshot.
+    this.state.continueTabs = [];
+    this.state.settings.continueDismissedAt = this.state.continueSavedAt || 'no-snapshot-id';
+    this._sessionHadRealTabs = true;
+    this.persistSettings?.();
     let opened = 0;
     for (const entry of list) {
       if (!/^https?:\/\//i.test(entry?.url || '')) continue;
@@ -9583,8 +9551,72 @@ export class BrowserShell {
   /** "No thanks" on the prompt: remember the snapshot so it never re-asks. */
   dismissContinueTabs() {
     this.state.settings.continueDismissedAt = this.state.continueSavedAt || 'no-snapshot-id';
+    this.state.continueTabs = [];
+    // The offer is answered: the rolling snapshot may resume normally
+    // (the launch-wipe guard no longer needs to protect it).
+    this._sessionHadRealTabs = true;
     this.persistSettings?.();
     this.render();
+  }
+
+  /**
+   * Chrome's "Continue with these tabs?" card: the previous run's tabs
+   * that were NOT closed manually (rolling session snapshot), topped up
+   * with frequently-opened sites ("You visit often"). ALWAYS a real
+   * prompt - the user explicitly recovers (Restore all / click one) or
+   * rejects (No thanks). "No thanks" remembers the dismissed snapshot
+   * so the same session never re-prompts, while the NEXT session's tabs
+   * prompt again. Rendered ABOVE the frequent tiles.
+   */
+  appendContinueCard(newTabPage, frequentSites = []) {
+    const continueEntries = [];
+    const seenContinue = new Set(this.state.tabs.map((t) => t.url));
+    for (const t of (this.state.continueTabs || [])) {
+      if (seenContinue.has(t.url)) continue;
+      seenContinue.add(t.url);
+      continueEntries.push({ url: t.url, title: t.title || t.url, reason: 'From last session' });
+      if (continueEntries.length >= 5) break;
+    }
+    for (const site of frequentSites) {
+      if (continueEntries.length >= 5) break;
+      if (seenContinue.has(site.url)) continue;
+      seenContinue.add(site.url);
+      continueEntries.push({ url: site.url, title: site.title || site.url, reason: 'You visit often' });
+    }
+    const continueSnapshotId = this.state.continueSavedAt || 'no-snapshot-id';
+    const continueDismissed = this.state.settings.continueDismissedAt === continueSnapshotId;
+    if (continueEntries.length === 0 || continueDismissed) return;
+    const continueCard = document.createElement('div');
+    continueCard.className = 'fb-continue-card';
+    continueCard.innerHTML = `
+      <div class="fb-continue-card-head">Continue with these tabs?</div>
+      ${continueEntries.map((entry) => {
+        let host = entry.url;
+        try { host = new URL(entry.url).hostname; } catch { /* keep url */ }
+        return `
+        <button class="fb-continue-item" data-url="${String(entry.url).replace(/"/g, '&quot;')}">
+          <img class="fb-continue-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+          <span class="fb-continue-text">
+            <span class="fb-continue-title">${String(entry.title).replace(/</g, '&lt;')}</span>
+            <span class="fb-continue-meta">${host} &bull; ${entry.reason}</span>
+          </span>
+        </button>`;
+      }).join('')}
+      <div class="fb-continue-actions">
+        <button class="fb-continue-restore-btn">Restore all</button>
+        <button class="fb-continue-dismiss-btn">No thanks</button>
+      </div>
+    `;
+    continueCard.querySelectorAll('.fb-continue-item').forEach((item) => {
+      item.addEventListener('click', () => this.navigateActiveTab(item.dataset.url));
+    });
+    continueCard.querySelector('.fb-continue-restore-btn')?.addEventListener('click', () => {
+      this.restoreContinueTabs(continueEntries);
+    });
+    continueCard.querySelector('.fb-continue-dismiss-btn')?.addEventListener('click', () => {
+      this.dismissContinueTabs();
+    });
+    newTabPage.appendChild(continueCard);
   }
 
   /** Copy a link (newtab cards' copy buttons) with an honest notice. */

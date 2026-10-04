@@ -123,6 +123,10 @@ if (root) {
     // is the right chrome for it, while still using the native per-tab
     // WebContentsView engine through the same preload bridge.
     isMobile: isMiniShell || ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
+    // The mini panel shares the profile's storage with the main window -
+    // it must NEVER write the rolling last-session snapshot, or every
+    // bubble use wipes the "Continue with these tabs?" offer.
+    isMiniShell,
     updateService: service,
     initialUrl: bootPage || 'yayra://newtab'
   });
