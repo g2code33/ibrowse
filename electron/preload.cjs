@@ -3,12 +3,22 @@ const { contextBridge, ipcRenderer } = require('electron');
 const WEBVIEW_EVENT_CHANNEL = 'yayra:webview-event';
 const AUTH_EVENT_CHANNEL = 'yayra:auth-event';
 const DOWNLOADS_EVENT_CHANNEL = 'yayra:downloads-event';
+const UPDATES_EVENT_CHANNEL = 'yayra:updates-event';
 
 const api = {
   getLaunchInfo: () => ipcRenderer.invoke('yayra:get-launch-info'),
   updates: {
     check: () => ipcRenderer.invoke('yayra:updates-check'),
-    install: () => ipcRenderer.invoke('yayra:updates-install')
+    // Streams the release artifact into the staging dir and verifies
+    // byte-length + sha256 in the main process before reporting it staged.
+    // See electron/desktopUpdater.cjs.
+    download: (payload) => ipcRenderer.invoke('yayra:updates-download', payload),
+    install: (payload) => ipcRenderer.invoke('yayra:updates-install', payload),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on(UPDATES_EVENT_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(UPDATES_EVENT_CHANNEL, listener);
+    }
   },
   // Native website-rendering engine bridge. See electron/webviewBridge.cjs.
   // Presence of `window.yayra.webview` is how the renderer
@@ -18,7 +28,7 @@ const api = {
   webview: {
     ensure: (tabId, url, isPrivate = false) => ipcRenderer.invoke('yayra:webview-ensure', { tabId, url, isPrivate }),
     setBounds: (tabId, bounds) => ipcRenderer.invoke('yayra:webview-set-bounds', { tabId, bounds }),
-    setVisible: (tabId, visible) => ipcRenderer.invoke('yayra:webview-set-visible', { tabId, visible }),
+    setVisible: (tabId, visible, options = {}) => ipcRenderer.invoke('yayra:webview-set-visible', { tabId, visible, capture: Boolean(options && options.capture) }),
     goBack: (tabId) => ipcRenderer.invoke('yayra:webview-go-back', { tabId }),
     goForward: (tabId) => ipcRenderer.invoke('yayra:webview-go-forward', { tabId }),
     reload: (tabId) => ipcRenderer.invoke('yayra:webview-reload', { tabId }),
@@ -74,7 +84,13 @@ const api = {
     getSettings: () => ipcRenderer.invoke('yayra:overlay-get-settings'),
     setEnabled: (enabled) => ipcRenderer.invoke('yayra:overlay-set-enabled', enabled),
     setLaunchAtStartup: (enabled) => ipcRenderer.invoke('yayra:overlay-set-launch-at-startup', enabled),
-    setOverlayAllApps: (enabled) => ipcRenderer.invoke('yayra:overlay-set-overlay-all-apps', enabled)
+    setOverlayAllApps: (enabled) => ipcRenderer.invoke('yayra:overlay-set-overlay-all-apps', enabled),
+    // "Minimize to bubble" on desktop hides the real OS window; the native
+    // always-on-top bubble (a separate window) is the way back in.
+    minimizeMainWindow: () => ipcRenderer.send('yayra:overlay-minimize-main'),
+    // Used by the floating mini-shell window's own slim chrome.
+    closeMini: () => ipcRenderer.send('yayra:overlay-mini-close'),
+    openFullFromMini: () => ipcRenderer.send('yayra:overlay-mini-open-full')
   }
 };
 

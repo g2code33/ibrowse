@@ -11,6 +11,11 @@ import { resolveCapacitorGoogleAuthConfig } from '../config/googleAuthCapacitor.
 const root = document.getElementById('app');
 const header = document.getElementById('top-header');
 const target = detectTarget();
+// Floating "yayra mini" panel (Electron): the native always-on-top window
+// the desktop bubble expands into loads this same bundle with ?shell=mini
+// and gets the compact layout + a slim draggable titlebar instead of the
+// full desktop chrome. See electron/overlayWindow.cjs.
+const isMiniShell = typeof location !== 'undefined' && new URLSearchParams(location.search || '').get('shell') === 'mini';
 const installedVersion = document.documentElement.dataset.version || '0.1.0';
 const storage = globalThis.localStorage || new MemoryStorage();
 const service = new UpdateService({
@@ -26,8 +31,12 @@ const service = new UpdateService({
   telemetry: (event) => navigator.sendBeacon?.('/telemetry/updates', JSON.stringify(event))
 });
 
-if (header && !['ios', 'android', 'pwa-installed'].includes(target)) {
+if (header && !isMiniShell && !['ios', 'android', 'pwa-installed'].includes(target)) {
   mountUpdateButton({ root: header, service, config: DEFAULT_UPDATE_CONFIG });
+}
+
+if (isMiniShell && typeof document !== 'undefined') {
+  mountMiniShellChrome();
 }
 
 // Web/PWA "Sign in with Google": BrowserShell drives whatever bridge it
@@ -91,7 +100,10 @@ if (root) {
   const browserShell = new BrowserShell({
     container: root,
     platform: target,
-    isMobile: ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
+    // The mini panel is a ~420px-wide window: the compact (mobile) layout
+    // is the right chrome for it, while still using the native per-tab
+    // WebContentsView engine through the same preload bridge.
+    isMobile: isMiniShell || ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
     updateService: service,
     initialUrl: 'yayra://newtab'
   });
@@ -99,7 +111,7 @@ if (root) {
     browserShell.render(root);
   });
 
-  if (['ios', 'android', 'pwa-installed'].includes(target)) {
+  if (!isMiniShell && ['ios', 'android', 'pwa-installed'].includes(target)) {
     mountMobileUpdatePrompt({
       root: document.body,
       promptSession: new PromptSession({ storage, platform: target === 'pwa-installed' ? 'pwa' : target }),
@@ -110,7 +122,32 @@ if (root) {
   }
 }
 
-registerPwaUpdateHandler(DEFAULT_UPDATE_CONFIG);
+if (!isMiniShell) registerPwaUpdateHandler(DEFAULT_UPDATE_CONFIG);
+
+// Slim always-on-top chrome for the frameless mini window: a draggable
+// titlebar with "open full browser" and "hide" controls wired to the
+// overlay bridge (electron/overlayWindow.cjs IPC).
+function mountMiniShellChrome() {
+  const overlay = (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
+  const style = document.createElement('style');
+  style.textContent = '#app { height: calc(100vh - 30px) !important; margin-top: 30px !important; }';
+  document.head.appendChild(style);
+  const bar = document.createElement('div');
+  bar.id = 'yayra-mini-titlebar';
+  bar.style.cssText = [
+    'position:fixed; top:0; left:0; right:0; z-index:100000; display:flex; align-items:center; gap:8px;',
+    'height:30px; padding:0 8px; background:#141824; color:#dfe4ee; box-sizing:border-box;',
+    'font:600 12px system-ui, sans-serif; user-select:none;',
+    '-webkit-app-region:drag; border-bottom:1px solid rgba(255,255,255,0.08);'
+  ].join(' ');
+  const buttonCss = '-webkit-app-region:no-drag; border:none; background:transparent; color:#dfe4ee; cursor:pointer; font-size:13px; line-height:1; padding:4px 6px; border-radius:6px;';
+  bar.innerHTML = '<span style="opacity:0.85;">yayra mini</span><span style="flex:1;"></span>'
+    + `<button id="yayra-mini-expand" title="Open full browser" style="${buttonCss}">⤢</button>`
+    + `<button id="yayra-mini-hide" title="Hide (click the bubble to bring back)" style="${buttonCss}">✕</button>`;
+  document.body.prepend(bar);
+  document.getElementById('yayra-mini-expand')?.addEventListener('click', () => overlay?.openFullFromMini?.());
+  document.getElementById('yayra-mini-hide')?.addEventListener('click', () => overlay?.closeMini?.());
+}
 
 function getUpdateManifestUrl() {
   if (typeof location !== 'undefined' && location.hostname === 'yayra.pages.dev') {

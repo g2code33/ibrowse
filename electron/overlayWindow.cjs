@@ -59,9 +59,59 @@ function createOverlayBridge({
   preloadPath,
   overlayStore,
   getMainWindow,
+  // --- all optional (keeps older tests/callers working unchanged) ---
+  // Preload for the floating mini-browser window (the full window.yayra API,
+  // NOT the tiny overlay preload) - when absent, the mini window feature is
+  // disabled and bubble clicks fall back to restoring the main window.
+  mainPreloadPath = null,
+  // URL the mini window loads (the dist shell in compact mini mode).
+  miniUrl = 'yayra://app/index.html?shell=mini',
+  // Electron Menu class for the bubble's right-click menu.
+  Menu = null,
+  // Recreates the main browser window after it was closed - this is what
+  // makes the bubble genuinely independent of the main window's lifetime.
+  createMainWindow = null,
+  // Linux autostart fallback dependencies (fs + home dir), injectable for
+  // tests. app.setLoginItemSettings historically only covers Win/macOS, so
+  // on Linux we also write a freedesktop autostart .desktop entry.
+  fsImpl = null,
+  homeDir = null,
+  platform = process.platform,
   logger = console
 }) {
   let overlayWin = null;
+  let miniWin = null;
+
+  function linuxAutostartFile() {
+    if (!homeDir) return null;
+    return path.join(homeDir, '.config', 'autostart', 'yayra.desktop');
+  }
+
+  function applyLinuxAutostart(enabled) {
+    if (platform !== 'linux' || !fsImpl) return;
+    const file = linuxAutostartFile();
+    if (!file) return;
+    try {
+      if (enabled) {
+        const execPath = process.env.APPIMAGE || process.execPath;
+        const desktop = [
+          '[Desktop Entry]',
+          'Type=Application',
+          'Name=Yayra',
+          'Comment=Yayra floating browser bubble',
+          `Exec=${JSON.stringify(execPath)}`,
+          'X-GNOME-Autostart-enabled=true',
+          'Terminal=false'
+        ].join('\n') + '\n';
+        fsImpl.mkdirSync(path.dirname(file), { recursive: true });
+        fsImpl.writeFileSync(file, desktop, { mode: 0o644 });
+      } else if (fsImpl.existsSync(file)) {
+        fsImpl.unlinkSync(file);
+      }
+    } catch (err) {
+      logger?.warn?.(`[yayra:overlay] could not write Linux autostart entry: ${err?.message || err}`);
+    }
+  }
 
   function applyLoginItemSettings(enabled) {
     try {
@@ -72,6 +122,10 @@ function createOverlayBridge({
       // unavailable there.
       logger?.warn?.(`[yayra:overlay] could not set login item: ${err?.message || err}`);
     }
+    // Linux desktop environments use XDG autostart, which Electron's
+    // setLoginItemSettings does not reliably cover - write the .desktop
+    // entry ourselves so "start right from booting" is true on Linux too.
+    applyLinuxAutostart(Boolean(enabled));
   }
 
   function defaultPosition() {
@@ -110,8 +164,14 @@ function createOverlayBridge({
     </svg>
   </div>
   <script>
-    document.getElementById('bubble').addEventListener('click', () => {
-      window.yayraOverlay?.restore();
+    const bubbleEl = document.getElementById('bubble');
+    bubbleEl.addEventListener('click', () => {
+      if (window.yayraOverlay?.bubbleClick) window.yayraOverlay.bubbleClick();
+      else window.yayraOverlay?.restore();
+    });
+    bubbleEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      window.yayraOverlay?.openMenu?.();
     });
   </script>
 </body></html>`;
@@ -179,10 +239,129 @@ function createOverlayBridge({
       overlayWin.close();
     }
     overlayWin = null;
+    // The mini panel is anchored to the bubble - no bubble, no mini panel.
+    destroyMiniWindow();
   }
 
   function getOverlayWindow() {
     return overlayWin;
+  }
+
+  /* -------------------------------------------------------------
+   * Floating "yayra mini" panel - a REAL native always-on-top window
+   * (not a <div> inside the main renderer), so it works even when the
+   * main browser window is closed or was never opened. Single click on
+   * the bubble toggles it, exactly like AssistiveTouch expanding.
+   * ----------------------------------------------------------- */
+
+  function miniDefaultBounds() {
+    const width = 420;
+    const height = 640;
+    try {
+      const area = screen.getPrimaryDisplay().workAreaSize;
+      let x = area.width - width - 24;
+      let y = area.height - height - 48;
+      if (overlayWin && !overlayWin.isDestroyed() && typeof overlayWin.getPosition === 'function') {
+        const [bx, by] = overlayWin.getPosition();
+        const size = overlayStore.load().size || 64;
+        x = Math.min(Math.max(12, bx + size - width), Math.max(12, area.width - width - 12));
+        y = Math.min(Math.max(12, by - height - 12), Math.max(12, area.height - height - 12));
+      }
+      return { x, y, width, height };
+    } catch {
+      return { x: 80, y: 80, width, height };
+    }
+  }
+
+  function ensureMiniWindow() {
+    if (!mainPreloadPath) return null;
+    if (miniWin && !miniWin.isDestroyed()) return miniWin;
+    const bounds = miniDefaultBounds();
+    miniWin = new BrowserWindow({
+      ...bounds,
+      frame: false,
+      resizable: true,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      show: true,
+      backgroundColor: '#101218',
+      webPreferences: {
+        preload: mainPreloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true
+      }
+    });
+    miniWin.setAlwaysOnTop(true, 'screen-saver');
+    if (typeof miniWin.setVisibleOnAllWorkspaces === 'function') {
+      miniWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+    miniWin.loadURL(miniUrl);
+    miniWin.on('closed', () => { miniWin = null; });
+    return miniWin;
+  }
+
+  function destroyMiniWindow() {
+    if (miniWin && !miniWin.isDestroyed()) miniWin.close();
+    miniWin = null;
+  }
+
+  function getMiniWindow() {
+    return miniWin;
+  }
+
+  function toggleMiniPanel() {
+    if (!mainPreloadPath) {
+      restoreMainWindow();
+      return null;
+    }
+    if (miniWin && !miniWin.isDestroyed()) {
+      if (typeof miniWin.isVisible === 'function' && miniWin.isVisible()) {
+        miniWin.hide();
+      } else {
+        miniWin.show?.();
+        miniWin.focus?.();
+      }
+      return miniWin;
+    }
+    return ensureMiniWindow();
+  }
+
+  function restoreMainWindow() {
+    const win = getMainWindow?.();
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized?.()) win.restore();
+      win.show();
+      win.focus();
+      return win;
+    }
+    // Main window was closed (or never opened): the bubble must still be
+    // able to open the full browser - this is what "the bubble does not
+    // rely on yayra main" means in practice.
+    if (typeof createMainWindow === 'function') {
+      try {
+        return createMainWindow();
+      } catch (err) {
+        logger?.warn?.(`[yayra:overlay] could not recreate main window: ${err?.message || err}`);
+      }
+    }
+    return null;
+  }
+
+  function openBubbleMenu() {
+    if (!Menu || !overlayWin || overlayWin.isDestroyed()) return;
+    const template = [
+      { label: 'Open yayra mini', click: () => toggleMiniPanel() },
+      { label: 'Open full browser', click: () => restoreMainWindow() },
+      { type: 'separator' },
+      { label: 'Hide bubble (re-enable from Settings)', click: () => setEnabled(false) },
+      { type: 'separator' },
+      { label: 'Quit Yayra', click: () => { try { app.quit(); } catch { /* already quitting */ } } }
+    ];
+    Menu.buildFromTemplate(template).popup({ window: overlayWin });
   }
 
   function setEnabled(enabled) {
@@ -227,13 +406,25 @@ function createOverlayBridge({
   ipcMain.handle('yayra:overlay-set-enabled', (_e, enabled) => setEnabled(enabled));
   ipcMain.handle('yayra:overlay-set-launch-at-startup', (_e, enabled) => setLaunchAtStartup(enabled));
   ipcMain.handle('yayra:overlay-set-overlay-all-apps', (_e, enabled) => setOverlayAllApps(enabled));
-  ipcMain.on('yayra:overlay-restore', () => {
+  ipcMain.on('yayra:overlay-restore', () => restoreMainWindow());
+  // Single bubble click: toggle the floating mini browser (independent of
+  // the main window). Right-click: quick menu with full-browser/quit.
+  ipcMain.on('yayra:overlay-bubble-click', () => toggleMiniPanel());
+  ipcMain.on('yayra:overlay-bubble-menu', () => openBubbleMenu());
+  // Sent from the mini shell's own chrome (close / expand buttons).
+  ipcMain.on('yayra:overlay-mini-close', () => {
+    if (miniWin && !miniWin.isDestroyed()) miniWin.hide();
+  });
+  ipcMain.on('yayra:overlay-mini-open-full', () => {
+    if (miniWin && !miniWin.isDestroyed()) miniWin.hide();
+    restoreMainWindow();
+  });
+  // "Minimize to bubble" from the main window: hide the whole OS window;
+  // the native bubble (always present) is the way back in.
+  ipcMain.on('yayra:overlay-minimize-main', () => {
     const win = getMainWindow?.();
-    if (win && !win.isDestroyed()) {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
-    }
+    if (win && !win.isDestroyed()) win.hide();
+    ensureOverlayWindow();
   });
   ipcMain.on('yayra:overlay-moved', (_e, position) => {
     if (position && typeof position.x === 'number' && typeof position.y === 'number') {
@@ -245,6 +436,12 @@ function createOverlayBridge({
     ensureOverlayWindow,
     destroyOverlayWindow,
     getOverlayWindow,
+    ensureMiniWindow,
+    destroyMiniWindow,
+    getMiniWindow,
+    toggleMiniPanel,
+    restoreMainWindow,
+    openBubbleMenu,
     setEnabled,
     setLaunchAtStartup,
     setOverlayAllApps,

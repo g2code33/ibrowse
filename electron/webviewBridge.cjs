@@ -221,6 +221,11 @@ function createWebviewBridge({
   shell,
   getMainWindow,
   authHosts = SYSTEM_BROWSER_AUTH_HOSTS,
+  // Resolves the BrowserWindow that owns a given webContents, so views
+  // created by the floating mini-shell window attach to THAT window instead
+  // of the main one. Injected for testability; when absent (older tests,
+  // direct _internal calls) everything falls back to getMainWindow().
+  getWindowForWebContents = null,
   // Injected (rather than `require('electron')`'d directly) so this stays
   // unit-testable with fakes - see tests/electron-webview-bridge.test.mjs.
   // Both are optional: if a host app doesn't pass them, right-click simply
@@ -229,12 +234,38 @@ function createWebviewBridge({
   clipboard = null,
   logger = console
 }) {
-  const views = new Map(); // tabId -> { view, lastUrl }
+  // key -> { view, lastUrl, tabId, hostWc, hostWin }
+  // key namespaces the renderer-chosen tabId by the webContents that asked
+  // for it: the main window and the floating mini window each run their own
+  // BrowserShell instance whose generated ids ("tab-1", "tab-2", ...) would
+  // otherwise collide and steal each other's native views.
+  const views = new Map();
 
-  function send(tabId, type, payload = {}) {
+  function viewKey(event, tabId) {
+    const senderId = event && event.sender && typeof event.sender.id === 'number' ? event.sender.id : null;
+    return senderId === null ? String(tabId) : `wc${senderId}:${tabId}`;
+  }
+
+  function resolveHost(event) {
+    const hostWc = (event && event.sender) || null;
+    let hostWin = null;
+    if (hostWc && typeof getWindowForWebContents === 'function') {
+      try { hostWin = getWindowForWebContents(hostWc) || null; } catch { hostWin = null; }
+    }
+    if (!hostWin) hostWin = getMainWindow();
+    return { hostWc, hostWin };
+  }
+
+  function sendTo(entry, type, payload = {}) {
+    const message = { tabId: entry.tabId, type, ...payload };
+    const wc = entry.hostWc && !entry.hostWc.isDestroyed?.() ? entry.hostWc : null;
+    if (wc) {
+      wc.send(WEBVIEW_EVENT_CHANNEL, message);
+      return;
+    }
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
-    win.webContents.send(WEBVIEW_EVENT_CHANNEL, { tabId, type, ...payload });
+    win.webContents.send(WEBVIEW_EVENT_CHANNEL, message);
   }
 
   function navState(webContents) {
@@ -244,30 +275,28 @@ function createWebviewBridge({
     };
   }
 
-  function attachListeners(tabId, view) {
-    const wc = view.webContents;
-    wc.on('did-start-loading', () => send(tabId, 'loading-start'));
-    wc.on('did-stop-loading', () => send(tabId, 'loading-stop'));
+  function attachListeners(key, entry) {
+    const wc = entry.view.webContents;
+    wc.on('did-start-loading', () => sendTo(entry, 'loading-start'));
+    wc.on('did-stop-loading', () => sendTo(entry, 'loading-stop'));
     wc.on('did-navigate', (_event, url) => {
-      const entry = views.get(tabId);
-      if (entry) entry.lastUrl = url;
-      send(tabId, 'navigated', { url, ...navState(wc) });
+      entry.lastUrl = url;
+      sendTo(entry, 'navigated', { url, ...navState(wc) });
     });
     wc.on('did-navigate-in-page', (_event, url) => {
-      const entry = views.get(tabId);
-      if (entry) entry.lastUrl = url;
-      send(tabId, 'navigated', { url, ...navState(wc) });
+      entry.lastUrl = url;
+      sendTo(entry, 'navigated', { url, ...navState(wc) });
     });
-    wc.on('page-title-updated', (_event, title) => send(tabId, 'title-updated', { title }));
+    wc.on('page-title-updated', (_event, title) => sendTo(entry, 'title-updated', { title }));
     wc.on('page-favicon-updated', (_event, favicons) => {
-      send(tabId, 'favicon-updated', { favicon: (favicons && favicons[0]) || null });
+      sendTo(entry, 'favicon-updated', { favicon: (favicons && favicons[0]) || null });
     });
     wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
       // -3 is ERR_ABORTED: almost always a navigation superseded by another
       // one (e.g. the user typed a new URL before the previous one settled)
       // and is not a real failure worth surfacing.
       if (!isMainFrame || errorCode === -3) return;
-      send(tabId, 'fail-load', { errorCode, errorDescription, url: validatedUrl });
+      sendTo(entry, 'fail-load', { errorCode, errorDescription, url: validatedUrl });
     });
     // Chrome-equivalent native right-click menu. A WebContentsView (unlike
     // a plain <webview> tag) shows NO context menu at all by default, so
@@ -278,27 +307,27 @@ function createWebviewBridge({
       const template = buildContextMenuTemplate({
         params,
         wc,
-        tabId,
-        send,
+        tabId: entry.tabId,
+        send: (tabId, type, payload) => sendTo(entry, type, payload),
         clipboard: clipboard || { writeText: () => {} }
       });
-      const win = getMainWindow();
+      const win = (entry.hostWin && !entry.hostWin.isDestroyed?.()) ? entry.hostWin : getMainWindow();
       if (!win || win.isDestroyed()) return;
       Menu.buildFromTemplate(template).popup({ window: win });
     });
     wc.setWindowOpenHandler(({ url }) => {
       if (requiresSystemBrowserAuth(url, authHosts)) {
         shell.openExternal(url).catch((err) => logger.error('[yayra:webview] failed to open external auth url', err));
-        send(tabId, 'system-browser-handoff', { url });
+        sendTo(entry, 'system-browser-handoff', { url });
         return { action: 'deny' };
       }
       // Let the renderer decide (usually: open as a new Yayra tab).
-      send(tabId, 'new-window-request', { url });
+      sendTo(entry, 'new-window-request', { url });
       return { action: 'deny' };
     });
   }
 
-  function createView(tabId, isPrivate) {
+  function createView(key, tabId, isPrivate, hostWc, hostWin) {
     const view = new WebContentsView({
       webPreferences: {
         contextIsolation: true,
@@ -310,25 +339,25 @@ function createWebviewBridge({
     if (typeof view.webContents.setUserAgent === 'function') {
       view.webContents.setUserAgent(buildBrowserUserAgent());
     }
-    const entry = { view, lastUrl: null };
-    views.set(tabId, entry);
-    attachListeners(tabId, view);
+    const entry = { view, lastUrl: null, tabId, hostWc, hostWin };
+    views.set(key, entry);
+    attachListeners(key, entry);
     return entry;
   }
 
-  function ensureView(tabId, url, { isPrivate = false } = {}) {
-    const win = getMainWindow();
+  function ensureView(key, tabId, url, { isPrivate = false, hostWc = null, hostWin = null } = {}) {
+    const win = (hostWin && !hostWin.isDestroyed?.()) ? hostWin : getMainWindow();
     if (!win || win.isDestroyed() || !tabId || !url) return { handedOffToSystemBrowser: false };
 
     if (requiresSystemBrowserAuth(url, authHosts)) {
       shell.openExternal(url).catch((err) => logger.error('[yayra:webview] failed to open external auth url', err));
-      send(tabId, 'system-browser-handoff', { url });
+      sendTo({ tabId, hostWc }, 'system-browser-handoff', { url });
       return { handedOffToSystemBrowser: true };
     }
 
-    let entry = views.get(tabId);
+    let entry = views.get(key);
     if (!entry) {
-      entry = createView(tabId, isPrivate);
+      entry = createView(key, tabId, isPrivate, hostWc, win);
       win.contentView.addChildView(entry.view);
     }
 
@@ -336,85 +365,119 @@ function createWebviewBridge({
       entry.lastUrl = url;
       entry.view.webContents.loadURL(url).catch((err) => {
         logger.error(`[yayra:webview] failed to load ${url}`, err);
-        send(tabId, 'fail-load', { errorCode: -2, errorDescription: String((err && err.message) || err), url });
+        sendTo(entry, 'fail-load', { errorCode: -2, errorDescription: String((err && err.message) || err), url });
       });
     }
     return { handedOffToSystemBrowser: false };
   }
 
-  function withView(tabId, fn) {
-    const entry = views.get(tabId);
+  function withView(key, fn) {
+    const entry = views.get(key);
     if (!entry) return undefined;
     return fn(entry.view);
   }
 
-  function setBounds(tabId, bounds) {
-    withView(tabId, (view) => view.setBounds(sanitizeBounds(bounds)));
+  function setBounds(key, bounds) {
+    withView(key, (view) => view.setBounds(sanitizeBounds(bounds)));
   }
 
-  function setVisible(tabId, visible) {
-    withView(tabId, (view) => {
-      if (visible) {
-        // Restoring a previously zeroed-out view just needs its real bounds
-        // back; the caller (renderer ResizeObserver) sends those right after.
-        return;
+  async function setVisible(key, visible, { capture = false } = {}) {
+    const entry = views.get(key);
+    if (!entry) return undefined;
+    const view = entry.view;
+    if (visible) {
+      // Restoring a previously zeroed-out view just needs its real bounds
+      // back; the caller (renderer ResizeObserver) sends those right after.
+      return undefined;
+    }
+    // Overlay-aware hiding: the renderer's own chrome (menu drawer, modals,
+    // dropdowns) are HTML that a native WebContentsView would otherwise
+    // cover, because native views always paint above the page document.
+    // When the renderer asks for a capture, grab a snapshot of the page
+    // BEFORE zeroing the bounds so the renderer can show a pixel-identical
+    // still image underneath its overlay UI - making the chrome truly
+    // overlay the page instead of the page covering the chrome.
+    let snapshot = null;
+    if (capture && view.webContents && typeof view.webContents.capturePage === 'function') {
+      try {
+        const image = await view.webContents.capturePage();
+        if (image && typeof image.toDataURL === 'function' && !(typeof image.isEmpty === 'function' && image.isEmpty())) {
+          snapshot = image.toDataURL();
+        }
+      } catch (err) {
+        logger.error?.(`[yayra:webview] capturePage failed for ${key}`, err);
       }
-      // Zeroing bounds (rather than removing/re-adding the child view) hides
-      // the surface without destroying the guest page or losing its state.
-      view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-    });
+    }
+    // Zeroing bounds (rather than removing/re-adding the child view) hides
+    // the surface without destroying the guest page or losing its state.
+    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    return snapshot ? { snapshot } : undefined;
   }
 
-  function goBack(tabId) {
-    withView(tabId, (view) => {
+  function goBack(key) {
+    withView(key, (view) => {
       if (historyCanGoBack(view.webContents)) historyGoBack(view.webContents);
     });
   }
 
-  function goForward(tabId) {
-    withView(tabId, (view) => {
+  function goForward(key) {
+    withView(key, (view) => {
       if (historyCanGoForward(view.webContents)) historyGoForward(view.webContents);
     });
   }
 
-  function reload(tabId) {
-    withView(tabId, (view) => view.webContents.reload());
+  function reload(key) {
+    withView(key, (view) => view.webContents.reload());
   }
 
-  function stop(tabId) {
-    withView(tabId, (view) => view.webContents.stop());
+  function stop(key) {
+    withView(key, (view) => view.webContents.stop());
   }
 
-  function destroyView(tabId) {
-    const entry = views.get(tabId);
+  function destroyView(key) {
+    const entry = views.get(key);
     if (!entry) return;
-    const win = getMainWindow();
+    const win = (entry.hostWin && !entry.hostWin.isDestroyed?.()) ? entry.hostWin : getMainWindow();
     if (win && !win.isDestroyed()) {
       try {
         win.contentView.removeChildView(entry.view);
       } catch (err) {
-        logger.error(`[yayra:webview] failed to detach view for ${tabId}`, err);
+        logger.error(`[yayra:webview] failed to detach view for ${key}`, err);
       }
     }
     if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
-    views.delete(tabId);
+    views.delete(key);
   }
 
   function destroyAll() {
-    for (const tabId of Array.from(views.keys())) destroyView(tabId);
+    for (const key of Array.from(views.keys())) destroyView(key);
   }
 
-  ipcMain.handle('yayra:webview-ensure', (_event, { tabId, url, isPrivate } = {}) => ensureView(tabId, url, { isPrivate }));
-  ipcMain.handle('yayra:webview-set-bounds', (_event, { tabId, bounds } = {}) => setBounds(tabId, bounds));
-  ipcMain.handle('yayra:webview-set-visible', (_event, { tabId, visible } = {}) => setVisible(tabId, visible));
-  ipcMain.handle('yayra:webview-go-back', (_event, { tabId } = {}) => goBack(tabId));
-  ipcMain.handle('yayra:webview-go-forward', (_event, { tabId } = {}) => goForward(tabId));
-  ipcMain.handle('yayra:webview-reload', (_event, { tabId } = {}) => reload(tabId));
-  ipcMain.handle('yayra:webview-stop', (_event, { tabId } = {}) => stop(tabId));
-  ipcMain.handle('yayra:webview-destroy', (_event, { tabId } = {}) => destroyView(tabId));
+  // Destroys only the views owned by one shell window (used when the main
+  // window or the floating mini window closes, WITHOUT tearing down the
+  // other window's tabs - they are independent).
+  function destroyForWebContents(wc) {
+    if (!wc) return;
+    for (const [key, entry] of Array.from(views.entries())) {
+      if (entry.hostWc === wc) destroyView(key);
+    }
+  }
+
+  ipcMain.handle('yayra:webview-ensure', (event, { tabId, url, isPrivate } = {}) => {
+    const { hostWc, hostWin } = resolveHost(event);
+    return ensureView(viewKey(event, tabId), tabId, url, { isPrivate, hostWc, hostWin });
+  });
+  ipcMain.handle('yayra:webview-set-bounds', (event, { tabId, bounds } = {}) => setBounds(viewKey(event, tabId), bounds));
+  ipcMain.handle('yayra:webview-set-visible', (event, { tabId, visible, capture } = {}) => setVisible(viewKey(event, tabId), visible, { capture }));
+  ipcMain.handle('yayra:webview-go-back', (event, { tabId } = {}) => goBack(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-go-forward', (event, { tabId } = {}) => goForward(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-reload', (event, { tabId } = {}) => reload(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-stop', (event, { tabId } = {}) => stop(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-destroy', (event, { tabId } = {}) => destroyView(viewKey(event, tabId)));
 
   return {
     destroyAll,
+    destroyForWebContents,
     // Exposed for tests and for main.cjs lifecycle hooks only.
     _internal: { views, ensureView, setBounds, setVisible, goBack, goForward, reload, stop, destroyView }
   };

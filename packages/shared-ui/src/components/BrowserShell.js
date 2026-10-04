@@ -216,7 +216,12 @@ export class BrowserShell {
       },
       // Persistent top-right account menu (see renderAccountDropdown()) -
       // separate from the Settings > Account page, which stays available too.
-      isAccountMenuOpen: false
+      isAccountMenuOpen: false,
+      // True while a transient popup that is NOT part of render() (omnibox
+      // search-suggestion dropdown) is covering the page area. On Electron
+      // the native page surface must be hidden for the popup to be seen at
+      // all - see hasBlockingOverlay().
+      isPageObscured: false
     };
 
     this.state.tabs.forEach((tab) => this.ensureNavigationState(tab));
@@ -239,8 +244,22 @@ export class BrowserShell {
     this._nativeWebviewTabIds = new Set();
     this._nativeWebviewResizeObservers = new Map();
     this._unsubscribeNativeWebview = null;
+    // Last captured still image of each tab's native view, shown underneath
+    // Yayra's own chrome (menu drawer, modals, mini window, dropdowns)
+    // while the native surface is hidden - a native WebContentsView always
+    // paints ABOVE the HTML document, so this snapshot swap is what makes
+    // in-app panels genuinely overlay the page instead of the page covering
+    // (and visually "carding over") the panels.
+    this._pageSnapshots = new Map();
     if (this.nativeWebview) {
       this._unsubscribeNativeWebview = this.nativeWebview.onEvent((evt) => this.handleNativeWebviewEvent(evt));
+    }
+
+    // Live desktop update progress (electron/desktopUpdater.cjs events).
+    this._unsubscribeUpdatesBridge = null;
+    const updatesBridge = this.desktopUpdatesBridge;
+    if (updatesBridge && typeof updatesBridge.onEvent === 'function') {
+      this._unsubscribeUpdatesBridge = updatesBridge.onEvent((evt) => this.handleDesktopUpdateEvent(evt));
     }
 
     // "Sign in with Google" bridge (Electron desktop only - see get authBridge()
@@ -305,6 +324,39 @@ export class BrowserShell {
   get overlayBridge() {
     if (typeof window === 'undefined') return null;
     return (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
+  }
+
+  // window.yayra.updates (exposed by electron/preload.cjs, backed by
+  // electron/desktopUpdater.cjs): main-process download+verify+install for
+  // desktop updates. Only treated as present when the REAL pipeline
+  // (download) exists - older builds exposed check/install stubs only.
+  get desktopUpdatesBridge() {
+    if (typeof window === 'undefined') return null;
+    const bridge = (window.yayra && window.yayra.updates) || (window.ibrowse && window.ibrowse.updates) || null;
+    return bridge && typeof bridge.download === 'function' ? bridge : null;
+  }
+
+  /**
+   * True whenever any piece of Yayra chrome that must appear ABOVE the page
+   * is open. On Electron the page is a native WebContentsView - a sibling
+   * OS surface that always paints over the HTML document - so while any of
+   * these are open the native surface is hidden and replaced by its last
+   * snapshot (see attachNativeWebviewSlot/syncNativeWebviewVisibility).
+   * On web/PWA/mobile builds this has no effect: iframes stack normally
+   * under positioned/z-indexed chrome.
+   */
+  hasBlockingOverlay() {
+    const s = this.state;
+    return Boolean(
+      s.isSideDrawerOpen ||
+      s.activeModal ||
+      s.isSecurityDropdownOpen ||
+      s.isAccountMenuOpen ||
+      s.isFloatingMiniOpen ||
+      s.isRadialLauncherOpen ||
+      (s.findInPage && s.findInPage.isOpen) ||
+      s.isPageObscured
+    );
   }
 
   async signInWithGoogle() {
@@ -1180,8 +1232,14 @@ export class BrowserShell {
     // on-screen surface above the HTML document, not inside it - so it must
     // be explicitly shown/hidden to match whichever tab/page is actually
     // on screen right now (internal pages like Settings must not have a
-    // leftover native surface floating over them).
-    this.syncNativeWebviewVisibility(activeTab.id, !isInternalPage);
+    // leftover native surface floating over them), AND it must get out of
+    // the way whenever Yayra's own chrome (menu drawer, modals, dropdowns,
+    // mini window) needs to appear above the page - capturing a snapshot
+    // first so the page still appears present underneath the chrome.
+    const overlayOpen = this.hasBlockingOverlay();
+    this.syncNativeWebviewVisibility(activeTab.id, !isInternalPage && !overlayOpen, {
+      captureActive: overlayOpen && !isInternalPage
+    });
 
     if (!url || url === 'yayra://newtab' || url === 'about:blank') {
       this.renderNewTabPage(viewport, activeTab);
@@ -1376,6 +1434,20 @@ export class BrowserShell {
     wrapper.className += ' fb-native-webview-slot';
     this._nativeWebviewTabIds.add(tabId);
 
+    // While chrome is overlaying the page the native surface stays hidden;
+    // show the last captured snapshot in its place so the page is still
+    // "there" visually underneath the drawer/modal/mini window.
+    if (this.hasBlockingOverlay() && typeof document !== 'undefined') {
+      const snapshot = this._pageSnapshots.get(tabId);
+      const still = document.createElement('img');
+      still.className = 'fb-page-snapshot-img';
+      still.dataset.tabId = tabId;
+      still.alt = '';
+      still.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:top left; background:#101218;';
+      if (snapshot) still.src = snapshot;
+      wrapper.appendChild(still);
+    }
+
     this.nativeWebview.ensure(tabId, url, isPrivate).then((result) => {
       if (result && result.handedOffToSystemBrowser) {
         const tab = this.state.tabs.find((t) => t.id === tabId);
@@ -1389,6 +1461,10 @@ export class BrowserShell {
     }).catch((err) => console.warn('[yayra] native webview ensure() failed:', err));
 
     const reportBounds = () => {
+      // Never reposition (and thereby re-show) the native surface while
+      // chrome is overlaying the page - the next render after the overlay
+      // closes re-reports real bounds via the fresh ResizeObserver below.
+      if (this.hasBlockingOverlay()) return;
       try {
         const rect = wrapper.getBoundingClientRect();
         this.nativeWebview.setBounds(tabId, {
@@ -1425,11 +1501,97 @@ export class BrowserShell {
    * tab not currently on screen must be explicitly hidden or it would float
    * over whatever IS on screen.
    */
-  syncNativeWebviewVisibility(activeTabId, showActive) {
+  syncNativeWebviewVisibility(activeTabId, showActive, { captureActive = false } = {}) {
     if (!this.nativeWebview || this._nativeWebviewTabIds.size === 0) return;
     for (const tabId of this._nativeWebviewTabIds) {
       const visible = tabId === activeTabId && showActive;
-      this.nativeWebview.setVisible(tabId, visible).catch(() => {});
+      if (visible) {
+        this.nativeWebview.setVisible(tabId, true).catch(() => {});
+        continue;
+      }
+      // Hiding the ACTIVE tab because chrome needs to overlay it: ask the
+      // main process to snapshot the page first, then swap the still image
+      // into the placeholder slot so the page visually stays put under the
+      // chrome. (Hidden background tabs need no snapshot.)
+      const wantsCapture = captureActive && tabId === activeTabId;
+      const result = this.nativeWebview.setVisible(tabId, false, wantsCapture ? { capture: true } : undefined);
+      if (wantsCapture && result && typeof result.then === 'function') {
+        result.then((res) => {
+          if (res && res.snapshot) {
+            this._pageSnapshots.set(tabId, res.snapshot);
+            this.applyPageSnapshot(tabId);
+          }
+        }).catch(() => {});
+      } else if (result && typeof result.catch === 'function') {
+        result.catch(() => {});
+      }
+    }
+  }
+
+  /**
+   * Paints the latest captured snapshot into the (already-rendered)
+   * placeholder slot for a tab. Runs after the async capture resolves, and
+   * only while chrome is actually overlaying the page.
+   */
+  applyPageSnapshot(tabId) {
+    if (typeof document === 'undefined' || !this.hasBlockingOverlay()) return;
+    const snapshot = this._pageSnapshots.get(tabId);
+    if (!snapshot) return;
+    const img = document.querySelector(`.fb-page-snapshot-img[data-tab-id="${tabId}"]`);
+    if (img && img.src !== snapshot) img.src = snapshot;
+  }
+
+  /**
+   * Lightweight page-obscuring toggle for transient popups that live
+   * OUTSIDE the render() cycle (the omnibox suggestion dropdown): hides/
+   * restores the native page surface in place, without a full re-render
+   * that would destroy the focused input mid-typing.
+   */
+  setPageObscured(obscured) {
+    const flag = Boolean(obscured);
+    if (this.state.isPageObscured === flag) return;
+    this.state.isPageObscured = flag;
+    if (!this.nativeWebview) return;
+    const tab = this.getActiveTab();
+    if (!tab) return;
+    const url = tab.url || '';
+    const isInternal = !url || url === 'about:blank' || url.startsWith('yayra://');
+    if (isInternal) return;
+
+    if (flag) {
+      this.syncNativeWebviewVisibility(tab.id, false, { captureActive: true });
+      if (typeof document !== 'undefined') {
+        const slot = this.viewportElement?.querySelector('.fb-native-webview-slot');
+        if (slot && !slot.querySelector('.fb-page-snapshot-img')) {
+          const still = document.createElement('img');
+          still.className = 'fb-page-snapshot-img';
+          still.dataset.tabId = tab.id;
+          still.alt = '';
+          still.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:top left; background:#101218;';
+          const snapshot = this._pageSnapshots.get(tab.id);
+          if (snapshot) still.src = snapshot;
+          slot.appendChild(still);
+        }
+      }
+    } else {
+      if (typeof document !== 'undefined') {
+        this.viewportElement?.querySelectorAll('.fb-page-snapshot-img').forEach((el) => el.remove());
+      }
+      const restored = this.nativeWebview.setVisible(tab.id, true);
+      if (restored && typeof restored.catch === 'function') restored.catch(() => {});
+      this.restoreActiveNativeBounds(tab.id);
+    }
+  }
+
+  restoreActiveNativeBounds(tabId) {
+    if (typeof document === 'undefined' || !this.nativeWebview) return;
+    const slot = this.viewportElement?.querySelector('.fb-native-webview-slot');
+    if (!slot) return;
+    try {
+      const rect = slot.getBoundingClientRect();
+      this.nativeWebview.setBounds(tabId, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+    } catch {
+      // No layout engine (tests) - nothing on screen to reposition.
     }
   }
 
@@ -3516,13 +3678,18 @@ export class BrowserShell {
     let res;
     try {
       res = await this.updateService.check({ manual });
-    } catch {
+    } catch (err) {
+      // A thrown check is a FAILED check - say so instead of silently
+      // pretending everything is up to date (which left manual "Check for
+      // updates" clicks looking like they did nothing at all).
       this.state.updateState = {
         ...this.state.updateState,
-        status: 'uptodate',
-        availableVersion: null
+        status: 'error',
+        availableVersion: null,
+        notes: String(err?.message || err || 'Update check failed')
       };
       this.render();
+      if (manual) this.showTransientNotice('Update check failed - please check your connection and try again.');
       return;
     }
 
@@ -3531,27 +3698,49 @@ export class BrowserShell {
         status: 'ready',
         installedVersion: res.installedVersion ?? this.state.updateState.installedVersion,
         availableVersion: res.version || null,
-        notes: res.notes || (res.force ? 'A required update is ready.' : 'Update ready.')
+        notes: res.notes || (res.force ? 'A required update is ready.' : 'Update ready.'),
+        // Verified download descriptor from the update manifest (url,
+        // sha256, bytes) - this is what the desktop pipeline downloads,
+        // verifies and installs. See applyUpdate().
+        download: res.download || null,
+        force: Boolean(res.force)
       };
       this.render();
+      if (manual) this.showTransientNotice(`Update v${res.version || ''} is available.`);
       this.promptUpdateReady();
     } else {
       // 'upToDate', 'ahead', 'unknown', 'disabled', etc. - never a reason to
       // show the "update ready" dialog.
+      const normalized = res?.status === 'upToDate' ? 'uptodate' : (res?.status || 'uptodate');
       this.state.updateState = {
         ...this.state.updateState,
-        status: res?.status === 'upToDate' ? 'uptodate' : (res?.status || 'uptodate'),
+        status: normalized,
         installedVersion: res?.installedVersion ?? this.state.updateState.installedVersion,
-        availableVersion: null
+        availableVersion: null,
+        download: null
       };
       this.render();
+      if (manual) {
+        if (normalized === 'uptodate' || normalized === 'ahead') {
+          const v = this.state.updateState.installedVersion;
+          this.showTransientNotice(`Yayra is up to date${v ? ` (v${v})` : ''}.`);
+        } else if (normalized === 'unknown') {
+          this.showTransientNotice('Could not reach the update server - will retry later.');
+        } else if (normalized === 'disabled') {
+          this.showTransientNotice('Updates are disabled on this build.');
+        }
+      }
     }
   }
 
   promptUpdateReady() {
     if (this.state.updatePromptShown) return;
     this.state.updatePromptShown = true;
-    const msg = `An update for Yayra (v${this.state.updateState.availableVersion || '0.1.1'}) is ready!\n\nWould you like to restart and apply the update now?`;
+    const desktopPipeline = Boolean(this.desktopUpdatesBridge && this.state.updateState.download?.url);
+    const action = desktopPipeline
+      ? 'Download and install it now? (It will be verified before anything runs.)'
+      : 'Would you like to restart and apply the update now?';
+    const msg = `An update for Yayra (v${this.state.updateState.availableVersion || '0.1.1'}) is ready!\n\n${action}`;
     try {
       if (typeof window !== 'undefined' && typeof window.confirm === 'function' && window.confirm(msg)) {
         this.applyUpdate();
@@ -3564,6 +3753,15 @@ export class BrowserShell {
   }
 
   applyUpdate() {
+    // Electron desktop with a real download descriptor: download the
+    // artifact in the main process, verify sha256 + byte length, then hand
+    // the verified installer to the OS. Everything else (web/PWA) keeps the
+    // reload-based flow below.
+    const bridge = this.desktopUpdatesBridge;
+    if (bridge && this.state.updateState.download?.url) {
+      this.applyDesktopUpdate().catch(() => {});
+      return;
+    }
     try {
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
         window.alert('Updating Yayra to latest version in background...');
@@ -3574,6 +3772,81 @@ export class BrowserShell {
     }
     if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
       window.location.reload();
+    }
+  }
+
+  async applyDesktopUpdate() {
+    const bridge = this.desktopUpdatesBridge;
+    const { download, availableVersion } = this.state.updateState;
+    if (!bridge || !download?.url) return;
+    if (this.state.updateState.status === 'downloading') return;
+
+    this.state.updateState = { ...this.state.updateState, status: 'downloading', progressPercent: 0 };
+    this.render();
+    this.showTransientNotice(`Downloading Yayra v${availableVersion || ''}…`);
+
+    let result;
+    try {
+      result = await bridge.download({
+        url: download.url,
+        sha256: download.sha256 || null,
+        bytes: download.bytes || null,
+        version: availableVersion || 'latest',
+        target: this.updateService?.target || this.platform || 'desktop'
+      });
+    } catch (err) {
+      result = { status: 'error', reason: String(err?.message || err) };
+    }
+
+    if (!result || result.status !== 'staged') {
+      const reason = result?.reason || 'download failed';
+      this.state.updateState = { ...this.state.updateState, status: 'error', notes: reason };
+      this.render();
+      this.showTransientNotice(`Update failed: ${reason}. Your current version keeps running.`);
+      return;
+    }
+
+    this.state.updateState = { ...this.state.updateState, status: 'staged', stagedPath: result.path, progressPercent: 100 };
+    this.render();
+    this.showTransientNotice(`Update v${availableVersion || ''} downloaded and verified.`);
+
+    let install;
+    try {
+      install = await bridge.install({ path: result.path });
+    } catch (err) {
+      install = { status: 'error', reason: String(err?.message || err) };
+    }
+    if (install?.status === 'install_started') {
+      this.showTransientNotice(install.method === 'os-installer'
+        ? 'Installer launched - follow the system prompts, then reopen Yayra.'
+        : 'Update file revealed - replace your current install with it.');
+    } else {
+      this.showTransientNotice(`Could not launch the installer: ${install?.reason || 'unknown error'}.`);
+    }
+  }
+
+  /**
+   * Live progress events from electron/desktopUpdater.cjs. Updates the
+   * drawer progress label in place (no full re-render per chunk - that
+   * would tear down input focus dozens of times per second).
+   */
+  handleDesktopUpdateEvent(evt) {
+    if (!evt || typeof document === 'undefined') return;
+    if (evt.type === 'download-progress') {
+      if (typeof evt.percent === 'number') {
+        this.state.updateState.progressPercent = evt.percent;
+      }
+      const label = document.querySelector('.fb-update-progress-label');
+      if (label) {
+        const received = Number(evt.received) || 0;
+        const mb = (received / (1024 * 1024)).toFixed(1);
+        label.textContent = typeof evt.percent === 'number'
+          ? `Downloading update… ${evt.percent}%`
+          : `Downloading update… ${mb} MB`;
+      }
+    } else if (evt.type === 'download-failed') {
+      this.state.updateState = { ...this.state.updateState, status: 'error', notes: evt.reason || 'download failed' };
+      this.render();
     }
   }
 
@@ -3608,18 +3881,40 @@ export class BrowserShell {
         <!-- 1. Top Update Section -->
         <div class="fb-drawer-update-section">
           ${isUpdateReady ? `
-            <button class="fb-drawer-update-btn fb-update-ready-btn" title="Click to restart and apply update">
+            <button class="fb-drawer-update-btn fb-update-ready-btn" title="Download, verify and install this update">
               <span class="fb-update-badge-icon">${Icons.update}</span>
               <div class="fb-update-text-group">
                 <strong>Update Yayra (${this.state.updateState.availableVersion ? `v${this.state.updateState.availableVersion}` : 'Update available'})</strong>
-                <span>Click to restart & update now</span>
+                <span>${this.desktopUpdatesBridge && this.state.updateState.download?.url ? 'Click to download & install now' : 'Click to restart & update now'}</span>
               </div>
             </button>
+          ` : this.state.updateState.status === 'downloading' ? `
+            <div class="fb-drawer-update-status-row">
+              <div class="fb-update-status-left">
+                <span class="fb-status-orb pulse"></span>
+                <span class="fb-update-status-text fb-update-progress-label">Downloading update… ${typeof this.state.updateState.progressPercent === 'number' ? `${this.state.updateState.progressPercent}%` : ''}</span>
+              </div>
+            </div>
+          ` : this.state.updateState.status === 'staged' ? `
+            <div class="fb-drawer-update-status-row">
+              <div class="fb-update-status-left">
+                <span class="fb-status-orb green"></span>
+                <span class="fb-update-status-text">Update v${this.state.updateState.availableVersion || ''} verified - installer launched</span>
+              </div>
+            </div>
+          ` : this.state.updateState.status === 'error' ? `
+            <div class="fb-drawer-update-status-row">
+              <div class="fb-update-status-left">
+                <span class="fb-status-orb" style="background:#ef4444;"></span>
+                <span class="fb-update-status-text">Update problem: ${this.state.updateState.notes || 'check failed'}</span>
+              </div>
+              <button class="fb-btn-action fb-check-updates-btn" title="Retry update check">${Icons.refresh}</button>
+            </div>
           ` : `
             <div class="fb-drawer-update-status-row">
               <div class="fb-update-status-left">
                 <span class="fb-status-orb ${this.state.updateState.status === 'checking' ? 'pulse' : 'green'}"></span>
-                <span class="fb-update-status-text">${this.state.updateState.status === 'checking' ? 'Checking for updates...' : (this.state.updateState.installedVersion ? `Yayra v${this.state.updateState.installedVersion} (Latest)` : 'Yayra is up to date')}</span>
+                <span class="fb-update-status-text">${this.state.updateState.status === 'checking' ? 'Checking for updates...' : (this.state.updateState.installedVersion ? `Yayra v${this.state.updateState.installedVersion}${this.state.updateState.status === 'uptodate' ? ' (Latest)' : ''}` : 'Yayra is up to date')}</span>
               </div>
               <button class="fb-btn-action fb-check-updates-btn" title="Check for updates">${Icons.refresh}</button>
             </div>
@@ -3794,7 +4089,12 @@ export class BrowserShell {
     });
 
     drawer.querySelector('.fb-update-ready-btn')?.addEventListener('click', () => {
-      this.promptUpdateReady();
+      // Direct action: the one-time confirm() prompt may already have been
+      // shown and dismissed - clicking the drawer button must always start
+      // the actual update, not silently no-op behind the prompt guard.
+      this.state.isSideDrawerOpen = false;
+      this.render();
+      this.applyUpdate();
     });
 
     // Submenu click toggling for mobile / touch
@@ -4660,6 +4960,9 @@ export class BrowserShell {
       list.hidden = true;
       activeIndex = -1;
       input.removeAttribute('aria-activedescendant');
+      // Un-obscure the native page surface (Electron) now that the
+      // dropdown no longer needs to paint above it.
+      this.setPageObscured(false);
     };
     const choose = (value) => {
       input.value = value;
@@ -4708,6 +5011,9 @@ export class BrowserShell {
       });
       list.hidden = suggestions.length === 0;
       activeIndex = -1;
+      // The dropdown paints over the page area: on Electron the native
+      // page surface must yield (it always draws above HTML otherwise).
+      this.setPageObscured(!list.hidden);
     };
 
     input.addEventListener('input', render);
@@ -4794,6 +5100,18 @@ export class BrowserShell {
    * ----------------------------------------------------------- */
   ensurePersistentAssistiveBubble() {
     if (typeof document === 'undefined') return;
+
+    // Electron desktop: the ONE floating bubble is the native always-on-top
+    // overlay window (electron/overlayWindow.cjs) that floats over every
+    // app on the desktop and exists even when this window is closed.
+    // Rendering a second, in-page DOM bubble here produced two bubbles on
+    // screen - so on Electron this in-page bubble is suppressed entirely
+    // (and any leftover from an earlier render is removed).
+    if (this.nativeWebview) {
+      document.getElementById('yayra-persistent-assistive-bubble')?.remove();
+      document.getElementById('yayra-floating-bubble-persistent')?.remove();
+      return;
+    }
 
     let bubble = document.getElementById('yayra-persistent-assistive-bubble') || document.getElementById('yayra-floating-bubble-persistent');
     if (!bubble) {
@@ -4906,6 +5224,16 @@ export class BrowserShell {
   }
 
   minimizeToBubble() {
+    // Electron desktop: "minimize to bubble" hides the real OS window; the
+    // native system-wide bubble (always present) is the way back in. The
+    // in-page bubble overlay below only exists for web/PWA builds where a
+    // native overlay window is impossible.
+    const overlay = this.overlayBridge;
+    if (this.nativeWebview && overlay && typeof overlay.minimizeMainWindow === 'function') {
+      overlay.minimizeMainWindow();
+      if (this.options.onMinimizeToBubble) this.options.onMinimizeToBubble();
+      return;
+    }
     this.state.isMinimizedToBubble = true;
     if (this.options.onMinimizeToBubble) {
       this.options.onMinimizeToBubble();
@@ -4932,6 +5260,20 @@ export class BrowserShell {
     const nextMode = this.state.desktopFloatingMode === 'circle-first' ? 'browser-first' : 'circle-first';
     this.state.desktopFloatingMode = nextMode;
     this.state.settings.desktopFloatingMode = nextMode;
+    // Electron desktop: circle-first means "hide this OS window, live in
+    // the native bubble" - never the in-page DOM bubble.
+    const overlay = this.overlayBridge;
+    if (this.nativeWebview && overlay && typeof overlay.minimizeMainWindow === 'function') {
+      if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
+        this.settingsRepo.updateSettings({ desktopFloatingMode: nextMode });
+      }
+      if (this.options.onToggleMode) this.options.onToggleMode(nextMode);
+      if (nextMode === 'circle-first') {
+        overlay.minimizeMainWindow();
+      }
+      this.render();
+      return;
+    }
     // Make the mode switch observable: circle-first docks the full shell into
     // the persistent bubble, while browser-first restores the full browser.
     this.state.isMinimizedToBubble = nextMode === 'circle-first';

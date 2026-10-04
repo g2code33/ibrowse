@@ -396,3 +396,130 @@ test('webview bridge: right-click does nothing (never throws) when no Menu imple
   await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
   assert.doesNotThrow(() => views[0].webContents._simulateContextMenu({ x: 1, y: 1 }));
 });
+
+/* -----------------------------------------------------------------
+ * Multi-window support: the floating "yayra mini" window runs its own
+ * BrowserShell whose generated tab ids ("tab-1", ...) collide with the
+ * main window's. The bridge must namespace views per calling webContents
+ * and attach each view to the WINDOW that asked for it.
+ * ----------------------------------------------------------------- */
+
+function makeWindowFake() {
+  return {
+    destroyed: false,
+    isDestroyed() { return this.destroyed; },
+    webContents: null, // assigned below
+    contentView: {
+      children: [],
+      addChildView(view) { this.children.push(view); },
+      removeChildView(view) { this.children = this.children.filter((v) => v !== view); }
+    }
+  };
+}
+
+function makeSenderFake(id, sink) {
+  return {
+    id,
+    isDestroyed: () => false,
+    send: (channel, payload) => sink.push({ channel, payload })
+  };
+}
+
+function makeMultiWindowHarness() {
+  const handlers = new Map();
+  const ipcMain = { handle: (channel, fn) => handlers.set(channel, fn) };
+  const mainEvents = [];
+  const miniEvents = [];
+  const mainWin = makeWindowFake();
+  const miniWin = makeWindowFake();
+  mainWin.webContents = makeSenderFake(1, mainEvents);
+  miniWin.webContents = makeSenderFake(2, miniEvents);
+  const views = [];
+  const WebContentsView = function FakeWebContentsView() {
+    const view = createFakeWebContentsView();
+    views.push(view);
+    return view;
+  };
+  const bridge = createWebviewBridge({
+    WebContentsView,
+    ipcMain,
+    shell: { openExternal: async () => {} },
+    getMainWindow: () => mainWin,
+    getWindowForWebContents: (wc) => (wc === mainWin.webContents ? mainWin : wc === miniWin.webContents ? miniWin : null),
+    logger: { error: () => {} }
+  });
+  return { bridge, handlers, views, mainWin, miniWin, mainEvents, miniEvents };
+}
+
+test('webview bridge: the SAME tabId from two different windows creates two independent views, each attached to its own window', async () => {
+  const { handlers, views, mainWin, miniWin } = makeMultiWindowHarness();
+  const ensure = handlers.get('yayra:webview-ensure');
+
+  await ensure({ sender: mainWin.webContents }, { tabId: 'tab-1', url: 'https://example.com/a' });
+  await ensure({ sender: miniWin.webContents }, { tabId: 'tab-1', url: 'https://example.com/b' });
+
+  assert.equal(views.length, 2, 'no collision: each window got its own native view');
+  assert.equal(mainWin.contentView.children.length, 1, 'main window owns exactly its own view');
+  assert.equal(miniWin.contentView.children.length, 1, 'mini window owns exactly its own view');
+});
+
+test('webview bridge: navigation events go back to the window that owns the view, not always the main window', async () => {
+  const { handlers, views, miniWin, mainEvents, miniEvents } = makeMultiWindowHarness();
+  await handlers.get('yayra:webview-ensure')({ sender: miniWin.webContents }, { tabId: 'tab-1', url: 'https://example.com/' });
+
+  views[0].webContents.emit('did-navigate', {}, 'https://example.com/next');
+  assert.equal(mainEvents.length, 0, 'main window hears nothing about the mini window tab');
+  assert.equal(miniEvents.length, 1);
+  assert.equal(miniEvents[0].payload.type, 'navigated');
+  assert.equal(miniEvents[0].payload.tabId, 'tab-1', 'renderer-facing tabId is NOT namespaced');
+});
+
+test('webview bridge: destroyForWebContents tears down only that window\'s views', async () => {
+  const { bridge, handlers, mainWin, miniWin } = makeMultiWindowHarness();
+  const ensure = handlers.get('yayra:webview-ensure');
+  await ensure({ sender: mainWin.webContents }, { tabId: 'tab-1', url: 'https://example.com/a' });
+  await ensure({ sender: miniWin.webContents }, { tabId: 'tab-1', url: 'https://example.com/b' });
+
+  bridge.destroyForWebContents(mainWin.webContents);
+  assert.equal(mainWin.contentView.children.length, 0, 'main window views destroyed');
+  assert.equal(miniWin.contentView.children.length, 1, 'mini window views untouched');
+});
+
+/* -----------------------------------------------------------------
+ * Overlay-aware hiding: when the renderer hides the active view so its
+ * own chrome (menu drawer, modals, mini window) can appear above the
+ * page, it asks for a snapshot captured BEFORE the view is zeroed out.
+ * ----------------------------------------------------------------- */
+
+test('webview bridge: set-visible(false, capture) returns a page snapshot and then zeroes the bounds', async () => {
+  const { handlers, views } = makeHarness();
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
+  await handlers.get('yayra:webview-set-bounds')(null, { tabId: 'tab-1', bounds: { x: 0, y: 80, width: 800, height: 600 } });
+
+  const order = [];
+  views[0].webContents.capturePage = async () => {
+    order.push('capture');
+    return { isEmpty: () => false, toDataURL: () => 'data:image/png;base64,SNAP' };
+  };
+  const originalSetBounds = views[0].setBounds.bind(views[0]);
+  views[0].setBounds = (b) => { order.push('bounds'); originalSetBounds(b); };
+
+  const result = await handlers.get('yayra:webview-set-visible')(null, { tabId: 'tab-1', visible: false, capture: true });
+  assert.deepEqual(order, ['capture', 'bounds'], 'snapshot is taken BEFORE the view is hidden');
+  assert.equal(result.snapshot, 'data:image/png;base64,SNAP');
+  assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 0, height: 0 });
+});
+
+test('webview bridge: set-visible(false) without capture, or with a failing capturePage, still hides and never throws', async () => {
+  const { handlers, views } = makeHarness();
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
+
+  const plain = await handlers.get('yayra:webview-set-visible')(null, { tabId: 'tab-1', visible: false });
+  assert.equal(plain, undefined);
+  assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 0, height: 0 });
+
+  views[0].webContents.capturePage = async () => { throw new Error('gpu context lost'); };
+  const failed = await handlers.get('yayra:webview-set-visible')(null, { tabId: 'tab-1', visible: false, capture: true });
+  assert.equal(failed, undefined, 'capture failure degrades to a plain hide');
+  assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 0, height: 0 });
+});

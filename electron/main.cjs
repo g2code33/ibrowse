@@ -17,6 +17,7 @@ const CUSTOM_SCHEME = 'yayra';
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 let mainWindow;
 let overlayBridge = null;
+let webviewBridge = null;
 let lastLoadError = null;
 
 protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
@@ -25,7 +26,23 @@ if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.disableHardwareAcceleration();
 }
 
+// One Yayra per desktop: a second launch (e.g. autostart at login racing a
+// manual launch - the classic cause of TWO floating bubbles) just focuses
+// the existing instance instead of spawning a duplicate app + duplicate
+// bubble.
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (overlayBridge) overlayBridge.restoreMainWindow();
+    else if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+    else createWindow();
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!isPrimaryInstance) return;
   protocol.handle(CUSTOM_SCHEME, async (request) => {
     const url = new URL(request.url);
     const pathname = safeAssetPath(url.pathname);
@@ -36,6 +53,12 @@ app.whenReady().then(async () => {
     if (/\.m?js$/.test(file) && !/javascript/.test(type)) return new Response('refused wrong MIME type', { status: 415 });
     return net.fetch(pathToFileURL(file).toString());
   });
+
+  // ALL IPC surfaces are registered exactly once here (never inside
+  // createWindow()): the main window can now be closed and recreated from
+  // the floating bubble, and re-running ipcMain.handle() for an existing
+  // channel throws.
+  registerIpcBridges();
   createWindow();
 
   // The floating overlay bubble is intentionally started independently of
@@ -54,62 +77,45 @@ app.whenReady().then(async () => {
       screen,
       path,
       preloadPath: path.join(__dirname, 'overlayPreload.cjs'),
+      // Full-API preload for the floating "yayra mini" browser window the
+      // bubble expands into on single click.
+      mainPreloadPath: path.join(__dirname, 'preload.cjs'),
+      Menu,
+      fsImpl: fs,
+      homeDir: app.getPath('home'),
       overlayStore,
-      getMainWindow: () => mainWindow
+      getMainWindow: () => mainWindow,
+      // The bubble outlives the main window; clicking "Open full browser"
+      // after the main window was closed recreates it from scratch.
+      createMainWindow: () => createWindow()
     });
     overlayBridge.initializeOnStartup();
   }
 });
 
+// The floating bubble + mini window keep Yayra alive in the background by
+// design (they are real windows, so 'window-all-closed' only fires once
+// they are gone too - e.g. after "Hide bubble" or "Quit Yayra").
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    show: process.env.YAYRA_SMOKE !== '1' && process.env.IBROWSE_SMOKE !== '1',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  });
+function registerIpcBridges() {
   registerDesktopUpdateHandlers({ getWindow: () => mainWindow });
-
-  // Chrome-equivalent native right-click menu for Yayra's OWN chrome (the
-  // omnibox, side drawer, settings forms, etc.) - this is a different
-  // webContents than the per-tab WebContentsViews below (those get their
-  // own context menu wired in electron/webviewBridge.cjs), so without this
-  // right-clicking the address bar or any text field in Yayra's own UI
-  // would show no menu at all.
-  mainWindow.webContents.on('context-menu', (_event, params) => {
-    const wc = mainWindow.webContents;
-    const template = buildContextMenuTemplate({
-      params,
-      wc,
-      tabId: null,
-      send: () => {},
-      clipboard
-    });
-    if (mainWindow.isDestroyed()) return;
-    Menu.buildFromTemplate(template).popup({ window: mainWindow });
-  });
 
   // Native website-rendering engine bridge (replaces <iframe>-based rendering
   // so real sites with X-Frame-Options/frame-ancestors - Google, GitHub,
   // etc. - actually load). See electron/webviewBridge.cjs for the full
-  // architecture rationale.
-  const webviewBridge = createWebviewBridge({
+  // architecture rationale. Views attach to whichever shell window asked
+  // for them (main window or the floating mini window).
+  webviewBridge = createWebviewBridge({
     WebContentsView,
     ipcMain,
     shell,
     Menu,
     clipboard,
-    getMainWindow: () => mainWindow
+    getMainWindow: () => mainWindow,
+    getWindowForWebContents: (wc) => BrowserWindow.fromWebContents(wc)
   });
-  mainWindow.on('closed', () => webviewBridge.destroyAll());
 
   // "Sign in with Google" for Yayra's own app-level identity. See
   // electron/googleAuth.cjs + electron/authBridge.cjs for the full
@@ -142,7 +148,7 @@ function createWindow() {
   // Real file-download tracking (replaces the old hardcoded fake "Downloads"
   // row entirely - see electron/downloadsBridge.cjs). Tracks downloads that
   // happen in the shared "persist:yayra-webview" session that regular
-  // (non-private) tabs use, plus Yayra's own window, and lets the user pick
+  // (non-private) tabs use, plus Yayra's own windows, and lets the user pick
   // where new downloads are saved.
   const downloadsStore = createDownloadsStore({
     fs,
@@ -155,7 +161,7 @@ function createWindow() {
     dialog,
     path,
     fs,
-    sessions: [session.fromPartition('persist:yayra-webview'), mainWindow.webContents.session],
+    sessions: [session.fromPartition('persist:yayra-webview'), session.defaultSession],
     downloadsStore,
     getMainWindow: () => mainWindow
   });
@@ -172,17 +178,66 @@ function createWindow() {
     flags: process.argv.filter((arg) => arg.startsWith('--')),
     lastLoadError
   }));
-  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+}
+
+function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    show: process.env.YAYRA_SMOKE !== '1' && process.env.IBROWSE_SMOKE !== '1',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  // Chrome-equivalent native right-click menu for Yayra's OWN chrome (the
+  // omnibox, side drawer, settings forms, etc.) - this is a different
+  // webContents than the per-tab WebContentsViews (those get their
+  // own context menu wired in electron/webviewBridge.cjs), so without this
+  // right-clicking the address bar or any text field in Yayra's own UI
+  // would show no menu at all.
+  const win = mainWindow;
+  win.webContents.on('context-menu', (_event, params) => {
+    if (win.isDestroyed()) return;
+    const template = buildContextMenuTemplate({
+      params,
+      wc: win.webContents,
+      tabId: null,
+      send: () => {},
+      clipboard
+    });
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
+
+  // Closing the main window only tears down ITS tab views; the floating
+  // bubble/mini window (and their views) stay alive independently. The
+  // webContents reference is captured now because the BrowserWindow proxy
+  // refuses property access after destruction.
+  const winContents = win.webContents;
+  win.on('closed', () => {
+    if (webviewBridge) webviewBridge.destroyForWebContents(winContents);
+    if (mainWindow === win) mainWindow = null;
+  });
+
+  winContents.on('did-fail-load', (_event, code, description, url) => {
     lastLoadError = { code, description, url };
     console.error(`[yayra] renderer load failed; retrying file fallback code=${code} url=${url}`);
-    if (!mainWindow.webContents.isDestroyed()) mainWindow.loadFile(path.join(DIST_DIR, 'index.html'));
+    if (!winContents.isDestroyed()) win.loadFile(path.join(DIST_DIR, 'index.html'));
   });
   const isBadLoad = process.env.YAYRA_FORCE_BAD_LOAD === '1' || process.env.IBROWSE_FORCE_BAD_LOAD === '1';
   const loadTarget = isBadLoad ? `${CUSTOM_SCHEME}://app/does-not-exist.html` : `${CUSTOM_SCHEME}://app/index.html`;
-  mainWindow.loadURL(loadTarget);
+  win.loadURL(loadTarget);
   if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
-    mainWindow.webContents.once('did-finish-load', async () => {
-      const result = await mainWindow.webContents.executeJavaScript('({ title: document.title, hasRoot: Boolean(document.getElementById("app")), headerControl: Boolean(document.getElementById("update-button") || document.getElementById("top-header")) })');
+    winContents.once('did-finish-load', async () => {
+      const result = await winContents.executeJavaScript('({ title: document.title, hasRoot: Boolean(document.getElementById("app")), headerControl: Boolean(document.getElementById("update-button") || document.getElementById("top-header")) })');
       console.log(`[yayra-smoke] ${JSON.stringify(result)}`);
       app.quit();
     });
@@ -191,6 +246,7 @@ function createWindow() {
       app.exit(1);
     }, 15000).unref();
   }
+  return mainWindow;
 }
 
 function safeAssetPath(rawPath) {

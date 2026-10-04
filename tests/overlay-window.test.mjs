@@ -206,3 +206,144 @@ test('overlayWindow: disabled-by-default means ensureOverlayWindow() is a no-op 
   bridge.initializeOnStartup();
   assert.equal(instances.length, 0);
 });
+
+/* -----------------------------------------------------------------
+ * The bubble as an INDEPENDENT entry point: single click toggles the
+ * floating "yayra mini" browser window; "open full browser" recreates
+ * the main window after it was closed; Linux gets a real XDG autostart
+ * entry so the bubble starts at boot.
+ * ----------------------------------------------------------------- */
+
+function makeRicherBrowserWindowClass() {
+  const instances = [];
+  class FakeBrowserWindow {
+    constructor(opts) {
+      this.opts = opts;
+      this.destroyed = false;
+      this.visible = true;
+      this.alwaysOnTop = null;
+      this.visibleOnAllWorkspaces = null;
+      this.loadedUrl = null;
+      this._listeners = {};
+      this._position = [opts.x, opts.y];
+      instances.push(this);
+    }
+    setAlwaysOnTop(flag, level) { this.alwaysOnTop = { flag, level }; }
+    setVisibleOnAllWorkspaces(flag, opts) { this.visibleOnAllWorkspaces = { flag, opts }; }
+    setContentProtection() {}
+    loadURL(url) { this.loadedUrl = url; }
+    on(event, cb) { this._listeners[event] = cb; }
+    getPosition() { return this._position; }
+    close() { this.destroyed = true; this._listeners.closed?.(); }
+    isDestroyed() { return this.destroyed; }
+    isVisible() { return this.visible; }
+    hide() { this.visible = false; }
+    show() { this.visible = true; }
+    focus() {}
+    isMinimized() { return false; }
+    restore() {}
+  }
+  return { FakeBrowserWindow, instances };
+}
+
+function makeMiniHarness({ getMainWindow = () => null, createMainWindow = null } = {}) {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeRicherBrowserWindowClass();
+  const ipcMain = fakeIpcMain();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain,
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    mainPreloadPath: '/fake/preload.cjs',
+    miniUrl: 'yayra://app/index.html?shell=mini',
+    overlayStore,
+    getMainWindow,
+    createMainWindow
+  });
+  return { bridge, ipcMain, instances };
+}
+
+test('overlayWindow: single bubble click opens the floating mini browser window - no main window involved at all', () => {
+  const { bridge, ipcMain, instances } = makeMiniHarness();
+  bridge.initializeOnStartup();
+  assert.equal(instances.length, 1, 'just the bubble so far');
+
+  ipcMain.onHandlers.get('yayra:overlay-bubble-click')();
+  assert.equal(instances.length, 2, 'bubble + mini window');
+  const mini = bridge.getMiniWindow();
+  assert.ok(mini, 'mini window is tracked');
+  assert.match(mini.loadedUrl, /shell=mini/, 'loads the compact mini shell');
+  assert.equal(mini.opts.frame, false, 'frameless floating panel');
+  assert.equal(mini.opts.webPreferences.preload, '/fake/preload.cjs', 'full window.yayra API preload (native tabs work inside the mini)');
+  assert.equal(mini.alwaysOnTop.level, 'screen-saver', 'floats above other apps like the bubble');
+});
+
+test('overlayWindow: clicking the bubble again hides the mini panel; clicking once more brings the SAME window back', () => {
+  const { bridge, ipcMain, instances } = makeMiniHarness();
+  bridge.initializeOnStartup();
+  const click = ipcMain.onHandlers.get('yayra:overlay-bubble-click');
+
+  click();
+  const mini = bridge.getMiniWindow();
+  assert.equal(mini.visible, true);
+  click();
+  assert.equal(mini.visible, false, 'second click hides (does not destroy) the mini');
+  click();
+  assert.equal(mini.visible, true, 'third click shows it again');
+  assert.equal(instances.length, 2, 'never a second mini window instance');
+});
+
+test('overlayWindow: "open full browser" recreates the main window when it was closed - the bubble does not depend on it', () => {
+  let created = 0;
+  const { bridge } = makeMiniHarness({
+    getMainWindow: () => null, // main window closed / never opened
+    createMainWindow: () => { created += 1; return { fake: true }; }
+  });
+  bridge.restoreMainWindow();
+  assert.equal(created, 1, 'a brand new main window is created on demand');
+});
+
+test('overlayWindow: disabling the bubble also closes its mini panel (the panel is anchored to the bubble)', () => {
+  const { bridge, ipcMain } = makeMiniHarness();
+  bridge.initializeOnStartup();
+  ipcMain.onHandlers.get('yayra:overlay-bubble-click')();
+  assert.ok(bridge.getMiniWindow());
+
+  bridge.setEnabled(false);
+  assert.equal(bridge.getOverlayWindow(), null);
+  assert.equal(bridge.getMiniWindow(), null);
+});
+
+test('overlayWindow: on Linux, enabling launch-at-startup writes an XDG autostart .desktop entry (and disabling removes it)', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow } = makeRicherBrowserWindowClass();
+  const fakeHome = makeTempDir();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null,
+    fsImpl: fs,
+    homeDir: fakeHome,
+    platform: 'linux'
+  });
+
+  bridge.applyLoginItemSettings(true);
+  const autostartFile = path.join(fakeHome, '.config', 'autostart', 'yayra.desktop');
+  assert.ok(fs.existsSync(autostartFile), 'autostart .desktop entry written');
+  const contents = fs.readFileSync(autostartFile, 'utf8');
+  assert.match(contents, /\[Desktop Entry\]/);
+  assert.match(contents, /Exec=/);
+
+  bridge.applyLoginItemSettings(false);
+  assert.equal(fs.existsSync(autostartFile), false, 'disabling startup removes the entry');
+});
