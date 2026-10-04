@@ -206,7 +206,16 @@ function createOverlayBridge({
     if (!file) return;
     try {
       if (enabled) {
-        const execPath = process.env.APPIMAGE || process.execPath;
+        // Prefer the /usr/bin/yayra wrapper over the raw binary: the
+        // wrapper picks the x11 backend on Wayland sessions BEFORE
+        // Electron starts. Autostarting /opt/yayra/yayra directly would
+        // boot the bubble on native Wayland - undraggable, not on top.
+        let execPath = process.env.APPIMAGE || process.execPath;
+        try {
+          if (!process.env.APPIMAGE && process.execPath === '/opt/yayra/yayra' && fsImpl.existsSync('/usr/bin/yayra')) {
+            execPath = '/usr/bin/yayra';
+          }
+        } catch { /* keep the raw path */ }
         // --yayra-autostart tells main.cjs this is a boot launch: start the
         // bubble + tray only, WITHOUT popping the main browser window over
         // whatever the user is doing right after login.

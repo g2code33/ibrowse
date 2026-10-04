@@ -68,13 +68,18 @@ if (process.platform === 'linux') {
   // a relaunch loop.
   const argvHasOzonePlatform = process.argv.some((arg) => typeof arg === 'string' && arg.startsWith('--ozone-platform='))
     || app.commandLine.hasSwitch('ozone-platform');
-  // Belt-and-suspenders loop breaker: if we relaunched within the last
-  // 30s and STILL cannot see the switch, something strips argv on this
+  // Belt-and-suspenders loop breaker: 3+ relaunches inside 30s while
+  // STILL not seeing the switch means something strips argv on this
   // setup - stay on the native backend rather than relaunch forever.
+  // (Count-based so legitimate quick successions - autostart + updater
+  // relaunch + manual launch - are never mistaken for a loop.)
   const relaunchStampPath = path.join(app.getPath('userData'), 'x11-relaunch-stamp');
-  let recentlyRelaunched = false;
-  try { recentlyRelaunched = (Date.now() - fs.statSync(relaunchStampPath).mtimeMs) < 30000; } catch { /* no stamp */ }
-  if (!argvHasOzonePlatform && !recentlyRelaunched && waylandDisplay !== '' && display !== '') {
+  let relaunchBurst = 0;
+  try {
+    const stamp = JSON.parse(fs.readFileSync(relaunchStampPath, 'utf8'));
+    if (Date.now() - stamp.t < 30000) relaunchBurst = stamp.n || 0;
+  } catch { /* no stamp yet (or the old plain-timestamp format) */ }
+  if (!argvHasOzonePlatform && relaunchBurst < 3 && waylandDisplay !== '' && display !== '') {
     relaunchingForX11 = true;
     const relaunchOpts = { args: process.argv.slice(1).concat(['--ozone-platform=x11']) };
     // AppImage: relaunch the AppImage itself, not the binary inside the
@@ -85,7 +90,7 @@ if (process.platform === 'linux') {
     console.log('[yayra] Wayland session with XWayland detected - relaunching once with --ozone-platform=x11 so the bubble can move and stay above every app');
     try {
       fs.mkdirSync(app.getPath('userData'), { recursive: true });
-      fs.writeFileSync(relaunchStampPath, String(Date.now()));
+      fs.writeFileSync(relaunchStampPath, JSON.stringify({ t: Date.now(), n: relaunchBurst + 1 }));
     } catch { /* loop breaker unavailable - argv check still guards */ }
     // IMPORTANT: app.exit() BEFORE 'ready' can tear the process down
     // without ever spawning the relauncher (observed in the field: the
@@ -229,6 +234,20 @@ app.whenReady().then(async () => {
   // doomed process - the relaunch handler registered above takes over.
   if (relaunchingForX11) return;
   if (!isPrimaryInstance) return;
+
+  // One glance at the terminal must answer "which backend is this
+  // instance on?" - it decides whether the bubble can move and overlay.
+  if (process.platform === 'linux') {
+    const forcedX11 = app.commandLine.hasSwitch('ozone-platform')
+      || process.argv.some((arg) => typeof arg === 'string' && arg.startsWith('--ozone-platform='));
+    if (forcedX11) {
+      console.log('[yayra] windowing backend: x11 (forced) - bubble drag + overlay-above-all-apps fully supported');
+    } else if ((process.env.WAYLAND_DISPLAY || '').trim() !== '') {
+      console.warn('[yayra] windowing backend: native wayland - the compositor will BLOCK bubble dragging and always-on-top. Launch via /usr/bin/yayra or with --ozone-platform=x11.');
+    } else {
+      console.log('[yayra] windowing backend: x11 (native session)');
+    }
+  }
 
   // Remove the File/Edit/View/Window menu block entirely (Windows/Linux -
   // it rendered as a second header row under the title bar). Keyboard
