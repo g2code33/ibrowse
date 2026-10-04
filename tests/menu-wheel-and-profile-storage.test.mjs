@@ -103,6 +103,37 @@ test('history repo: records visits newest-first, collapses reloads, skips newtab
   assert.deepEqual(await repo.getEntries(), []);
 });
 
+test('frequent sites: EMPTY on a fresh install / new profile, then built from real visits, never more than 5', async () => {
+  const backing = fakeLocalStorage();
+  let profile = 'default';
+  const storage = createProfileScopedStorage({ backing, getProfileId: () => profile });
+  const repo = createHistoryRepo(storage);
+
+  // Fresh install: nothing invented.
+  assert.deepEqual(await repo.getTopSites(), [], 'no fabricated DuckDuckGo/Wikipedia/GitHub tiles');
+
+  // Real browsing: visit counts drive the order.
+  for (const url of ['https://a.com', 'https://a.com', 'https://a.com', 'https://b.com', 'https://b.com', 'https://c.com']) {
+    await repo.addEntry(url, url);
+  }
+  // Internal pages never become "frequent sites".
+  await repo.addEntry('yayra://settings', 'Settings');
+  let top = await repo.getTopSites();
+  assert.deepEqual(top.map((i) => i.url), ['https://a.com', 'https://b.com', 'https://c.com'], 'ordered by real visit count');
+  assert.equal(top[0].visitCount, 3, 'repeat visits aggregate instead of duplicating rows');
+
+  // Cap: with 7 distinct sites only the top 5 show.
+  for (const url of ['https://d.com', 'https://e.com', 'https://f.com', 'https://g.com']) {
+    await repo.addEntry(url, url);
+  }
+  top = await repo.getTopSites(50);
+  assert.equal(top.length, 5, 'hard cap at 5 even when more is requested');
+
+  // A brand-new profile starts empty - frequency never leaks across profiles.
+  profile = 'work';
+  assert.deepEqual(await repo.getTopSites(), [], 'new profile has no frequent sites yet');
+});
+
 test('bookmarks repo: dedupes by url, answers isBookmarked, removes by url or id', async () => {
   const storage = createProfileScopedStorage({ backing: fakeLocalStorage(), getProfileId: () => 'default' });
   const repo = createBookmarksRepo(storage);

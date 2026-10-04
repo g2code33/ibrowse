@@ -73,13 +73,24 @@ export function createHistoryRepo(storage) {
     async addEntry(url, title = '', favicon = null) {
       if (!url || String(url).startsWith('yayra://newtab')) return;
       const items = (await storage.get(HISTORY_KEY)) || [];
-      // Collapse an immediate repeat (reload) instead of stacking dupes.
-      if (items[0]?.url === url) {
-        items[0] = { ...items[0], title: title || items[0].title, lastVisitedAt: Date.now() };
+      // One row per URL: repeat visits move it to the front and bump its
+      // visitCount - this is what powers the new tab page's REAL
+      // "Frequently Used Sites" (empty on a fresh install/profile, then
+      // built from actual browsing).
+      const idx = items.findIndex((i) => i.url === url);
+      if (idx >= 0) {
+        const existing = items.splice(idx, 1)[0];
+        items.unshift({
+          ...existing,
+          title: title || existing.title,
+          favicon: favicon || existing.favicon || null,
+          visitCount: (Number(existing.visitCount) || 1) + 1,
+          lastVisitedAt: Date.now()
+        });
       } else {
         items.unshift({
           id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          url, title: title || url, favicon: favicon || null, lastVisitedAt: Date.now()
+          url, title: title || url, favicon: favicon || null, visitCount: 1, lastVisitedAt: Date.now()
         });
       }
       await storage.set(HISTORY_KEY, items.slice(0, HISTORY_CAP));
@@ -87,6 +98,19 @@ export function createHistoryRepo(storage) {
     async getEntries(limit = 100) {
       const items = (await storage.get(HISTORY_KEY)) || [];
       return items.slice(0, limit);
+    },
+    /**
+     * The REAL most-visited web pages, by visit count then recency.
+     * Fresh install / new profile = empty array (no invented sites);
+     * never more than `limit` (default 5).
+     */
+    async getTopSites(limit = 5) {
+      const items = (await storage.get(HISTORY_KEY)) || [];
+      return items
+        .filter((i) => /^https?:\/\//i.test(String(i.url || '')))
+        .sort((a, b) => ((Number(b.visitCount) || 1) - (Number(a.visitCount) || 1))
+          || ((b.lastVisitedAt || 0) - (a.lastVisitedAt || 0)))
+        .slice(0, Math.max(1, Math.min(5, limit)));
     },
     async removeEntry(id) {
       const items = (await storage.get(HISTORY_KEY)) || [];
@@ -97,7 +121,7 @@ export function createHistoryRepo(storage) {
     }
   };
   // Duck-typed aliases BrowserShell probes for (older repo contracts).
-  repo.recordVisit = (url, title) => repo.addEntry(url, title);
+  repo.recordVisit = (url, title, favicon) => repo.addEntry(url, title, favicon);
   repo.deleteEntry = (id) => repo.removeEntry(id);
   repo.clearHistory = () => repo.clear();
   return repo;

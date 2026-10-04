@@ -168,7 +168,7 @@ test('In-Tab Internal Pages: Loads yayra://about with version info, update check
   assert.ok(container.querySelector('.fb-about-check-updates-btn'), 'Check for updates button must be present');
 });
 
-test('In-Tab Internal Pages: Redesigned yayra://newtab with search box, shortcuts, and focus management', async () => {
+test('In-Tab Internal Pages: Redesigned yayra://newtab with search box and focus management; frequent sites start EMPTY', async () => {
   const container = document.createElement('div');
   const shell = new BrowserShell({
     container,
@@ -184,7 +184,42 @@ test('In-Tab Internal Pages: Redesigned yayra://newtab with search box, shortcut
 
   assert.ok(container.querySelector('.fb-newtab-hero'), 'New tab hero header must render');
   assert.ok(container.querySelector('.fb-newtab-search-input'), 'New tab main search box must render');
-  assert.ok(container.querySelectorAll('.fb-newtab-shortcut').length > 0, 'Shortcuts must render');
+  // Fresh install / brand-new profile: NO invented "frequently used"
+  // tiles (they used to be a hardcoded DuckDuckGo/Wikipedia/GitHub list).
+  assert.equal(container.querySelectorAll('.fb-newtab-shortcut').length, 0, 'no fabricated frequent sites on a fresh profile');
+});
+
+test('In-Tab Internal Pages: frequent sites are built from REAL visits, most-visited first, capped at 5', async () => {
+  const container = document.createElement('div');
+  const now = Date.now();
+  const entries = [
+    { id: 'h1', url: 'https://a.com', title: 'A', visitCount: 9, lastVisitedAt: now },
+    { id: 'h2', url: 'https://b.com', title: 'B', visitCount: 7, lastVisitedAt: now },
+    { id: 'h3', url: 'https://c.com', title: 'C', visitCount: 5, lastVisitedAt: now },
+    { id: 'h4', url: 'https://d.com', title: 'D', visitCount: 4, lastVisitedAt: now },
+    { id: 'h5', url: 'https://e.com', title: 'E', visitCount: 3, lastVisitedAt: now },
+    { id: 'h6', url: 'https://f.com', title: 'F', visitCount: 2, lastVisitedAt: now },
+    { id: 'h7', url: 'yayra://settings', title: 'Settings', visitCount: 99, lastVisitedAt: now }
+  ];
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    initialUrl: 'yayra://newtab',
+    historyRepo: {
+      getEntries: async () => entries,
+      addEntry: async () => {}
+    }
+  });
+
+  await shell.initialize();
+  shell.render(container);
+
+  const frequent = shell.getFrequentSites();
+  assert.equal(frequent.length, 5, 'never more than 5 frequent sites');
+  assert.deepEqual(frequent.map((s) => s.url),
+    ['https://a.com', 'https://b.com', 'https://c.com', 'https://d.com', 'https://e.com'],
+    'ordered by real visit count; internal yayra:// pages excluded');
+  assert.ok(container.querySelectorAll('.fb-newtab-shortcut').length > 0, 'tiles render once there is real browsing');
 });
 
 test('Persistent Assistive Bubble: Present in DOM, reflects loading pulse, and preserves session on restore', async () => {

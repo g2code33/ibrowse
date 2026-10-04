@@ -2363,8 +2363,10 @@ export class BrowserShell {
           navigationState.currentIndex = navigationState.historyStack.length - 1;
         }
         if (!tab.isPrivate && this.historyRepo && tab.url !== 'yayra://newtab') {
-          if (typeof this.historyRepo.recordVisit === 'function') this.historyRepo.recordVisit(tab.url, tab.title);
-          else if (typeof this.historyRepo.addEntry === 'function') this.historyRepo.addEntry(tab.url, tab.title, tab.favicon);
+          const recorded = typeof this.historyRepo.recordVisit === 'function'
+            ? this.historyRepo.recordVisit(tab.url, tab.title, tab.favicon)
+            : (typeof this.historyRepo.addEntry === 'function' ? this.historyRepo.addEntry(tab.url, tab.title, tab.favicon) : null);
+          Promise.resolve(recorded).then(() => this.refreshHistoryState()).catch(() => {});
         }
         if (tabId === this.state.activeTabId) {
           this.state.urlInputValue = this.getDisplayUrl(tab.url);
@@ -2998,40 +3000,39 @@ export class BrowserShell {
     }
 
     if (!activeTab.isPrivate) {
-      // Requirement 6: Frequently Used Sites with Authentic SVG Logos
-      const frequentSection = document.createElement('div');
-      frequentSection.style.width = '100%';
-      frequentSection.style.maxWidth = '680px';
-      frequentSection.innerHTML = `
-        <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">${this.state.isMobile ? 'Favorites' : 'Frequently Used Sites'}</h3>
-      `;
-
-      const frequentGrid = document.createElement('div');
-      frequentGrid.className = 'fb-frequent-grid';
-
-      const frequentSites = [
-        { title: 'DuckDuckGo', url: 'https://duckduckgo.com', icon: Icons.duckduckgo },
-        { title: 'Wikipedia', url: 'https://wikipedia.org', icon: Icons.wikipedia },
-        { title: 'GitHub', url: 'https://github.com', icon: Icons.github },
-        { title: 'Yayra Docs', url: 'https://github.com/g2code33/yayra', icon: Icons.logoOrb },
-        { title: 'Google', url: 'https://google.com', icon: Icons.google }
-      ];
-
-      frequentSites.forEach((site) => {
-        const card = document.createElement('button');
-        card.className = 'fb-frequent-card fb-newtab-shortcut';
-        card.innerHTML = `
-          <div class="fb-frequent-icon-wrap">${site.icon}</div>
-          <span class="fb-frequent-title">${site.title}</span>
+      // REAL "Frequently Used Sites": built from this profile's actual
+      // browsing (visit counts in the history repo), capped at 5. A
+      // fresh install or a brand-new profile has none - the section is
+      // simply absent until the user has browsed somewhere.
+      const frequentSites = this.getFrequentSites();
+      if (frequentSites.length > 0) {
+        const frequentSection = document.createElement('div');
+        frequentSection.style.width = '100%';
+        frequentSection.style.maxWidth = '680px';
+        frequentSection.innerHTML = `
+          <h3 style="font-size:0.85rem; font-weight:700; color:var(--fb-text-muted); text-transform:uppercase; letter-spacing:0.05em; margin:20px 0 8px 8px;">${this.state.isMobile ? 'Favorites' : 'Frequently Used Sites'}</h3>
         `;
-        card.addEventListener('click', () => {
-          this.navigateActiveTab(site.url);
-        });
-        frequentGrid.appendChild(card);
-      });
 
-      frequentSection.appendChild(frequentGrid);
-      newTabPage.appendChild(frequentSection);
+        const frequentGrid = document.createElement('div');
+        frequentGrid.className = 'fb-frequent-grid';
+
+        frequentSites.forEach((site) => {
+          const card = document.createElement('button');
+          card.className = 'fb-frequent-card fb-newtab-shortcut';
+          card.title = site.url;
+          card.innerHTML = `
+            <div class="fb-frequent-icon-wrap">${this.frequentSiteIconHtml(site)}</div>
+            <span class="fb-frequent-title">${String(site.title || site.url).replace(/</g, '&lt;')}</span>
+          `;
+          card.addEventListener('click', () => {
+            this.navigateActiveTab(site.url);
+          });
+          frequentGrid.appendChild(card);
+        });
+
+        frequentSection.appendChild(frequentGrid);
+        newTabPage.appendChild(frequentSection);
+      }
 
       // Recent History Quick List
       if (this.state.historyItems.length > 0) {
@@ -5384,6 +5385,46 @@ export class BrowserShell {
     this.showTransientNotice(saved > 0
       ? `Bookmarked ${saved} open tab${saved === 1 ? '' : 's'}.`
       : 'No web pages open to bookmark.');
+  }
+
+  /**
+   * The REAL top-5 most visited sites for the current profile, computed
+   * from actual history (visit counts). Empty on a fresh install or a
+   * brand-new profile - nothing is invented.
+   */
+  getFrequentSites() {
+    const items = this.state.historyItems || [];
+    return items
+      .filter((i) => /^https?:\/\//i.test(String(i && i.url || '')))
+      .slice()
+      .sort((a, b) => ((Number(b.visitCount) || 1) - (Number(a.visitCount) || 1))
+        || ((b.lastVisitedAt || 0) - (a.lastVisitedAt || 0)))
+      .slice(0, 5);
+  }
+
+  /** Real favicon for a frequent-site tile, letter badge as fallback. */
+  frequentSiteIconHtml(site) {
+    let host = '';
+    try { host = new URL(site.url).hostname; } catch { host = ''; }
+    const letter = String(site.title || host || '?').trim().charAt(0).toUpperCase() || '?';
+    const badge = `<span class="fb-frequent-letter" style="display:none;font:700 18px/1 system-ui;">${letter}</span>`;
+    if (!host) return badge.replace('display:none;', '');
+    return `<img src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" style="width:24px;height:24px;border-radius:6px;" `
+      + `onerror="this.style.display='none'; if (this.nextElementSibling) this.nextElementSibling.style.display='';" />${badge}`;
+  }
+
+  /**
+   * Re-pull history into state after a visit was recorded, so the new
+   * tab page's frequent sites / recent history stay current without
+   * forcing a re-render mid-navigation.
+   */
+  refreshHistoryState() {
+    if (!this.historyRepo || typeof this.historyRepo.getEntries !== 'function') return;
+    try {
+      this.historyRepo.getEntries(100).then((items) => {
+        this.state.historyItems = items || [];
+      }).catch(() => {});
+    } catch { /* repo unavailable */ }
   }
 
   /** The real bookmarks bar strip rendered under the toolbar. */
@@ -8630,11 +8671,10 @@ export class BrowserShell {
 
     // Record history if not in private mode and not internal newtab
     if (!activeTab.isPrivate && this.historyRepo && targetUrl !== 'yayra://newtab') {
-      if (typeof this.historyRepo.recordVisit === 'function') {
-        this.historyRepo.recordVisit(targetUrl, activeTab.title);
-      } else if (typeof this.historyRepo.addEntry === 'function') {
-        this.historyRepo.addEntry(targetUrl, activeTab.title, activeTab.favicon);
-      }
+      const recorded = typeof this.historyRepo.recordVisit === 'function'
+        ? this.historyRepo.recordVisit(targetUrl, activeTab.title, activeTab.favicon)
+        : (typeof this.historyRepo.addEntry === 'function' ? this.historyRepo.addEntry(targetUrl, activeTab.title, activeTab.favicon) : null);
+      Promise.resolve(recorded).then(() => this.refreshHistoryState()).catch(() => {});
     }
 
     if (this.navigationController && typeof this.navigationController.navigate === 'function') {
