@@ -50,6 +50,14 @@ if (!isPrimaryInstance) {
 
 app.whenReady().then(async () => {
   if (!isPrimaryInstance) return;
+
+  // Remove the File/Edit/View/Window menu block entirely (Windows/Linux -
+  // it rendered as a second header row under the title bar). Keyboard
+  // shortcuts are unaffected: Yayra binds its own in the renderer
+  // (BrowserShell.handleGlobalKeyDown). On macOS the application menu
+  // lives in the system menu bar, not in the window, and removing it
+  // would break Cmd+C/V/Q - so it is kept there.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   protocol.handle(CUSTOM_SCHEME, async (request) => {
     const url = new URL(request.url);
     const pathname = safeAssetPath(url.pathname);
@@ -161,6 +169,28 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 function registerIpcBridges() {
   registerDesktopUpdateHandlers({ getWindow: () => mainWindow });
 
+  // Window controls for the frameless main window (the OS title bar and
+  // menu block are gone - see createWindow()). Resolved per-sender so the
+  // same channels work for any shell window that renders the controls.
+  const senderWindow = (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return win && !win.isDestroyed() ? win : null;
+  };
+  ipcMain.handle('yayra:window-minimize', (event) => {
+    senderWindow(event)?.minimize();
+  });
+  ipcMain.handle('yayra:window-maximize-toggle', (event) => {
+    const win = senderWindow(event);
+    if (!win) return false;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return win.isMaximized();
+  });
+  ipcMain.handle('yayra:window-is-maximized', (event) => Boolean(senderWindow(event)?.isMaximized()));
+  ipcMain.handle('yayra:window-close', (event) => {
+    senderWindow(event)?.close();
+  });
+
   // Native website-rendering engine bridge (replaces <iframe>-based rendering
   // so real sites with X-Frame-Options/frame-ancestors - Google, GitHub,
   // etc. - actually load). See electron/webviewBridge.cjs for the full
@@ -251,6 +281,13 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    // No OS title bar ("yayra" text) and no File/Edit/View/Window menu
+    // block: Yayra draws its OWN top chrome - the tab strip doubles as the
+    // draggable title bar, shows the brand wordmark image, and renders
+    // real minimize/maximize/close buttons via the windowControls IPC
+    // bridge (see registerIpcBridges + BrowserShell.renderDesktopLayout).
+    // On macOS the native traffic lights are kept, inset over our chrome.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : { frame: false }),
     // Dark surface behind EVERYTHING. Electron's default window background
     // is white, and every time the native page view hides/moves (menu
     // drawer, dropdowns, modals, tab switches) the compositor exposes the

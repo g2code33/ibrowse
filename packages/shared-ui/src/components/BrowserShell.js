@@ -404,6 +404,18 @@ export class BrowserShell {
     return (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
   }
 
+  // window.yayra.windowControls (electron/preload.cjs): real minimize/
+  // maximize/close for the frameless Electron main window. The OS title
+  // bar (which just said "yayra") and the File/Edit/View/Window menu block
+  // are removed - Yayra's own tab strip is the title bar, so it shows the
+  // brand wordmark image and these controls instead. Absent on web/PWA,
+  // where the browser provides the window chrome.
+  get windowControls() {
+    if (typeof window === 'undefined') return null;
+    const bridge = (window.yayra && window.yayra.windowControls) || (window.ibrowse && window.ibrowse.windowControls) || null;
+    return bridge && typeof bridge.close === 'function' ? bridge : null;
+  }
+
   // window.yayra.updates (exposed by electron/preload.cjs, backed by
   // electron/desktopUpdater.cjs): main-process download+verify+install for
   // desktop updates. Only treated as present when the REAL pipeline
@@ -994,6 +1006,14 @@ export class BrowserShell {
     tabStrip.setAttribute('role', 'tablist');
     tabStrip.setAttribute('aria-label', 'Open tabs');
 
+    // Brand wordmark at the very top of the app - replaces the removed OS
+    // title bar text ("yayra") with the official wordmark image.
+    const tabstripBrand = document.createElement('span');
+    tabstripBrand.className = 'fb-tabstrip-brand';
+    tabstripBrand.innerHTML = Icons.officialWordmark;
+    tabstripBrand.setAttribute('aria-hidden', 'true');
+    tabStrip.appendChild(tabstripBrand);
+
     const tabsScroll = document.createElement('div');
     tabsScroll.className = 'fb-tabs-scroll-container';
 
@@ -1080,16 +1100,36 @@ export class BrowserShell {
 
     tabStrip.appendChild(tabsScroll);
 
-    // NOTE: a duplicate "window controls" cluster (minimize-to-bubble circle,
-    // minimize, maximize, close) used to be rendered here at the far right of
-    // the tab strip. It has been removed: the real OS title bar already
-    // provides real minimize/maximize/close for this window (Electron's
-    // BrowserWindow uses the native frame), so this second row of buttons was
-    // a redundant duplicate - and a misleading one, since its "Close" button
-    // didn't actually close anything, it just hid the window into the
-    // floating bubble. The floating bubble itself is no longer something you
-    // have to manually open from here either; see renderFloatingBubbleOverlay
-    // / the system tray + always-on-top overlay window wired from main.cjs.
+    // REAL window controls for the frameless Electron window. The OS title
+    // bar and menu block are removed (electron/main.cjs), so the tab strip
+    // IS the title bar now: it is draggable (CSS -webkit-app-region) and
+    // these buttons genuinely minimize/maximize/close the window via IPC -
+    // unlike the old decorative cluster that was removed when the native
+    // frame was still present. Web/PWA builds never render them (the
+    // browser provides the window chrome there).
+    const winControls = this.windowControls;
+    if (winControls) {
+      const controls = document.createElement('div');
+      controls.className = 'fb-window-controls';
+      const buttons = [
+        { cls: 'fb-wc-minimize', title: 'Minimize', icon: '<svg viewBox="0 0 12 12" width="12" height="12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>', action: () => winControls.minimize() },
+        { cls: 'fb-wc-maximize', title: 'Maximize / Restore', icon: '<svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg>', action: () => winControls.toggleMaximize() },
+        { cls: 'fb-wc-close', title: 'Close window', icon: '<svg viewBox="0 0 12 12" width="12" height="12" stroke="currentColor" stroke-width="1.2"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="2.5" x2="2.5" y2="9.5"/></svg>', action: () => winControls.close() }
+      ];
+      for (const { cls, title, icon, action } of buttons) {
+        const btn = document.createElement('button');
+        btn.className = `fb-wc-btn ${cls}`;
+        btn.setAttribute('title', title);
+        btn.setAttribute('aria-label', title);
+        btn.innerHTML = icon;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          action();
+        });
+        controls.appendChild(btn);
+      }
+      tabStrip.appendChild(controls);
+    }
     root.appendChild(tabStrip);
     this.tabStripElement = tabStrip;
 

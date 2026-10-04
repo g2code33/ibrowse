@@ -7,6 +7,15 @@ const UPDATES_EVENT_CHANNEL = 'yayra:updates-event';
 
 const api = {
   getLaunchInfo: () => ipcRenderer.invoke('yayra:get-launch-info'),
+  // Frameless-window controls: the OS title bar + menu block are removed
+  // (electron/main.cjs createWindow), so the renderer's tab strip renders
+  // real minimize/maximize/close buttons through these.
+  windowControls: {
+    minimize: () => ipcRenderer.invoke('yayra:window-minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('yayra:window-maximize-toggle'),
+    isMaximized: () => ipcRenderer.invoke('yayra:window-is-maximized'),
+    close: () => ipcRenderer.invoke('yayra:window-close')
+  },
   updates: {
     check: () => ipcRenderer.invoke('yayra:updates-check'),
     // Streams the release artifact into the staging dir and verifies
