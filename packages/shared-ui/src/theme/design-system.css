@@ -673,42 +673,6 @@ html {
   gap: 8px;
 }
 
-.fb-mode-pill {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  border-radius: 12px;
-  background: rgba(6, 182, 212, 0.15);
-  color: var(--fb-accent-primary);
-  border: 1px solid rgba(6, 182, 212, 0.3);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.fb-mode-pill:hover {
-  background: rgba(6, 182, 212, 0.25);
-}
-
-.fb-mode-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  display: inline-block;
-  border-radius: 50%;
-  background: #22d3ee;
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.8);
-}
-
-[data-floating-mode="circle-first"] .fb-mode-dot {
-  background: #f59e0b;
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
-}
-
-.fb-mini-mode-btn {
-  gap: 4px;
-  white-space: nowrap;
-}
-
 .fb-menu-btn {
   width: 32px;
   height: 32px;
@@ -2515,16 +2479,6 @@ html {
   display: none;
 }
 
-.fb-mini-navbar .fb-mode-pill {
-  width: auto;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 7px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .fb-mini-navbar .fb-mode-text {
   font-size: 0.68rem;
 }
@@ -3193,6 +3147,216 @@ html {
 /* =============================================================
    6. SPONSORED & FEATURED SHOWCASE ABOVE LOGO (NEW TAB)
    ============================================================= */
+/* =============================================================
+   PASSWORD VAULT: save bar, section tabs, keys, passkey, account
+   ============================================================= */
+/* Chrome-style "Save password?" bar - anchored under the toolbar. While
+   visible it counts as a blocking overlay, so on Electron the native
+   page view yields (snapshot) and the bar genuinely sits on top. */
+.fb-password-save-bar {
+  position: absolute;
+  top: 86px;
+  right: 16px;
+  z-index: 2600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(440px, calc(100% - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 14px;
+  background: var(--fb-bg-surface-elevated);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--fb-accent-glow);
+}
+
+.fb-password-save-icon {
+  display: inline-flex;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(6, 182, 212, 0.16);
+  color: var(--fb-accent-primary);
+}
+
+.fb-password-save-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fb-password-save-text strong {
+  font-size: 0.9rem;
+  color: var(--fb-text-primary);
+}
+
+.fb-password-save-text span {
+  overflow: hidden;
+  font-size: 0.78rem;
+  color: var(--fb-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fb-password-save-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.fb-vault-section-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fb-vault-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fb-text-secondary);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fb-vault-tab.active {
+  background: rgba(6, 182, 212, 0.14);
+  border-color: rgba(6, 182, 212, 0.5);
+  color: var(--fb-text-primary);
+}
+
+.fb-vault-count {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 0.72rem;
+}
+
+.fb-vault-add-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--fb-border-glass);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.fb-vault-add-form .fb-input {
+  flex: 1 1 180px;
+}
+
+.fb-vault-never-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.fb-vault-never-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--fb-text-secondary);
+}
+
+.fb-vault-never-remove {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fb-text-muted);
+  cursor: pointer;
+}
+
+.fb-vault-never-remove:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--fb-text-primary);
+}
+
+.fb-password-favicon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.fb-account-vault-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--fb-border-glass);
+  border-bottom: 1px solid var(--fb-border-glass);
+}
+
+.fb-account-vault-btn,
+.fb-account-passkey-btn {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fb-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.fb-account-vault-btn:hover,
+.fb-account-passkey-btn:hover {
+  background: rgba(6, 182, 212, 0.1);
+}
+
+.fb-account-vault-btn span,
+.fb-account-passkey-btn span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.fb-account-vault-btn strong,
+.fb-account-passkey-btn strong {
+  font-size: 0.85rem;
+}
+
+.fb-account-vault-btn small,
+.fb-account-passkey-btn small {
+  overflow: hidden;
+  font-size: 0.72rem;
+  color: var(--fb-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* .fb-sponsored-* companions ride on the same elements as .fb-dev-ad-*
    above — keep these rules non-conflicting so the larger card design in
    section 2 stays authoritative. */

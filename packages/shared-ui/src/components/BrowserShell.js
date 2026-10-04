@@ -18,6 +18,7 @@
 
 import { Icons } from '../icons/icons.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
+import { PasskeyService } from '../services/passkeyService.js';
 import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract/src/extensions/ExtensionManager.js';
 
 /**
@@ -46,6 +47,27 @@ export const DEVELOPER_AD_LINKS = [
   { id: 'ad-cgpapilot', title: 'CGPA Pilot', url: 'https://cgpapilot.pages.dev/', domain: 'cgpapilot.pages.dev' },
   { id: 'ad-clinicalrx30', title: 'Clinical RX 30', url: 'https://clinicalrx30.vercel.app/', domain: 'clinicalrx30.vercel.app' }
 ];
+
+// Escape a value for safe embedding inside an HTML attribute.
+function escapeAttr(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Human wording for PasskeyService failure reasons.
+function describePasskeyReason(reason) {
+  switch (reason) {
+    case 'passkeys-unsupported': return 'this device/browser does not support passkeys';
+    case 'user-declined-or-timeout': return 'the request was cancelled or timed out';
+    case 'authenticator-already-registered': return 'a passkey already exists on this authenticator';
+    case 'insecure-context': return 'passkeys require a secure (HTTPS) context';
+    case 'no-passkey-registered': return 'no passkey is registered yet';
+    default: return reason || 'unknown error';
+  }
+}
 
 // Apex hostnames (and all their subdomains) that are known to send
 // X-Frame-Options / CSP frame-ancestors headers forbidding ANY iframe
@@ -91,6 +113,14 @@ export class BrowserShell {
 
     this.passwordManager = options.passwordManager || new PasswordManager(this.storageAdapter);
     this.extensionManager = options.extensionManager || new ExtensionManager(this.storageAdapter);
+    // WebAuthn-backed passkey for the Yayra account: biometric/PIN gate
+    // for revealing vault secrets + account security. DI for tests.
+    this.passkeyService = options.passkeyService || new PasskeyService({ storage: this.storageAdapter });
+    // Guards so a page is only auto-filled once per navigation target.
+    this._autofilledFor = new Set();
+    // Set after a successful passkey ceremony so one unlock covers the
+    // whole passwords-page visit instead of prompting per reveal.
+    this._vaultUnlockedAt = 0;
 
     // Initial tabs setup
     const initialTabs = options.tabs && options.tabs.length > 0
@@ -156,6 +186,17 @@ export class BrowserShell {
       // even before overlayBridge.getSettings() resolves.
       overlaySettings: { enabled: true, launchAtStartup: true, overlayAllApps: true },
       passwordsItems: [],
+      // API keys / tokens / secure notes living in the same encrypted vault.
+      vaultKeysItems: [],
+      // Vault behaviour flags mirrored from PasswordManager.getConfig().
+      passwordsConfig: null,
+      // Chrome-style "Save password?" bar (set when a login submission is
+      // captured in a page; cleared on save / never / dismiss).
+      pendingPasswordSave: null,
+      // Which vault section is active on yayra://passwords.
+      passwordsActiveSection: 'passwords',
+      // Registered Yayra account passkey metadata (null = none yet).
+      passkeyInfo: null,
       extensionsItems: [...BUILT_IN_EXTENSIONS],
       sponsoredLinks: DEVELOPER_AD_LINKS.map((item) => ({
         ...item,
@@ -355,6 +396,7 @@ export class BrowserShell {
       s.isFloatingMiniOpen ||
       s.isRadialLauncherOpen ||
       (s.findInPage && s.findInPage.isOpen) ||
+      Boolean(s.pendingPasswordSave) ||
       s.isPageObscured
     );
   }
@@ -565,6 +607,7 @@ export class BrowserShell {
         console.warn('Failed to load passwords in BrowserShell:', err);
       }
     }
+    await this.refreshVaultState();
 
     if (this.extensionManager && typeof this.extensionManager.getExtensions === 'function') {
       try {
@@ -654,6 +697,11 @@ export class BrowserShell {
     // Find in Page Toolbar
     if (this.state.findInPage.isOpen) {
       this.renderFindInPageBar(shell);
+    }
+
+    // Chrome-style "Save password?" bar (captured login submission)
+    if (this.state.pendingPasswordSave) {
+      this.renderPasswordSaveBar(shell);
     }
 
     // Floating Mini-Browser Window Popup
@@ -923,18 +971,10 @@ export class BrowserShell {
     extBtn.addEventListener('click', () => this.openInternalPage('yayra://extensions'));
     toolbarActions.appendChild(extBtn);
 
-    // Floating Mode Indicator / Switcher Pill
-    const modePill = document.createElement('button');
-    modePill.className = 'fb-mode-pill';
-    modePill.setAttribute('title', `Current Floating Mode: ${this.state.desktopFloatingMode === 'browser-first' ? 'Mode B (Browser-First)' : 'Mode A (Circle-First)'}. Click to switch.`);
-    modePill.innerHTML = `
-      <span class="fb-mode-dot"></span>
-      <span class="fb-mode-text">${this.state.desktopFloatingMode === 'browser-first' ? 'Floating Browser' : 'Bubble Mode'}</span>
-    `;
-    modePill.addEventListener('click', () => {
-      this.toggleDesktopMode();
-    });
-    toolbarActions.appendChild(modePill);
+    // NOTE: the old "floating mode" switcher pill used to live here. It
+    // hid the whole main window when toggled to circle-first, which users
+    // experienced as Yayra "disappearing". Removed entirely: the native
+    // bubble is ALWAYS available and opening it never touches this window.
 
     // Persistent Top-Right Account Button (Yayra app-level "Sign in with
     // Google" - see electron/authBridge.cjs). Lives here, next to the 3-dot
@@ -1645,6 +1685,14 @@ export class BrowserShell {
       case 'system-browser-handoff':
         this.showTransientNotice('Opened in your default browser for secure sign-in.');
         break;
+      case 'autofill-captured':
+        // Chrome-style: a login was submitted inside the page. Offer to
+        // remember it (never for private tabs - checked again in the vault).
+        this.handleAutofillCaptured(tab, evt);
+        break;
+      case 'autofill-form-detected':
+        this.handleAutofillFormDetected(tab, evt);
+        break;
       case 'new-window-request':
         if (evt.url) {
           this.createNewTab();
@@ -1654,6 +1702,212 @@ export class BrowserShell {
       default:
         break;
     }
+  }
+
+  /* -------------------------------------------------------------
+   * PASSWORD VAULT: Chrome-style remember prompt, autofill, passkeys
+   * ----------------------------------------------------------- */
+
+  async refreshVaultState() {
+    if (this.passwordManager) {
+      try {
+        if (typeof this.passwordManager.getAllCredentials === 'function') {
+          this.state.passwordsItems = await this.passwordManager.getAllCredentials();
+        }
+        if (typeof this.passwordManager.getAllKeys === 'function') {
+          this.state.vaultKeysItems = await this.passwordManager.getAllKeys();
+        }
+        if (typeof this.passwordManager.getConfig === 'function') {
+          this.state.passwordsConfig = await this.passwordManager.getConfig();
+        }
+      } catch (err) {
+        console.warn('Failed to refresh vault state:', err);
+      }
+    }
+    if (this.passkeyService && typeof this.passkeyService.getRegisteredPasskey === 'function') {
+      try {
+        this.state.passkeyInfo = await this.passkeyService.getRegisteredPasskey();
+      } catch {
+        this.state.passkeyInfo = null;
+      }
+    }
+  }
+
+  async handleAutofillCaptured(tab, evt) {
+    if (!this.passwordManager || !tab || tab.isPrivate) return;
+    const { url, username, password } = evt || {};
+    if (!url || !username || !password) return;
+    let origin;
+    try { origin = new URL(url).origin; } catch { return; }
+    // Never offer to save Yayra's own internal pages.
+    if (origin.startsWith('yayra://')) return;
+    try {
+      const offer = typeof this.passwordManager.shouldOfferToSave === 'function'
+        ? await this.passwordManager.shouldOfferToSave({ origin, username, password, isPrivate: tab.isPrivate })
+        : this.passwordManager.shouldPromptToSave(origin, tab.isPrivate);
+      if (!offer) return;
+    } catch { return; }
+    const existing = (await this.passwordManager.getCredentialsForOrigin(origin))
+      .find((c) => c.username === username);
+    this.state.pendingPasswordSave = {
+      tabId: tab.id,
+      origin,
+      username,
+      password,
+      isUpdate: Boolean(existing)
+    };
+    this.render();
+  }
+
+  async handleAutofillFormDetected(tab, evt) {
+    if (!this.passwordManager || !tab || tab.isPrivate) return;
+    if (!this.nativeWebview || typeof this.nativeWebview.fillCredentials !== 'function') return;
+    const config = this.state.passwordsConfig || (await this.passwordManager.getConfig());
+    if (!config.autofillEnabled) return;
+    const url = (evt && evt.url) || tab.url;
+    let origin;
+    try { origin = new URL(url).origin; } catch { return; }
+    const guardKey = `${tab.id}|${origin}`;
+    if (this._autofilledFor.has(guardKey)) return;
+    const matches = await this.passwordManager.getCredentialsForOrigin(origin);
+    if (matches.length === 0) return;
+    this._autofilledFor.add(guardKey);
+    // Chrome behaviour: a single saved credential fills silently; multiple
+    // matches fill the most recently used one and say so.
+    const chosen = [...matches].sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))[0];
+    try {
+      await this.nativeWebview.fillCredentials(tab.id, {
+        username: chosen.username,
+        password: chosen.password
+      });
+      const host = origin.replace(/^https?:\/\//, '');
+      this.showTransientNotice(matches.length > 1
+        ? `Filled most recent sign-in for ${host} (${matches.length} saved)`
+        : `Filled saved sign-in for ${host}`);
+    } catch { /* page may have navigated away */ }
+  }
+
+  async resolvePendingPasswordSave(action) {
+    const pending = this.state.pendingPasswordSave;
+    this.state.pendingPasswordSave = null;
+    if (!pending) { this.render(); return; }
+    if (action === 'save' && this.passwordManager) {
+      const result = await this.passwordManager.saveCredential({
+        origin: pending.origin,
+        username: pending.username,
+        password: pending.password
+      });
+      if (result && result.success) {
+        await this.refreshVaultState();
+        this.showTransientNotice(pending.isUpdate
+          ? `Updated password for ${pending.origin.replace(/^https?:\/\//, '')}`
+          : `Password saved to your encrypted vault`);
+      } else {
+        this.showTransientNotice(`Couldn't save password: ${result?.reason || 'unknown error'}`);
+      }
+    } else if (action === 'never' && this.passwordManager
+      && typeof this.passwordManager.addNeverSaveOrigin === 'function') {
+      await this.passwordManager.addNeverSaveOrigin(pending.origin);
+      await this.refreshVaultState();
+      this.showTransientNotice(`Yayra won't offer to save passwords for ${pending.origin.replace(/^https?:\/\//, '')}`);
+    }
+    this.render();
+  }
+
+  renderPasswordSaveBar(root) {
+    const pending = this.state.pendingPasswordSave;
+    if (!pending) return;
+    const host = pending.origin.replace(/^https?:\/\//, '');
+    const bar = document.createElement('div');
+    bar.className = 'fb-password-save-bar';
+    bar.setAttribute('role', 'dialog');
+    bar.setAttribute('aria-label', 'Save password');
+    bar.innerHTML = `
+      <div class="fb-password-save-icon">${Icons.lock}</div>
+      <div class="fb-password-save-text">
+        <strong>${pending.isUpdate ? 'Update password?' : 'Save password?'}</strong>
+        <span>${pending.username} &middot; ${host}</span>
+      </div>
+      <div class="fb-password-save-actions">
+        <button class="fb-btn fb-btn-primary fb-pwd-save-yes">${pending.isUpdate ? 'Update' : 'Save'}</button>
+        <button class="fb-btn fb-btn-secondary fb-pwd-save-never">Never</button>
+        <button class="fb-action-btn fb-pwd-save-dismiss" title="Not now" aria-label="Not now">${Icons.close}</button>
+      </div>
+    `;
+    bar.querySelector('.fb-pwd-save-yes')?.addEventListener('click', () => this.resolvePendingPasswordSave('save'));
+    bar.querySelector('.fb-pwd-save-never')?.addEventListener('click', () => this.resolvePendingPasswordSave('never'));
+    bar.querySelector('.fb-pwd-save-dismiss')?.addEventListener('click', () => this.resolvePendingPasswordSave('dismiss'));
+    root.appendChild(bar);
+  }
+
+  /**
+   * Passkey gate for revealing/copying vault secrets. One successful
+   * OS-level ceremony unlocks the vault for 5 minutes. Returns true when
+   * access is allowed.
+   */
+  async unlockVaultIfNeeded() {
+    const config = this.state.passwordsConfig
+      || (this.passwordManager ? await this.passwordManager.getConfig() : null);
+    if (!config || !config.requirePasskeyToReveal) return true;
+    if (!this.state.passkeyInfo) return true; // gate enabled but no passkey yet
+    if (Date.now() - this._vaultUnlockedAt < 5 * 60 * 1000) return true;
+    if (!this.passkeyService) return false;
+    const result = await this.passkeyService.verifyPasskey();
+    if (result && result.success) {
+      this._vaultUnlockedAt = Date.now();
+      return true;
+    }
+    this.showTransientNotice('Passkey verification needed to reveal vault secrets.');
+    return false;
+  }
+
+  async registerAccountPasskey() {
+    if (!this.passkeyService) return;
+    if (!this.passkeyService.isSupported()) {
+      this.showTransientNotice('Passkeys need a device with biometrics/PIN and a secure (HTTPS) context.');
+      return;
+    }
+    const profile = this.state.googleAccount?.signedIn ? this.state.googleAccount.profile : null;
+    const label = (profile && (profile.email || profile.name)) || 'Yayra user';
+    const result = await this.passkeyService.registerPasskey({ accountLabel: label });
+    if (result.success) {
+      this.state.passkeyInfo = result.passkey;
+      this._vaultUnlockedAt = Date.now();
+      this.showTransientNotice('Passkey created - your Yayra account is now protected by this device.');
+    } else {
+      this.showTransientNotice(`Couldn't create passkey: ${describePasskeyReason(result.reason)}`);
+    }
+    this.render();
+  }
+
+  async verifyAccountPasskey() {
+    if (!this.passkeyService) return false;
+    const result = await this.passkeyService.verifyPasskey();
+    if (result.success) {
+      this._vaultUnlockedAt = Date.now();
+      this.showTransientNotice('Passkey verified.');
+      this.render();
+      return true;
+    }
+    this.showTransientNotice(`Passkey check failed: ${describePasskeyReason(result.reason)}`);
+    return false;
+  }
+
+  async removeAccountPasskey() {
+    if (!this.passkeyService) return;
+    // Removing the protector requires proving you still hold it.
+    if (this.state.passkeyInfo) {
+      const ok = await this.verifyAccountPasskey();
+      if (!ok) return;
+    }
+    await this.passkeyService.removePasskey();
+    this.state.passkeyInfo = null;
+    if (this.passwordManager) {
+      await this.passwordManager.updateConfig({ requirePasskeyToReveal: false });
+      await this.refreshVaultState();
+    }
+    this.showTransientNotice('Passkey removed.');
+    this.render();
   }
 
   destroyNativeWebview(tabId) {
@@ -2062,14 +2316,6 @@ export class BrowserShell {
               <input type="checkbox" id="fb-in-set-floating-default" ${this.state.settings.floatingEnabledByDefault ? 'checked' : ''} />
             </div>
 
-            <div class="fb-setting-row">
-              <label>Default Floating Mode</label>
-              <select id="fb-in-set-floating-mode" class="fb-select">
-                <option value="browser-first" ${this.state.desktopFloatingMode === 'browser-first' ? 'selected' : ''}>Mode B: Browser-First (Window Persists)</option>
-                <option value="circle-first" ${this.state.desktopFloatingMode === 'circle-first' ? 'selected' : ''}>Mode A: Circle-First (Glass Bubble)</option>
-              </select>
-            </div>
-
             <div class="fb-setting-slider-row">
               <div class="fb-slider-header">
                 <label for="fb-in-bubble-opacity">Collapsed Bubble Opacity</label>
@@ -2311,14 +2557,11 @@ export class BrowserShell {
 
     page.querySelector('.fb-in-save-btn')?.addEventListener('click', async () => {
       const floatingDefault = page.querySelector('#fb-in-set-floating-default')?.checked;
-      const mode = page.querySelector('#fb-in-set-floating-mode')?.value;
       const theme = page.querySelector('#fb-in-set-theme')?.value;
       const colorTheme = page.querySelector('#fb-in-set-color-theme')?.value;
       const engine = page.querySelector('#fb-in-set-engine')?.value;
 
       this.state.settings.floatingEnabledByDefault = floatingDefault;
-      this.state.settings.desktopFloatingMode = mode;
-      this.state.desktopFloatingMode = mode;
       if (theme) this.state.settings.theme = theme;
       if (colorTheme) this.state.settings.colorTheme = colorTheme;
       if (engine) this.state.settings.searchEngine = engine;
@@ -2738,57 +2981,138 @@ export class BrowserShell {
     const page = document.createElement('div');
     page.className = 'fb-internal-page fb-passwords-inpage-layout';
 
+    const section = this.state.passwordsActiveSection === 'keys' ? 'keys' : 'passwords';
     const q = (this.state.passwordsSearchQuery || '').toLowerCase().trim();
-    const items = this.state.passwordsItems.filter((p) => !q || (p.origin && p.origin.toLowerCase().includes(q)) || (p.username && p.username.toLowerCase().includes(q)));
+    const match = (p) => !q
+      || (p.origin && p.origin.toLowerCase().includes(q))
+      || (p.username && p.username.toLowerCase().includes(q))
+      || (p.title && p.title.toLowerCase().includes(q));
+    const items = (section === 'keys' ? this.state.vaultKeysItems : this.state.passwordsItems).filter(match);
+    const config = this.state.passwordsConfig || { savePasswordsEnabled: true, autofillEnabled: true, requirePasskeyToReveal: false, neverSaveOrigins: [] };
+    const passkey = this.state.passkeyInfo;
+    const passkeySupported = Boolean(this.passkeyService && this.passkeyService.isSupported());
+
+    const hostOf = (origin) => String(origin || '').replace(/^https?:\/\//, '');
+    const rowHtml = (p) => section === 'keys' ? `
+      <div class="fb-password-row fb-pwd-row fb-key-row" data-id="${p.id}">
+        <div class="fb-password-meta">
+          <strong class="fb-password-origin">${p.title || p.origin}</strong>
+          <span class="fb-password-user">${p.username}</span>
+        </div>
+        <div class="fb-password-actions">
+          <span class="fb-pwd-masked" data-pwd="${escapeAttr(p.password || '')}">••••••••</span>
+          <button class="fb-pwd-action fb-pwd-reveal-btn fb-in-pwd-reveal" title="Reveal secret">&#128065;</button>
+          <button class="fb-pwd-action fb-in-pwd-copy" data-copy="${escapeAttr(p.password || '')}" title="Copy secret">&#10697;</button>
+          <button class="fb-pwd-action fb-pwd-delete-btn fb-in-pwd-delete" data-id="${p.id}" title="Delete">${Icons.trash}</button>
+        </div>
+      </div>` : `
+      <div class="fb-password-row fb-pwd-row" data-id="${p.id}">
+        <img class="fb-password-favicon" src="https://icons.duckduckgo.com/ip3/${hostOf(p.origin).split('/')[0]}.ico" alt="" loading="lazy" />
+        <div class="fb-password-meta">
+          <strong class="fb-password-origin">${hostOf(p.origin)}</strong>
+          <span class="fb-password-user">${p.username}</span>
+        </div>
+        <div class="fb-password-actions">
+          <span class="fb-pwd-masked" data-pwd="${escapeAttr(p.password || '')}">••••••••</span>
+          <button class="fb-pwd-action fb-pwd-reveal-btn fb-in-pwd-reveal" title="Reveal password">&#128065;</button>
+          <button class="fb-pwd-action fb-in-pwd-copy" data-copy="${escapeAttr(p.password || '')}" title="Copy password">&#10697;</button>
+          <button class="fb-pwd-action fb-pwd-delete-btn fb-in-pwd-delete" data-id="${p.id}" title="Delete">${Icons.trash}</button>
+        </div>
+      </div>`;
 
     page.innerHTML = `
       <div class="fb-internal-container">
         <header class="fb-internal-header">
           <div class="fb-internal-title-group">
             <span class="fb-internal-icon">${Icons.lock}</span>
-            <h1 class="fb-internal-title">Saved Passwords</h1>
+            <h1 class="fb-internal-title">Passwords &amp; Keys</h1>
           </div>
           <div style="display:flex; align-items:center; gap:12px;">
             <div class="fb-internal-search">
               <span class="fb-internal-search-icon">${Icons.search}</span>
-              <input type="text" id="fb-in-pwd-search" placeholder="Search passwords" value="${this.state.passwordsSearchQuery || ''}" />
+              <input type="text" id="fb-in-pwd-search" placeholder="Search vault" value="${this.state.passwordsSearchQuery || ''}" />
             </div>
-            <button class="fb-btn fb-btn-primary fb-in-add-pwd-btn">${Icons.plus} Add Credential</button>
+            <button class="fb-btn fb-btn-primary fb-in-add-pwd-btn">${Icons.plus} ${section === 'keys' ? 'Add Key' : 'Add Password'}</button>
           </div>
         </header>
+
+        <div class="fb-vault-section-tabs" role="tablist">
+          <button class="fb-vault-tab ${section === 'passwords' ? 'active' : ''}" data-section="passwords" role="tab" aria-selected="${section === 'passwords'}">
+            ${Icons.lock} Passwords <span class="fb-vault-count">${this.state.passwordsItems.length}</span>
+          </button>
+          <button class="fb-vault-tab ${section === 'keys' ? 'active' : ''}" data-section="keys" role="tab" aria-selected="${section === 'keys'}">
+            ${Icons.shield} Keys &amp; Tokens <span class="fb-vault-count">${this.state.vaultKeysItems.length}</span>
+          </button>
+        </div>
+
+        <div class="fb-settings-group-card fb-vault-security-card" style="margin-bottom:12px;">
+          <h3 class="fb-settings-group-title">${Icons.shield} Account Passkey</h3>
+          <p style="margin:0; font-size:0.82rem; color:var(--fb-text-secondary);">
+            ${passkey
+              ? `Passkey active for <strong>${passkey.accountLabel || 'this device'}</strong> since ${new Date(passkey.createdAt).toLocaleDateString()}. Your device's biometrics/PIN protect this vault.`
+              : passkeySupported
+                ? 'Protect your Yayra account and vault with your device\u2019s biometrics or PIN. Works like Windows Hello / Touch ID in Chrome.'
+                : 'Passkeys need a secure (HTTPS) context and a device authenticator; this build/runtime does not expose one.'}
+          </p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${passkey
+              ? `<button class="fb-btn fb-btn-secondary fb-vault-passkey-verify">Verify now</button>
+                 <button class="fb-btn fb-btn-secondary fb-vault-passkey-remove">Remove passkey</button>`
+              : `<button class="fb-btn fb-btn-primary fb-vault-passkey-create" ${passkeySupported ? '' : 'disabled'}>Create passkey</button>`}
+          </div>
+          <div class="fb-setting-toggle-row">
+            <div>
+              <strong>Require passkey to reveal secrets</strong>
+              <p>Ask for biometrics/PIN before showing or copying any stored password or key (5-minute unlock).</p>
+            </div>
+            <input type="checkbox" id="fb-in-toggle-passkey-gate" ${config.requirePasskeyToReveal ? 'checked' : ''} ${passkey ? '' : 'disabled'} />
+          </div>
+        </div>
 
         <div class="fb-settings-group-card" style="margin-bottom:12px;">
           <div class="fb-setting-toggle-row">
             <div>
               <strong>Offer to save passwords</strong>
-              <p>Prompts when entering login credentials on new websites</p>
+              <p>Chrome-style prompt whenever you sign in to a site with new credentials</p>
             </div>
-            <input type="checkbox" id="fb-in-toggle-savepwd" ${this.state.settings.savePasswordsEnabled ? 'checked' : ''} />
+            <input type="checkbox" id="fb-in-toggle-savepwd" ${config.savePasswordsEnabled ? 'checked' : ''} />
           </div>
           <div class="fb-setting-toggle-row">
             <div>
               <strong>Auto Sign-in / Autofill</strong>
-              <p>Fills usernames and passwords automatically for matching website origins</p>
+              <p>Fills saved usernames and passwords automatically on matching sites</p>
             </div>
-            <input type="checkbox" id="fb-in-toggle-autofill" ${this.state.settings.autofillEnabled ? 'checked' : ''} />
+            <input type="checkbox" id="fb-in-toggle-autofill" ${config.autofillEnabled ? 'checked' : ''} />
           </div>
+          ${config.neverSaveOrigins.length > 0 ? `
+            <div class="fb-vault-never-list">
+              <strong style="font-size:0.8rem;">Never saved for:</strong>
+              ${config.neverSaveOrigins.map((o) => `
+                <span class="fb-vault-never-chip">${hostOf(o)}
+                  <button class="fb-vault-never-remove" data-origin="${escapeAttr(o)}" title="Allow saving again">${Icons.close}</button>
+                </span>`).join('')}
+            </div>` : ''}
         </div>
 
-        <div style="display:flex; flex-direction:column; gap:10px;">
-          ${items.length > 0 ? items.map((p) => `
-            <div class="fb-password-row fb-pwd-row" data-id="${p.id}">
-              <div class="fb-password-meta">
-                <strong class="fb-password-origin">${p.origin}</strong>
-                <span class="fb-password-user">${p.username}</span>
-              </div>
-              <div class="fb-password-actions">
-                <span class="fb-pwd-masked" data-pwd="${p.password || ''}">••••••••</span>
-                <input type="password" value="${p.password || '••••••••'}" readonly class="fb-password-preview" style="display:none;" />
-                <button class="fb-pwd-action fb-pwd-reveal-btn fb-in-pwd-reveal" title="Reveal password">👁</button>
-                <button class="fb-pwd-action fb-pwd-delete-btn fb-in-pwd-delete" data-id="${p.id}" title="Delete">${Icons.trash}</button>
-              </div>
-            </div>
-          `).join('') : '<div class="fb-empty-state">No saved passwords found in local encrypted vault.</div>'}
+        <form class="fb-vault-add-form" id="fb-vault-add-form" style="display:none;">
+          ${section === 'keys' ? `
+            <input type="text" id="fb-vault-add-label" class="fb-input" placeholder="Label (e.g. OpenAI API key)" />
+            <input type="text" id="fb-vault-add-user" class="fb-input" placeholder="Key name / account (optional)" />
+            <input type="password" id="fb-vault-add-secret" class="fb-input" placeholder="Secret value" />
+          ` : `
+            <input type="text" id="fb-vault-add-label" class="fb-input" placeholder="Website (e.g. https://github.com)" />
+            <input type="text" id="fb-vault-add-user" class="fb-input" placeholder="Username / email" />
+            <input type="password" id="fb-vault-add-secret" class="fb-input" placeholder="Password" />
+          `}
+          <button type="submit" class="fb-btn fb-btn-primary">Save</button>
+        </form>
+
+        <div class="fb-vault-rows" style="display:flex; flex-direction:column; gap:10px;">
+          ${items.length > 0
+            ? items.map(rowHtml).join('')
+            : `<div class="fb-empty-state">${section === 'keys'
+                ? 'No keys or tokens yet. Store API keys, recovery codes and tokens in the same encrypted vault.'
+                : 'No saved passwords yet. Sign in to any site and Yayra will offer to remember it.'}</div>`}
         </div>
       </div>
     `;
@@ -2799,10 +3123,18 @@ export class BrowserShell {
       this.render();
     });
 
+    page.querySelectorAll('.fb-vault-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        this.state.passwordsActiveSection = tab.dataset.section;
+        this.render();
+      });
+    });
+
     page.querySelector('#fb-in-toggle-savepwd')?.addEventListener('change', async (e) => {
       this.state.settings.savePasswordsEnabled = e.target.checked;
       if (this.passwordManager) {
         await this.passwordManager.updateConfig({ savePasswordsEnabled: e.target.checked });
+        await this.refreshVaultState();
       }
     });
 
@@ -2810,32 +3142,85 @@ export class BrowserShell {
       this.state.settings.autofillEnabled = e.target.checked;
       if (this.passwordManager) {
         await this.passwordManager.updateConfig({ autofillEnabled: e.target.checked });
+        await this.refreshVaultState();
       }
     });
 
-    page.querySelector('.fb-in-add-pwd-btn')?.addEventListener('click', async () => {
-      const origin = prompt('Enter Website URL / Origin (e.g. https://github.com):', 'https://');
-      const username = prompt('Enter Username / Email:', 'user@example.com');
-      const password = prompt('Enter Password:', '');
-      if (origin && username && password && this.passwordManager) {
-        await this.passwordManager.saveCredential({ origin, username, password });
-        this.state.passwordsItems = await this.passwordManager.getAllCredentials();
+    page.querySelector('#fb-in-toggle-passkey-gate')?.addEventListener('change', async (e) => {
+      if (this.passwordManager) {
+        await this.passwordManager.updateConfig({ requirePasskeyToReveal: e.target.checked });
+        await this.refreshVaultState();
         this.render();
       }
     });
 
+    page.querySelector('.fb-vault-passkey-create')?.addEventListener('click', () => this.registerAccountPasskey());
+    page.querySelector('.fb-vault-passkey-verify')?.addEventListener('click', () => this.verifyAccountPasskey());
+    page.querySelector('.fb-vault-passkey-remove')?.addEventListener('click', () => this.removeAccountPasskey());
+
+    page.querySelectorAll('.fb-vault-never-remove').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (this.passwordManager && typeof this.passwordManager.removeNeverSaveOrigin === 'function') {
+          await this.passwordManager.removeNeverSaveOrigin(btn.dataset.origin);
+          await this.refreshVaultState();
+          this.render();
+        }
+      });
+    });
+
+    // Inline add form (replaces the old triple prompt() flow).
+    const addForm = page.querySelector('#fb-vault-add-form');
+    page.querySelector('.fb-in-add-pwd-btn')?.addEventListener('click', () => {
+      if (!addForm) return;
+      addForm.style.display = addForm.style.display === 'none' ? 'flex' : 'none';
+      addForm.querySelector('#fb-vault-add-label')?.focus();
+    });
+    addForm?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const label = addForm.querySelector('#fb-vault-add-label')?.value.trim();
+      const user = addForm.querySelector('#fb-vault-add-user')?.value.trim();
+      const secret = addForm.querySelector('#fb-vault-add-secret')?.value;
+      if (!label || !secret || !this.passwordManager) return;
+      if (section === 'keys') {
+        await this.passwordManager.saveKey({ label, keyName: user || label, secret });
+      } else {
+        await this.passwordManager.saveCredential({ origin: label, username: user || '', password: secret, title: label });
+      }
+      await this.refreshVaultState();
+      this.render();
+    });
+
+    // Reveal: synchronous when no passkey gate applies; otherwise verify
+    // via the OS ceremony first (one unlock covers 5 minutes).
+    const gateNeeded = () => Boolean(config.requirePasskeyToReveal && passkey
+      && (Date.now() - this._vaultUnlockedAt >= 5 * 60 * 1000));
     page.querySelectorAll('.fb-in-pwd-reveal').forEach((btn) => {
       btn.addEventListener('click', () => {
         const row = btn.closest('.fb-password-row');
         const masked = row?.querySelector('.fb-pwd-masked');
-        const rawPwd = masked?.getAttribute('data-pwd') || '';
-        if (masked) {
-          if (masked.textContent === '••••••••') {
-            masked.textContent = rawPwd;
-          } else {
-            masked.textContent = '••••••••';
-          }
-        }
+        if (!masked) return;
+        const doToggle = () => {
+          const rawPwd = masked.getAttribute('data-pwd') || '';
+          masked.textContent = masked.textContent === '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' ? rawPwd : '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+        };
+        if (!gateNeeded()) { doToggle(); return; }
+        this.unlockVaultIfNeeded().then((ok) => { if (ok) doToggle(); });
+      });
+    });
+
+    page.querySelectorAll('.fb-in-pwd-copy').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const doCopy = () => {
+          const value = btn.getAttribute('data-copy') || '';
+          try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(value);
+              this.showTransientNotice('Copied to clipboard');
+            }
+          } catch { /* clipboard unavailable */ }
+        };
+        if (!gateNeeded()) { doCopy(); return; }
+        this.unlockVaultIfNeeded().then((ok) => { if (ok) doCopy(); });
       });
     });
 
@@ -2844,7 +3229,7 @@ export class BrowserShell {
         const id = btn.dataset.id;
         if (this.passwordManager && id) {
           await this.passwordManager.deleteCredential(id);
-          this.state.passwordsItems = await this.passwordManager.getAllCredentials();
+          await this.refreshVaultState();
           this.render();
         }
       });
@@ -3344,7 +3729,6 @@ export class BrowserShell {
         <div class="fb-toolbar-actions">
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-download-btn" title="Downloads" aria-label="Downloads">${Icons.download}</button>
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-extensions-btn" title="Extensions and Shields" aria-label="Extensions and Shields">${Icons.shield}</button>
-          <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span><span class="fb-mode-text">${this.state.desktopFloatingMode === 'browser-first' ? 'Browser' : 'Bubble'}</span></button>
           ${this.authBridge ? `<button class="fb-action-btn fb-toolbar-action-btn fb-account-btn fb-mini-account-btn" title="Yayra account" aria-label="Account">${this.renderAccountAvatarHtml(this.state.googleAccount?.signedIn ? this.state.googleAccount.profile : null, 22)}</button>` : ''}
           <button class="fb-action-btn fb-menu-btn fb-toolbar-action-btn fb-mini-drawer-btn" title="Customize and control Yayra" aria-label="Main menu">${Icons.moreVertical}</button>
         </div>
@@ -3402,10 +3786,6 @@ export class BrowserShell {
 
     win.querySelector('.fb-mini-extensions-btn')?.addEventListener('click', () => {
       this.openInternalPage('yayra://extensions');
-    });
-
-    win.querySelector('.fb-mini-mode-btn')?.addEventListener('click', () => {
-      this.toggleDesktopMode();
     });
 
     win.querySelector('.fb-mini-security-btn')?.addEventListener('click', () => {
@@ -3591,6 +3971,30 @@ export class BrowserShell {
 
     const account = this.state.googleAccount || { status: 'idle' };
 
+    // Vault + passkey summary shown in both signed-in and signed-out
+    // states: the Yayra account's local powers (encrypted passwords,
+    // keys, passkey protection) work with or without Google sign-in.
+    const passkey = this.state.passkeyInfo;
+    const vaultSummaryHtml = `
+      <div class="fb-account-vault-summary">
+        <button class="fb-account-vault-btn" title="Open passwords & keys vault">
+          ${Icons.lock}
+          <span>
+            <strong>Passwords &amp; keys vault</strong>
+            <small>${this.state.passwordsItems.length} password${this.state.passwordsItems.length === 1 ? '' : 's'} &#183; ${this.state.vaultKeysItems.length} key${this.state.vaultKeysItems.length === 1 ? '' : 's'} &#183; AES-256 encrypted</small>
+          </span>
+        </button>
+        <button class="fb-account-passkey-btn" title="${passkey ? 'Verify your account passkey' : 'Create an account passkey'}">
+          ${Icons.shield}
+          <span>
+            <strong>${passkey ? 'Passkey active' : 'Create a passkey'}</strong>
+            <small>${passkey
+              ? `Protected since ${new Date(passkey.createdAt).toLocaleDateString()}`
+              : 'Lock your account & vault with biometrics/PIN'}</small>
+          </span>
+        </button>
+      </div>`;
+
     if (account.status === 'signed-in' && account.profile) {
       const { name, email } = account.profile;
       const sinceLabel = account.savedAt
@@ -3605,6 +4009,7 @@ export class BrowserShell {
           </div>
         </div>
         ${sinceLabel ? `<p style="margin:0; padding:0 2px; font-size:0.75rem; color:var(--fb-text-muted);">Signed in since ${sinceLabel}</p>` : ''}
+        ${vaultSummaryHtml}
         <div class="fb-account-dropdown-actions">
           <button class="fb-btn fb-btn-secondary fb-account-manage-btn" style="width:100%; justify-content:flex-start;">${Icons.externalLink} Manage Google Account</button>
           <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
@@ -3626,6 +4031,7 @@ export class BrowserShell {
           </div>
         </div>
         ${errorNote}
+        ${vaultSummaryHtml}
         <div class="fb-account-dropdown-actions">
           <button class="fb-btn fb-btn-primary fb-account-signin-btn" style="width:100%;" ${isSigningIn ? 'disabled' : ''}>${isSigningIn ? 'Signing in&hellip;' : 'Sign in with Google'}</button>
           <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
@@ -3633,6 +4039,15 @@ export class BrowserShell {
       `;
     }
 
+    dropdown.querySelector('.fb-account-vault-btn')?.addEventListener('click', () => {
+      this.state.isAccountMenuOpen = false;
+      this.openInternalPage('yayra://passwords');
+    });
+    dropdown.querySelector('.fb-account-passkey-btn')?.addEventListener('click', () => {
+      this.state.isAccountMenuOpen = false;
+      if (this.state.passkeyInfo) this.verifyAccountPasskey();
+      else this.registerAccountPasskey();
+    });
     dropdown.querySelector('.fb-account-manage-btn')?.addEventListener('click', () => this.openGoogleAccountPage());
     dropdown.querySelector('.fb-account-switch-btn')?.addEventListener('click', () => this.switchGoogleAccount());
     dropdown.querySelector('.fb-account-signout-btn')?.addEventListener('click', () => this.signOutOfGoogle());
@@ -5278,36 +5693,11 @@ export class BrowserShell {
     this.render();
   }
 
-  toggleDesktopMode() {
-    const nextMode = this.state.desktopFloatingMode === 'circle-first' ? 'browser-first' : 'circle-first';
-    this.state.desktopFloatingMode = nextMode;
-    this.state.settings.desktopFloatingMode = nextMode;
-    // Electron desktop: circle-first means "hide this OS window, live in
-    // the native bubble" - never the in-page DOM bubble.
-    const overlay = this.overlayBridge;
-    if (this.nativeWebview && overlay && typeof overlay.minimizeMainWindow === 'function') {
-      if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
-        this.settingsRepo.updateSettings({ desktopFloatingMode: nextMode });
-      }
-      if (this.options.onToggleMode) this.options.onToggleMode(nextMode);
-      if (nextMode === 'circle-first') {
-        overlay.minimizeMainWindow();
-      }
-      this.render();
-      return;
-    }
-    // Make the mode switch observable: circle-first docks the full shell into
-    // the persistent bubble, while browser-first restores the full browser.
-    this.state.isMinimizedToBubble = nextMode === 'circle-first';
-    if (nextMode === 'circle-first') this.state.isFloatingMiniOpen = false;
-    if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
-      this.settingsRepo.updateSettings({ desktopFloatingMode: nextMode });
-    }
-    if (this.options.onToggleMode) {
-      this.options.onToggleMode(nextMode);
-    }
-    this.render();
-  }
+  // NOTE: toggleDesktopMode() (the "floating mode / bubble mode" switch)
+  // was removed on purpose. Switching modes hid the entire main window,
+  // which users experienced as Yayra disappearing. The native bubble is
+  // always present and opens its mini browser without ever touching the
+  // main window, so a mode switch has no job left to do.
 
   /* -------------------------------------------------------------
    * TAB MANAGEMENT

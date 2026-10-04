@@ -232,6 +232,11 @@ function createWebviewBridge({
   // does nothing instead of throwing.
   Menu = null,
   clipboard = null,
+  // Absolute path to electron/autofillPreload.cjs. When provided, every
+  // page view gets Chrome-style password capture/fill hooks (sandboxed,
+  // context-isolated, nothing exposed to the page). Optional so existing
+  // tests without it keep working.
+  autofillPreloadPath = null,
   logger = console
 }) {
   // key -> { view, lastUrl, tabId, hostWc, hostWin }
@@ -333,13 +338,14 @@ function createWebviewBridge({
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        partition: isPrivate ? `incognito-${tabId}` : 'persist:yayra-webview'
+        partition: isPrivate ? `incognito-${tabId}` : 'persist:yayra-webview',
+        ...(autofillPreloadPath ? { preload: autofillPreloadPath } : {})
       }
     });
     if (typeof view.webContents.setUserAgent === 'function') {
       view.webContents.setUserAgent(buildBrowserUserAgent());
     }
-    const entry = { view, lastUrl: null, tabId, hostWc, hostWin };
+    const entry = { view, lastUrl: null, tabId, hostWc, hostWin, isPrivate: Boolean(isPrivate) };
     views.set(key, entry);
     attachListeners(key, entry);
     return entry;
@@ -474,6 +480,49 @@ function createWebviewBridge({
   ipcMain.handle('yayra:webview-reload', (event, { tabId } = {}) => reload(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-stop', (event, { tabId } = {}) => stop(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-destroy', (event, { tabId } = {}) => destroyView(viewKey(event, tabId)));
+
+  // ---- Chrome-style password capture / autofill routing -------------
+  // The autofill preload inside a page view sends on these channels; the
+  // sender is the VIEW's webContents, so locate its entry and forward to
+  // the shell window that owns the tab. Private tabs never forward
+  // captures (the vault refuses them anyway - defense in depth).
+  function entryForViewSender(event) {
+    const sender = event && event.sender;
+    if (!sender) return null;
+    for (const entry of views.values()) {
+      if (entry.view && entry.view.webContents === sender) return entry;
+    }
+    return null;
+  }
+
+  if (typeof ipcMain.on === 'function') {
+    ipcMain.on('yayra:autofill-captured', (event, payload = {}) => {
+      const entry = entryForViewSender(event);
+      if (!entry || entry.isPrivate) return;
+      const { url, username, password } = payload;
+      if (!url || !password) return;
+      sendTo(entry, 'autofill-captured', { url: String(url), username: String(username || ''), password: String(password) });
+    });
+    ipcMain.on('yayra:autofill-form-detected', (event, payload = {}) => {
+      const entry = entryForViewSender(event);
+      if (!entry || entry.isPrivate) return;
+      sendTo(entry, 'autofill-form-detected', { url: String(payload.url || entry.lastUrl || '') });
+    });
+  }
+
+  ipcMain.handle('yayra:webview-fill-credentials', (event, { tabId, username, password } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    if (!entry || entry.isPrivate) return { filled: false };
+    try {
+      entry.view.webContents.send('yayra:autofill-fill', {
+        username: String(username || ''),
+        password: String(password || '')
+      });
+      return { filled: true };
+    } catch {
+      return { filled: false };
+    }
+  });
 
   return {
     destroyAll,

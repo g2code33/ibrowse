@@ -128,8 +128,7 @@ test('Desktop Menu & Modals: Reaches History, Bookmarks, Downloads, Settings, Pe
   assert.equal(container.querySelector('.fb-modal-backdrop'), null);
 });
 
-test('Desktop Floating Mode & Bubble Minimization: Toggles Mode A vs Mode B and collapses to circle', async () => {
-  let modeChanged = null;
+test('Desktop Bubble Minimization: mode switching is REMOVED; the main window never hides behind a mode toggle', async () => {
   let minimizedFired = false;
 
   const container = document.createElement('div');
@@ -137,28 +136,20 @@ test('Desktop Floating Mode & Bubble Minimization: Toggles Mode A vs Mode B and 
     container,
     isMobile: false,
     desktopFloatingMode: 'circle-first',
-    onToggleMode: (m) => { modeChanged = m; },
     onMinimizeToBubble: () => { minimizedFired = true; }
   });
 
   await shell.initialize();
   shell.render(container);
 
+  // Legacy persisted value is still accepted into state (settings
+  // round-trip compatibility) but no mode-switch feature exists anymore:
+  // no toggle method, no toolbar pill, no settings select. Switching used
+  // to hide the whole main window - users saw Yayra "disappear".
   assert.equal(shell.state.desktopFloatingMode, 'circle-first');
-
-  // Toggle Mode to Browser-First
-  shell.toggleDesktopMode();
-  assert.equal(shell.state.desktopFloatingMode, 'browser-first');
-  assert.equal(shell.state.isMinimizedToBubble, false);
-  assert.equal(modeChanged, 'browser-first');
-
-  // Toggle back to Circle-First: the full browser must dock into the bubble.
-  shell.toggleDesktopMode();
-  assert.equal(shell.state.desktopFloatingMode, 'circle-first');
-  assert.equal(shell.state.isMinimizedToBubble, true);
-  shell.toggleDesktopMode();
-  assert.equal(shell.state.desktopFloatingMode, 'browser-first');
-  assert.equal(shell.state.isMinimizedToBubble, false);
+  assert.equal(typeof shell.toggleDesktopMode, 'undefined', 'toggleDesktopMode must be removed');
+  assert.equal(container.querySelector('.fb-mode-pill'), null, 'mode switcher pill must not render');
+  assert.equal(shell.state.isMinimizedToBubble, false, 'main shell stays visible regardless of legacy mode value');
 
   // Minimize to Floating Bubble
   shell.minimizeToBubble();

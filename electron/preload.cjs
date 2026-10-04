@@ -34,6 +34,8 @@ const api = {
     reload: (tabId) => ipcRenderer.invoke('yayra:webview-reload', { tabId }),
     stop: (tabId) => ipcRenderer.invoke('yayra:webview-stop', { tabId }),
     destroy: (tabId) => ipcRenderer.invoke('yayra:webview-destroy', { tabId }),
+    // Autofill saved credentials into the page's login form (Chrome-style).
+    fillCredentials: (tabId, { username, password } = {}) => ipcRenderer.invoke('yayra:webview-fill-credentials', { tabId, username, password }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on(WEBVIEW_EVENT_CHANNEL, listener);

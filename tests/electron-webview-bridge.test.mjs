@@ -99,10 +99,12 @@ function createFakeWebContentsView() {
   };
 }
 
-function makeHarness({ authHosts } = {}) {
+function makeHarness({ authHosts, autofillPreloadPath } = {}) {
   const handlers = new Map();
+  const listeners = new Map();
   const ipcMain = {
-    handle: (channel, fn) => handlers.set(channel, fn)
+    handle: (channel, fn) => handlers.set(channel, fn),
+    on: (channel, fn) => listeners.set(channel, fn)
   };
   const sentEvents = [];
   const fakeWin = {
@@ -118,8 +120,11 @@ function makeHarness({ authHosts } = {}) {
   const externalCalls = [];
   const shell = { openExternal: async (url) => { externalCalls.push(url); } };
   const views = [];
-  const WebContentsView = function FakeWebContentsView() {
+  const WebContentsView = function FakeWebContentsView(opts) {
     const view = createFakeWebContentsView();
+    view.__options = opts || null;
+    view.webContents.sent = [];
+    view.webContents.send = (channel, payload) => view.webContents.sent.push({ channel, payload });
     views.push(view);
     return view;
   };
@@ -142,10 +147,11 @@ function makeHarness({ authHosts } = {}) {
     clipboard,
     getMainWindow: () => fakeWin,
     authHosts,
+    autofillPreloadPath,
     logger: { error: () => {} }
   });
 
-  return { bridge, handlers, sentEvents, fakeWin, externalCalls, views, clipboardWrites, popupCalls };
+  return { bridge, handlers, listeners, sentEvents, fakeWin, externalCalls, views, clipboardWrites, popupCalls };
 }
 
 test('webview bridge: creating a tab adds a WebContentsView as a child view and loads the URL', async () => {
@@ -522,4 +528,64 @@ test('webview bridge: set-visible(false) without capture, or with a failing capt
   const failed = await handlers.get('yayra:webview-set-visible')(null, { tabId: 'tab-1', visible: false, capture: true });
   assert.equal(failed, undefined, 'capture failure degrades to a plain hide');
   assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 0, height: 0 });
+});
+
+/* -----------------------------------------------------------------
+ * Chrome-style password capture / autofill routing
+ * ----------------------------------------------------------------- */
+
+test('autofill: page views get the sandboxed autofill preload when configured', async () => {
+  const { handlers, views } = makeHarness({ autofillPreloadPath: '/fake/autofillPreload.cjs' });
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-af', url: 'https://site.dev/' });
+  const prefs = views[0].__options.webPreferences;
+  assert.equal(prefs.preload, '/fake/autofillPreload.cjs');
+  assert.equal(prefs.sandbox, true, 'preload must not weaken the sandbox');
+  assert.equal(prefs.contextIsolation, true);
+  assert.equal(prefs.nodeIntegration, false);
+});
+
+test('autofill: captured login from a page view routes to the owning shell window', async () => {
+  const { handlers, listeners, sentEvents, views } = makeHarness({ autofillPreloadPath: '/fake/p.cjs' });
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-cap', url: 'https://site.dev/login' });
+
+  const viewWc = views[0].webContents;
+  listeners.get('yayra:autofill-captured')({ sender: viewWc }, {
+    url: 'https://site.dev/login', username: 'ada', password: 'pw-1'
+  });
+
+  const evt = sentEvents.find((e) => e.payload && e.payload.type === 'autofill-captured');
+  assert.ok(evt, 'capture must be forwarded to the shell renderer');
+  assert.equal(evt.payload.tabId, 'tab-cap', 'un-namespaced tabId for the renderer');
+  assert.equal(evt.payload.username, 'ada');
+  assert.equal(evt.payload.password, 'pw-1');
+});
+
+test('autofill: private (incognito) views NEVER forward captured credentials', async () => {
+  const { handlers, listeners, sentEvents, views } = makeHarness({ autofillPreloadPath: '/fake/p.cjs' });
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-priv', url: 'https://site.dev/', isPrivate: true });
+
+  listeners.get('yayra:autofill-captured')({ sender: views[0].webContents }, {
+    url: 'https://site.dev/login', username: 'ada', password: 'pw-1'
+  });
+  assert.equal(sentEvents.filter((e) => e.payload && e.payload.type === 'autofill-captured').length, 0);
+});
+
+test('autofill: fill-credentials pushes saved credentials into the right page view (never private ones)', async () => {
+  const { handlers, views } = makeHarness({ autofillPreloadPath: '/fake/p.cjs' });
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-fill', url: 'https://site.dev/' });
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-p', url: 'https://other.dev/', isPrivate: true });
+
+  const result = await handlers.get('yayra:webview-fill-credentials')(null, {
+    tabId: 'tab-fill', username: 'ada', password: 'pw-9'
+  });
+  assert.equal(result.filled, true);
+  const pushed = views[0].webContents.sent.find((m) => m.channel === 'yayra:autofill-fill');
+  assert.ok(pushed, 'credentials pushed to the page preload');
+  assert.equal(pushed.payload.password, 'pw-9');
+
+  const privResult = await handlers.get('yayra:webview-fill-credentials')(null, {
+    tabId: 'tab-p', username: 'ada', password: 'pw-9'
+  });
+  assert.equal(privResult.filled, false, 'private views are never autofilled');
+  assert.equal(views[1].webContents.sent.filter((m) => m.channel === 'yayra:autofill-fill').length, 0);
 });

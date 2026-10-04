@@ -114,7 +114,10 @@ function registerIpcBridges() {
     Menu,
     clipboard,
     getMainWindow: () => mainWindow,
-    getWindowForWebContents: (wc) => BrowserWindow.fromWebContents(wc)
+    getWindowForWebContents: (wc) => BrowserWindow.fromWebContents(wc),
+    // Chrome-style password capture/fill inside real pages (sandboxed
+    // preload, nothing exposed to the page) - see autofillPreload.cjs.
+    autofillPreloadPath: path.join(__dirname, 'autofillPreload.cjs')
   });
 
   // "Sign in with Google" for Yayra's own app-level identity. See
