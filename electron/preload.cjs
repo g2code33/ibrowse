@@ -158,7 +158,10 @@ const api = {
   // manager and real desktop shortcuts for "Create shortcut...".
   system: {
     appMetrics: () => ipcRenderer.invoke('yayra:app-metrics'),
-    createShortcut: ({ url, title } = {}) => ipcRenderer.invoke('yayra:create-shortcut', { url, title })
+    createShortcut: ({ url, title } = {}) => ipcRenderer.invoke('yayra:create-shortcut', { url, title }),
+    // Chrome-style "Install page as app...": real launcher entries that
+    // reopen the site in its own minimal app window (yayra --app=<url>).
+    installPageAsApp: ({ url, title } = {}) => ipcRenderer.invoke('yayra:install-page-as-app', { url, title })
   }
 };
 

@@ -6,7 +6,8 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
-const { createWebviewBridge, buildContextMenuTemplate } = require('./webviewBridge.cjs');
+const { createWebviewBridge, buildContextMenuTemplate, buildBrowserUserAgent } = require('./webviewBridge.cjs');
+const { parseAppModeUrl, buildInstallPlan } = require('./appMode.cjs');
 const { createAuthBridge } = require('./authBridge.cjs');
 const { createAuthStore } = require('./authStore.cjs');
 const { signInWithGoogle } = require('./googleAuth.cjs');
@@ -62,11 +63,56 @@ const isPrimaryInstance = app.requestSingleInstanceLock();
 if (!isPrimaryInstance) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // An installed site-app shortcut was launched while Yayra is already
+    // running: open THAT site's app window, not the browser.
+    const appUrl = parseAppModeUrl(argv || []);
+    if (appUrl) { createAppModeWindow(appUrl); return; }
     if (overlayBridge) overlayBridge.restoreMainWindow();
     else if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
     else createWindow();
   });
+}
+
+// Launched via an installed "Install page as app..." shortcut
+// (`yayra --app=<url>`)? Then this process opens ONLY the site's own
+// minimal app window - exactly like chrome --app=<url>.
+const appModeLaunchUrl = parseAppModeUrl(process.argv);
+
+/**
+ * Chrome-style app window for an installed site: the page IS the window
+ * (own taskbar presence, no tabs/omnibox). Popups/external links go to
+ * the user's default browser, like Chrome app windows hand them off.
+ */
+function createAppModeWindow(url) {
+  let hostname = 'app';
+  try { hostname = new URL(url).hostname; } catch { /* keep default */ }
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    autoHideMenuBar: true,
+    backgroundColor: '#101218',
+    title: hostname,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  try {
+    win.webContents.setUserAgent(buildBrowserUserAgent({ platform: process.platform, chromeVersion: process.versions.chrome }));
+  } catch { /* default UA still works */ }
+  win.webContents.setWindowOpenHandler(({ url: target }) => {
+    try { if (/^https?:\/\//i.test(target)) shell.openExternal(target); } catch { /* best effort */ }
+    return { action: 'deny' };
+  });
+  // Keep the window title honest: the site's own <title>.
+  win.webContents.on('page-title-updated', (e, pageTitle) => {
+    e.preventDefault();
+    try { win.setTitle(pageTitle || hostname); } catch { /* closing */ }
+  });
+  win.loadURL(url);
+  return win;
 }
 
 app.whenReady().then(async () => {
@@ -96,8 +142,14 @@ app.whenReady().then(async () => {
   // channel throws.
   registerIpcBridges();
   const isSmokeStartup = process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1';
-  // Boot launch: bubble + tray only. Manual launch: full browser window.
-  if (!isAutostartLaunch || isSmokeStartup) createWindow();
+  // Launched from an installed site-app shortcut: only the site's own
+  // app window opens - no browser window, like chrome --app=<url>.
+  if (appModeLaunchUrl && !isSmokeStartup) {
+    createAppModeWindow(appModeLaunchUrl);
+  } else if (!isAutostartLaunch || isSmokeStartup) {
+    // Boot launch: bubble + tray only. Manual launch: full browser window.
+    createWindow();
+  }
 
   // The floating overlay bubble is intentionally started independently of
   // createWindow()/the main browser window - see electron/overlayWindow.cjs
@@ -253,6 +305,54 @@ function registerIpcBridges() {
       };
     } catch (err) {
       console.error('[yayra] app metrics failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // Menu > Save and share > Install page as app...: Chrome-style site
+  // installation. Writes a REAL launcher entry (desktop + applications
+  // menu on Linux, desktop + Start Menu .lnk on Windows) that reopens
+  // the site in its own minimal app window via `yayra --app=<url>` -
+  // see createAppModeWindow() + electron/appMode.cjs.
+  ipcMain.handle('yayra:install-page-as-app', (_event, { url, title } = {}) => {
+    try {
+      const iconCandidate = path.join(__dirname, '..', 'build', 'icons', 'hicolor', '256x256', 'apps', 'yayra.png');
+      const plan = buildInstallPlan({
+        platform: process.platform,
+        execPath: process.execPath,
+        url,
+        title,
+        desktopDir: app.getPath('desktop'),
+        applicationsDir: process.platform === 'linux'
+          ? path.join(os.homedir(), '.local', 'share', 'applications')
+          : null,
+        startMenuDir: process.platform === 'win32'
+          ? path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+          : null,
+        iconPath: fs.existsSync(iconCandidate) ? iconCandidate : null
+      });
+      if (!plan.ok) return plan;
+      let primaryPath = null;
+      for (const artifact of plan.artifacts) {
+        try {
+          fs.mkdirSync(path.dirname(artifact.path), { recursive: true });
+          if (artifact.kind === 'shortcut') {
+            if (typeof shell.writeShortcutLink !== 'function' || !shell.writeShortcutLink(artifact.path, artifact.options)) {
+              continue;
+            }
+          } else {
+            fs.writeFileSync(artifact.path, artifact.contents, 'utf8');
+            if (artifact.executable) { try { fs.chmodSync(artifact.path, 0o755); } catch { /* best effort */ } }
+          }
+          if (!primaryPath) primaryPath = artifact.path;
+        } catch (err) {
+          console.error('[yayra] install-as-app artifact failed', artifact.path, err);
+        }
+      }
+      if (!primaryPath) return { ok: false, reason: 'write-failed' };
+      return { ok: true, name: plan.name, path: primaryPath, inLauncher: plan.inLauncher };
+    } catch (err) {
+      console.error('[yayra] install page as app failed', err);
       return { ok: false, reason: 'failed' };
     }
   });

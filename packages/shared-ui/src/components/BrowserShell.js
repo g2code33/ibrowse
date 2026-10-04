@@ -5252,6 +5252,36 @@ export class BrowserShell {
     this.showTransientNotice("Saving full pages needs the desktop app - use your browser's Ctrl+S here.");
   }
 
+  /**
+   * Chrome-style "Install page as app...": on the desktop app the site
+   * gets a REAL launcher entry (desktop icon + applications menu /
+   * Start Menu) that reopens it in its own minimal app window - like a
+   * PWA install. Honest messages where the platform can't do it.
+   */
+  async installPageAsApp() {
+    const tab = this.getActiveTab();
+    if (!tab || !/^https?:\/\//i.test(String(tab.url || ''))) {
+      this.showTransientNotice('Open a website first - internal pages can\'t be installed as apps.');
+      return;
+    }
+    if (this.systemBridge && typeof this.systemBridge.installPageAsApp === 'function') {
+      try {
+        const res = await this.systemBridge.installPageAsApp({ url: tab.url, title: tab.title || tab.url });
+        if (res && res.ok) {
+          this.showTransientNotice(`Installed "${res.name}" - it's on your desktop${res.inLauncher ? ' and in your apps menu' : ''}, and opens in its own window.`);
+          return;
+        }
+        if (res && res.reason === 'unsupported-platform') {
+          this.showTransientNotice('Installing pages as apps is not supported on macOS yet - use "Create shortcut..." instead.');
+          return;
+        }
+        this.showTransientNotice(`Couldn't install the app${res && res.reason ? ` (${res.reason})` : ''}.`);
+        return;
+      } catch { /* fall through to the honest message */ }
+    }
+    this.showTransientNotice('Installing sites as apps needs the Yayra desktop app - in a browser, use its own "Install" / "Add to home screen".');
+  }
+
   /** Real desktop shortcut for the current page (desktop app only). */
   async createShortcutForActivePage() {
     const tab = this.getActiveTab();
@@ -7207,6 +7237,7 @@ export class BrowserShell {
 
             <div class="fb-submenu-section-label">Save</div>
             <button class="fb-drawer-item fb-dr-save-page">${Icons.save} <span>Save page as...</span> <kbd>Ctrl+S</kbd></button>
+            <button class="fb-drawer-item fb-dr-install-app">${Icons.download} <span>Install page as app...</span></button>
             <button class="fb-drawer-item fb-dr-open-pharmagame">${Icons.sparkles} <span>Open in pharmaGAME Ai</span></button>
             <button class="fb-drawer-item fb-dr-create-shortcut">${Icons.externalLink} <span>Create shortcut...</span></button>
 
@@ -7505,6 +7536,12 @@ export class BrowserShell {
     drawer.querySelector('.fb-dr-open-pharmagame')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
       this.navigateActiveTab('https://github.com/g2code33/pharmaTRACK_PERFECT_new');
+    });
+
+    drawer.querySelector('.fb-dr-install-app')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.render();
+      this.installPageAsApp();
     });
 
     drawer.querySelector('.fb-dr-create-shortcut')?.addEventListener('click', () => {
