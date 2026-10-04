@@ -85,6 +85,10 @@ const api = {
     showInFolder: (id) => ipcRenderer.invoke('yayra:downloads-show-in-folder', { id }),
     getRoot: () => ipcRenderer.invoke('yayra:downloads-get-root'),
     chooseRoot: () => ipcRenderer.invoke('yayra:downloads-choose-root'),
+    cancel: (id) => ipcRenderer.invoke('yayra:downloads-cancel', { id }),
+    pause: (id) => ipcRenderer.invoke('yayra:downloads-pause', { id }),
+    resume: (id) => ipcRenderer.invoke('yayra:downloads-resume', { id }),
+    retry: (id) => ipcRenderer.invoke('yayra:downloads-retry', { id }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on(DOWNLOADS_EVENT_CHANNEL, listener);

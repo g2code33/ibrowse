@@ -67,6 +67,11 @@ function createDownloadsBridge({
     win.webContents.send(DOWNLOADS_EVENT_CHANNEL, { type, ...payload });
   }
 
+  // Live Electron DownloadItem handles for IN-PROGRESS downloads, keyed by
+  // our record id - what makes cancel/pause/resume real actions instead of
+  // decorations. Entries are dropped the moment a download settles.
+  const activeItems = new Map();
+
   function attachItem(item) {
     const id = idFactory();
     let dir;
@@ -98,6 +103,7 @@ function createDownloadsBridge({
       date: 'Just now'
     };
     downloadsStore.addOrUpdateItem(record);
+    activeItems.set(id, item);
     send('started', record);
 
     item.on('updated', (_event, state) => {
@@ -127,6 +133,7 @@ function createDownloadsBridge({
         completedAt: new Date().toISOString()
       };
       downloadsStore.addOrUpdateItem(updated);
+      activeItems.delete(id);
       send('done', updated);
     });
 
@@ -184,6 +191,73 @@ function createDownloadsBridge({
     }
   }
 
+  async function handleCancel(_event, { id } = {}) {
+    const item = activeItems.get(id);
+    if (!item) return { ok: false, error: 'not_active' };
+    try {
+      item.cancel();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  async function handlePause(_event, { id } = {}) {
+    const item = activeItems.get(id);
+    if (!item || typeof item.pause !== 'function') return { ok: false, error: 'not_active' };
+    try {
+      item.pause();
+      const { items } = downloadsStore.load();
+      const record = items.find((it) => it.id === id);
+      if (record) {
+        const updated = { ...record, state: 'Paused' };
+        downloadsStore.addOrUpdateItem(updated);
+        send('progress', updated);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  async function handleResume(_event, { id } = {}) {
+    const item = activeItems.get(id);
+    if (!item) return { ok: false, error: 'not_active' };
+    try {
+      if (typeof item.canResume === 'function' && !item.canResume()) return { ok: false, error: 'cannot_resume' };
+      item.resume();
+      const { items } = downloadsStore.load();
+      const record = items.find((it) => it.id === id);
+      if (record) {
+        const updated = { ...record, state: 'Downloading' };
+        downloadsStore.addOrUpdateItem(updated);
+        send('progress', updated);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  // Retry a FAILED/CANCELLED download: re-request the original URL, which
+  // flows through will-download again and produces a fresh record; the old
+  // failed row is removed so the list never shows a confusing duplicate.
+  async function handleRetry(_event, { id } = {}) {
+    const { items } = downloadsStore.load();
+    const record = items.find((it) => it.id === id);
+    if (!record) return { ok: false, error: 'not_found' };
+    if (!record.url) return { ok: false, error: 'no_url' };
+    const win = getMainWindow?.();
+    if (!win || win.isDestroyed()) return { ok: false, error: 'no_window' };
+    try {
+      downloadsStore.removeItem(id);
+      win.webContents.downloadURL(record.url);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
   async function handleGetRoot() {
     return { root: downloadsStore.getDownloadRoot() };
   }
@@ -211,6 +285,10 @@ function createDownloadsBridge({
   ipcMain.handle('yayra:downloads-show-in-folder', handleShowInFolder);
   ipcMain.handle('yayra:downloads-get-root', handleGetRoot);
   ipcMain.handle('yayra:downloads-choose-root', handleChooseRoot);
+  ipcMain.handle('yayra:downloads-cancel', handleCancel);
+  ipcMain.handle('yayra:downloads-pause', handlePause);
+  ipcMain.handle('yayra:downloads-resume', handleResume);
+  ipcMain.handle('yayra:downloads-retry', handleRetry);
 
   return {
     attachItem,
@@ -221,7 +299,12 @@ function createDownloadsBridge({
     handleOpen,
     handleShowInFolder,
     handleGetRoot,
-    handleChooseRoot
+    handleChooseRoot,
+    handleCancel,
+    handlePause,
+    handleResume,
+    handleRetry,
+    _activeItems: activeItems
   };
 }
 

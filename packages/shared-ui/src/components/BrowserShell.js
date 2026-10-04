@@ -281,6 +281,10 @@ export class BrowserShell {
       // Persistent top-right account menu (see renderAccountDropdown()) -
       // separate from the Settings > Account page, which stays available too.
       isAccountMenuOpen: false,
+      // Chrome-style downloads dropdown under the toolbar download button
+      // (see renderDownloadsDropdown()) - tracks downloads without ever
+      // yanking the user to the yayra://downloads page.
+      isDownloadsDropdownOpen: false,
       // True while a transient popup that is NOT part of render() (omnibox
       // search-suggestion dropdown) is covering the page area. On Electron
       // the native page surface must be hidden for the popup to be seen at
@@ -461,6 +465,7 @@ export class BrowserShell {
       s.activeModal ||
       s.isSecurityDropdownOpen ||
       s.isAccountMenuOpen ||
+      s.isDownloadsDropdownOpen ||
       s.isFloatingMiniOpen ||
       s.isRadialLauncherOpen ||
       (s.findInPage && s.findInPage.isOpen) ||
@@ -700,14 +705,10 @@ export class BrowserShell {
         console.warn('Failed to load downloads in BrowserShell:', err);
       }
       if (typeof this.downloadsBridge.onEvent === 'function') {
-        this.downloadsBridge.onEvent((payload) => {
-          const items = this.state.downloadsItems.slice();
-          const idx = items.findIndex((it) => it.id === payload.id);
-          if (idx === -1) items.unshift(payload);
-          else items[idx] = { ...items[idx], ...payload };
-          this.state.downloadsItems = items;
-          this.render();
-        });
+        // Smart handling: per-chunk progress updates the toolbar ring and
+        // any visible dropdown row IN PLACE; only started/done (structural
+        // changes) trigger a full render. See handleDownloadEvent().
+        this.downloadsBridge.onEvent((payload) => this.handleDownloadEvent(payload));
       }
     }
 
@@ -839,6 +840,12 @@ export class BrowserShell {
     // Persistent Account Dropdown (top-right account button)
     if (this.state.isAccountMenuOpen) {
       this.renderAccountDropdown(shell);
+    }
+
+    // Downloads dropdown (latest 5 + state-aware actions) under the
+    // toolbar download button - tracking without leaving the page.
+    if (this.state.isDownloadsDropdownOpen) {
+      this.renderDownloadsDropdown(shell);
     }
 
     // Chrome-style "Keep your browsing separate?" profile suggestion
@@ -1339,12 +1346,21 @@ export class BrowserShell {
     }
 
     // Requirement 10: Downloads Button (Transparent, Compact, Matching Star Size)
+    // Smart: while anything is downloading it wears a revolving progress
+    // ring tracking the live percentage (updated in place - see
+    // updateDownloadIndicator()). Clicking opens the downloads DROPDOWN
+    // (latest 5 + actions), never yanking the user to a new tab - the
+    // full yayra://downloads page is one button away inside it.
     const dlBtn = document.createElement('button');
     dlBtn.className = 'fb-action-btn fb-btn-downloads fb-toolbar-downloads-btn fb-toolbar-action-btn';
-    dlBtn.setAttribute('title', 'Downloads (Ctrl+J)');
     dlBtn.setAttribute('aria-label', 'Downloads');
-    dlBtn.innerHTML = Icons.download;
-    dlBtn.addEventListener('click', () => this.openInternalPage('yayra://downloads'));
+    dlBtn.innerHTML = `${this.renderDownloadRingHtml()}${Icons.download}`;
+    dlBtn.setAttribute('title', this.describeDownloadActivity());
+    dlBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.state.isDownloadsDropdownOpen = !this.state.isDownloadsDropdownOpen;
+      this.render();
+    });
     toolbarActions.appendChild(dlBtn);
 
     // Requirement 10: Extensions & Shields Button (Transparent, Compact, Matching Star Size)
@@ -7290,6 +7306,307 @@ export class BrowserShell {
       if (elTabId !== tabId) continue;
       const favicon = tabEl.querySelector?.('.fb-tab-favicon');
       if (favicon) favicon.innerHTML = this.getTabFavicon(tab);
+    }
+  }
+
+  /* -------------------------------------------------------------
+   * SMART DOWNLOADS: progress ring + dropdown tracker
+   * -----------------------------------------------------------
+   * The toolbar download button wears a revolving ring tracking the live
+   * download percentage, and opens a Chrome-style dropdown (latest 5,
+   * state-aware actions) instead of yanking the user to a new tab. Live
+   * progress updates are surgical (ring + open row only) - a full
+   * re-render per network chunk would flicker and steal focus.
+   * ----------------------------------------------------------- */
+  activeDownloads() {
+    return (this.state.downloadsItems || []).filter((it) => it.state === 'Downloading' || it.state === 'Paused');
+  }
+
+  /** Aggregate percent across in-flight downloads; null = indeterminate. */
+  downloadProgressSummary() {
+    const active = this.activeDownloads();
+    if (!active.length) return { active: 0, percent: null };
+    let received = 0;
+    let total = 0;
+    for (const it of active) {
+      if (Number(it.sizeBytes) > 0) {
+        total += Number(it.sizeBytes);
+        received += Number(it.receivedBytes) || 0;
+      }
+    }
+    return { active: active.length, percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null };
+  }
+
+  renderDownloadRingHtml() {
+    const { active, percent } = this.downloadProgressSummary();
+    if (!active) return '';
+    const c = 2 * Math.PI * 14; // viewBox circle r=14
+    const offset = percent === null ? c * 0.75 : c * (1 - percent / 100);
+    return `
+      <svg class="fb-dl-ring${percent === null ? ' indeterminate' : ''}" viewBox="0 0 32 32" aria-hidden="true">
+        <circle class="fb-dl-ring-track" cx="16" cy="16" r="14"/>
+        <circle class="fb-dl-ring-fill" cx="16" cy="16" r="14" style="stroke-dasharray:${c.toFixed(2)}; stroke-dashoffset:${offset.toFixed(2)};"/>
+      </svg>`;
+  }
+
+  describeDownloadActivity() {
+    const { active, percent } = this.downloadProgressSummary();
+    if (!active) return 'Downloads (Ctrl+J)';
+    return `Downloading ${active} file${active === 1 ? '' : 's'}${percent === null ? '…' : ` - ${percent}%`}`;
+  }
+
+  /** Normalized handler for every downloads bridge event. */
+  handleDownloadEvent(payload) {
+    if (!payload || !payload.id) return;
+    const { type, ...item } = payload;
+    const items = this.state.downloadsItems.slice();
+    const idx = items.findIndex((it) => it.id === item.id);
+    if (idx === -1) items.unshift(item);
+    else items[idx] = { ...items[idx], ...item };
+    this.state.downloadsItems = items;
+
+    if (type === 'progress') {
+      // Per-chunk: ring + visible dropdown row only. NEVER a full render.
+      this.updateDownloadIndicator(items[idx === -1 ? 0 : idx]);
+      return;
+    }
+    // started / done: structural change - rows and actions change shape.
+    this.render();
+    if (type === 'done') {
+      const merged = items[idx === -1 ? 0 : idx];
+      if (merged.state === 'Completed') {
+        this.showTransientNotice(`Download complete: ${merged.filename}`);
+      } else if (merged.state === 'Failed') {
+        this.showTransientNotice(`Download failed: ${merged.filename} - retry from the downloads menu.`);
+      }
+    }
+  }
+
+  /** Surgical in-place refresh of the ring and any visible dropdown row. */
+  updateDownloadIndicator(item) {
+    if (typeof document === 'undefined') return;
+    const root = this.rootElement || document;
+    if (!root || typeof root.querySelector !== 'function') return;
+
+    const btn = root.querySelector('.fb-toolbar-downloads-btn');
+    if (btn) {
+      btn.innerHTML = `${this.renderDownloadRingHtml()}${Icons.download}`;
+      btn.setAttribute('title', this.describeDownloadActivity());
+    }
+
+    if (!item || !this.state.isDownloadsDropdownOpen) return;
+    for (const row of root.querySelectorAll('.fb-dl-item') || []) {
+      const rowId = (row.dataset && row.dataset.dlId)
+        || (typeof row.getAttribute === 'function' ? row.getAttribute('data-dl-id') : null);
+      if (rowId !== item.id) continue;
+      const fill = row.querySelector?.('.fb-dl-progress-fill');
+      if (fill && typeof item.progress === 'number') fill.style.width = `${item.progress}%`;
+      const meta = row.querySelector?.('.fb-dl-meta');
+      if (meta) meta.textContent = this.describeDownloadItem(item);
+    }
+  }
+
+  describeDownloadItem(item) {
+    const size = item.size || '';
+    switch (item.state) {
+      case 'Downloading':
+        return typeof item.progress === 'number'
+          ? `${item.progress}% of ${size || 'unknown size'}`
+          : `Downloading… ${size}`;
+      case 'Paused': return `Paused${typeof item.progress === 'number' ? ` at ${item.progress}%` : ''} - ${size}`;
+      case 'Completed': return `${size}${item.date ? ` - ${item.date}` : ''}`;
+      case 'Cancelled': return 'Cancelled';
+      case 'Failed': return 'Failed - the file was not saved';
+      default: return size;
+    }
+  }
+
+  downloadStateIconHtml(item) {
+    switch (item.state) {
+      case 'Downloading': return `<span class="fb-dl-state-icon st-progress">${Icons.download}</span>`;
+      case 'Paused': return `<span class="fb-dl-state-icon st-paused">${Icons.pause}</span>`;
+      case 'Completed': return `<span class="fb-dl-state-icon st-done">${Icons.check}</span>`;
+      case 'Failed': return `<span class="fb-dl-state-icon st-failed">${Icons.alertTriangle}</span>`;
+      case 'Cancelled': return `<span class="fb-dl-state-icon st-failed">${Icons.stop}</span>`;
+      default: return `<span class="fb-dl-state-icon">${Icons.download}</span>`;
+    }
+  }
+
+  /**
+   * State-aware action set - what shows (and what must NOT) per state:
+   *  - Downloading: pause, cancel, copy address. ALWAYS visible (a stop
+   *    must never hide behind a hover). No open/show-in-folder (no file).
+   *  - Paused: resume, cancel, copy address. Always visible.
+   *  - Completed: open, show in folder, copy file path, copy address,
+   *    open address in tab, remove. Hover-revealed on pointer devices,
+   *    always visible on touch (android/web).
+   *  - Failed/Cancelled: retry (always visible), copy address, open
+   *    address in tab, remove. Never open/show-in-folder (nothing saved).
+   */
+  downloadItemActionsHtml(item) {
+    const hasBridge = Boolean(this.downloadsBridge);
+    const act = (action, title, icon, extraClass = '') =>
+      `<button class="fb-dl-act ${extraClass}" data-dl-action="${action}" title="${title}" aria-label="${title}">${icon}</button>`;
+    if (item.state === 'Downloading') {
+      return `<span class="fb-dl-item-actions fb-dl-actions-always">
+        ${hasBridge ? act('pause', 'Pause download', Icons.pause) : ''}
+        ${hasBridge ? act('cancel', 'Cancel download', Icons.stop) : ''}
+        ${item.url ? act('copy-url', 'Copy download address', Icons.copy) : ''}
+      </span>`;
+    }
+    if (item.state === 'Paused') {
+      return `<span class="fb-dl-item-actions fb-dl-actions-always">
+        ${hasBridge ? act('resume', 'Resume download', Icons.play) : ''}
+        ${hasBridge ? act('cancel', 'Cancel download', Icons.stop) : ''}
+        ${item.url ? act('copy-url', 'Copy download address', Icons.copy) : ''}
+      </span>`;
+    }
+    if (item.state === 'Completed') {
+      return `<span class="fb-dl-item-actions fb-dl-actions-reveal">
+        ${hasBridge ? act('open', 'Open file', Icons.externalLink) : ''}
+        ${hasBridge ? act('show', 'Show in folder', Icons.folder) : ''}
+        ${hasBridge && item.path ? act('copy-path', 'Copy file path', Icons.save) : ''}
+        ${item.url ? act('copy-url', 'Copy download address', Icons.copy) : ''}
+        ${item.url ? act('open-url', 'Open download address in a tab', Icons.globe) : ''}
+        ${hasBridge ? act('remove', 'Remove from list', Icons.trash) : ''}
+      </span>`;
+    }
+    // Failed / Cancelled
+    return `<span class="fb-dl-item-actions fb-dl-actions-reveal">
+      ${(hasBridge && item.url) ? act('retry', 'Retry download', Icons.refresh, 'fb-dl-act-retry fb-dl-act-always') : ''}
+      ${item.url ? act('copy-url', 'Copy download address', Icons.copy) : ''}
+      ${item.url ? act('open-url', 'Open download address in a tab', Icons.globe) : ''}
+      ${hasBridge ? act('remove', 'Remove from list', Icons.trash) : ''}
+    </span>`;
+  }
+
+  renderDownloadsDropdown(root) {
+    this.appendDropdownScrim(root, () => {
+      this.state.isDownloadsDropdownOpen = false;
+      this.render();
+    });
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'fb-downloads-dropdown';
+    const latest = (this.state.downloadsItems || []).slice(0, 5);
+
+    const rows = latest.map((item) => `
+      <div class="fb-dl-item st-${String(item.state || '').toLowerCase()}" data-dl-id="${item.id}">
+        ${this.downloadStateIconHtml(item)}
+        <span class="fb-dl-item-main">
+          <strong class="fb-dl-item-name" title="${item.filename || ''}">${item.filename || 'download'}</strong>
+          ${item.state === 'Downloading' || item.state === 'Paused' ? `
+            <span class="fb-dl-progress"><span class="fb-dl-progress-fill" style="width:${typeof item.progress === 'number' ? item.progress : 15}%;"></span></span>` : ''}
+          <small class="fb-dl-meta">${this.describeDownloadItem(item)}</small>
+        </span>
+        ${this.downloadItemActionsHtml(item)}
+      </div>
+    `).join('');
+
+    dropdown.innerHTML = `
+      <div class="fb-downloads-dropdown-header">
+        <strong>Downloads</strong>
+        ${this.activeDownloads().length ? `<small>${this.describeDownloadActivity()}</small>` : ''}
+      </div>
+      <div class="fb-downloads-dropdown-list">
+        ${latest.length ? rows : `<p class="fb-dl-empty">${this.downloadsBridge
+          ? 'No downloads yet - files you download will appear here.'
+          : 'Downloads appear here on the Yayra desktop app. This browser handles file saving natively.'}</p>`}
+      </div>
+      <button class="fb-btn fb-btn-secondary fb-dl-open-page" style="width:100%;">${Icons.download} Open Yayra Downloads</button>
+    `;
+
+    dropdown.querySelector('.fb-dl-open-page')?.addEventListener('click', () => {
+      this.state.isDownloadsDropdownOpen = false;
+      this.openInternalPage('yayra://downloads');
+    });
+
+    for (const row of dropdown.querySelectorAll('.fb-dl-item')) {
+      const id = (row.dataset && row.dataset.dlId) || row.getAttribute?.('data-dl-id');
+      for (const btn of row.querySelectorAll('.fb-dl-act')) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const action = (btn.dataset && btn.dataset.dlAction) || btn.getAttribute?.('data-dl-action');
+          this.performDownloadAction(id, action);
+        });
+      }
+    }
+
+    root.appendChild(dropdown);
+  }
+
+  async performDownloadAction(id, action) {
+    const item = (this.state.downloadsItems || []).find((it) => it.id === id);
+    if (!item || !action) return;
+    const bridge = this.downloadsBridge;
+    const copy = (value, notice) => {
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(value);
+          this.showTransientNotice(notice);
+        }
+      } catch { /* clipboard unavailable */ }
+    };
+    switch (action) {
+      case 'open': {
+        const res = await bridge?.open?.(id);
+        if (res && res.ok === false) this.showTransientNotice(`Couldn't open file: ${res.error || 'unknown error'}`);
+        break;
+      }
+      case 'show': {
+        const res = await bridge?.showInFolder?.(id);
+        if (res && res.ok === false) this.showTransientNotice(`Couldn't show in folder: ${res.error || 'unknown error'}`);
+        break;
+      }
+      case 'copy-path':
+        if (item.path) copy(item.path, 'File path copied');
+        break;
+      case 'copy-url':
+        if (item.url) copy(item.url, 'Download address copied');
+        break;
+      case 'open-url':
+        if (item.url) {
+          this.state.isDownloadsDropdownOpen = false;
+          this.createNewTab();
+          this.navigateActiveTab(item.url);
+        }
+        break;
+      case 'pause':
+        await bridge?.pause?.(id);
+        break;
+      case 'resume':
+        await bridge?.resume?.(id);
+        break;
+      case 'cancel': {
+        const res = await bridge?.cancel?.(id);
+        if (res?.ok) this.showTransientNotice(`Cancelled: ${item.filename}`);
+        break;
+      }
+      case 'retry': {
+        const res = await bridge?.retry?.(id);
+        if (res?.ok) {
+          // The failed row is replaced by the fresh attempt's record.
+          this.state.downloadsItems = this.state.downloadsItems.filter((it) => it.id !== id);
+          this.showTransientNotice(`Retrying: ${item.filename}`);
+          this.render();
+        } else {
+          this.showTransientNotice(`Couldn't retry: ${res?.error || 'unknown error'}`);
+        }
+        break;
+      }
+      case 'remove': {
+        if (bridge?.remove) {
+          const res = await bridge.remove(id);
+          if (res?.items) this.state.downloadsItems = res.items;
+          else this.state.downloadsItems = this.state.downloadsItems.filter((it) => it.id !== id);
+        } else {
+          this.state.downloadsItems = this.state.downloadsItems.filter((it) => it.id !== id);
+        }
+        this.render();
+        break;
+      }
+      default:
+        break;
     }
   }
 
