@@ -56,10 +56,36 @@ if (process.platform === 'linux') {
   // --ozone-platform=wayland) - and on native Wayland the compositor
   // refuses BOTH programmatic window moves and always-on-top, which is
   // exactly "the bubble cannot be moved and does not overlay apps".
-  // Hard-force the x11 backend (XWayland on Wayland sessions; every
-  // Ubuntu/GNOME Wayland session ships XWayland).
-  app.commandLine.appendSwitch('ozone-platform', 'x11');
+  // Hard-force the x11 backend (XWayland on Wayland sessions) - but ONLY
+  // when an X display is actually reachable. Forcing x11 with no
+  // $DISPLAY makes Chromium abort before any window exists ("the app is
+  // not opening at all"), so without one we fall back to the hint and
+  // keep launching on whatever backend works.
+  const display = typeof process.env.DISPLAY === 'string' ? process.env.DISPLAY.trim() : '';
+  if (display !== '') {
+    app.commandLine.appendSwitch('ozone-platform', 'x11');
+  } else {
+    console.warn('[yayra] no $DISPLAY - not forcing the x11 backend; bubble drag/topmost may be limited on native Wayland');
+  }
 }
+
+// A startup crash must NEVER be silent (a dead process with no window
+// looks like "the app is not opening at all"). Surface it in a native
+// error box when possible and always append it to a log file next to
+// the user data, so there is something actionable to report.
+process.on('uncaughtException', (err) => {
+  const detail = `[${new Date().toISOString()}] uncaughtException\n${err && err.stack ? err.stack : String(err)}\n`;
+  try {
+    const dir = app.getPath('userData');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'startup-error.log'), detail);
+  } catch { /* disk unavailable - still try to show the box */ }
+  try { console.error(detail); } catch { /* stderr gone */ }
+  try {
+    const { dialog } = require('electron');
+    if (app.isReady()) dialog.showErrorBox('Yayra hit an unexpected error', String(err && err.stack ? err.stack : err));
+  } catch { /* headless / too early */ }
+});
 if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.commandLine.appendSwitch('headless');
   app.disableHardwareAcceleration();
