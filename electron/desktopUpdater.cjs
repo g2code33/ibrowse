@@ -258,6 +258,18 @@ function registerDesktopUpdateHandlers({
             if (code === 0) {
               logger(`${UPDATE_LOG_PREFIX} package installed - relaunching on the new version`);
               emit(event, { type: 'install-finished', version: version || null, relaunching: true });
+              // app.relaunch() alone proved unreliable in the field on
+              // Linux ("installs, quits, never reopens"): a detached
+              // shell that waits for this process to die and then starts
+              // the installed launcher is unconditional. /usr/bin/yayra
+              // (the wrapper, when present) also guarantees the reopened
+              // app comes up on the x11 backend.
+              try {
+                let launcher = process.execPath;
+                try { if (fsImpl.existsSync('/usr/bin/yayra')) launcher = '/usr/bin/yayra'; } catch { /* keep execPath */ }
+                const reopener = spawnImpl('/bin/sh', ['-c', `sleep 2; exec "${launcher}"`], { detached: true, stdio: 'ignore' });
+                reopener?.unref?.();
+              } catch { /* app.relaunch below still tries */ }
               setTimeoutImpl(() => {
                 try { appImpl.relaunch?.(); } catch { /* best effort */ }
                 try { appImpl.quit?.(); } catch { /* already quitting */ }

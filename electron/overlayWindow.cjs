@@ -959,6 +959,57 @@ function createOverlayBridge({
   }
 
   /* -------------------------------------------------------------
+   * Menu-driven "Move bubble": the bubble glides with the cursor
+   * (no button held) until the user clicks it to drop it. This is
+   * the classic coarse-pointer-friendly move from the old versions -
+   * restored alongside normal dragging, and it works even when a
+   * misbehaving WM eats pointer-drag events.
+   * ----------------------------------------------------------- */
+  let moveModeTimer = null;
+  let moveModeDeadline = null;
+
+  function startBubbleMoveMode() {
+    if (!overlayWin || overlayWin.isDestroyed()) return false;
+    stopBubbleMoveMode({ persist: false });
+    endBubbleDrag({ persist: false });
+    if (!screen || typeof screen.getCursorScreenPoint !== 'function' || typeof setInterval !== 'function') return false;
+    const size = overlayStore.load().size || 64;
+    moveModeTimer = setInterval(() => {
+      try {
+        if (!overlayWin || overlayWin.isDestroyed()) { stopBubbleMoveMode({ persist: false }); return; }
+        const p = screen.getCursorScreenPoint();
+        const target = clampToVisibleArea(p.x - Math.round(size / 2), p.y - Math.round(size / 2), size);
+        overlayWin.setPosition(target.x, target.y);
+      } catch { /* screen API raced shutdown */ }
+    }, 16);
+    if (moveModeTimer && typeof moveModeTimer.unref === 'function') moveModeTimer.unref();
+    // A missed click must never leave the bubble glued to the cursor.
+    if (typeof setTimeout === 'function') {
+      moveModeDeadline = setTimeout(() => stopBubbleMoveMode({ persist: true }), 30000);
+      if (moveModeDeadline && typeof moveModeDeadline.unref === 'function') moveModeDeadline.unref();
+    }
+    return true;
+  }
+
+  /** @returns {boolean} true when move mode WAS active (the click dropped the bubble). */
+  function stopBubbleMoveMode({ persist = true } = {}) {
+    if (!moveModeTimer) return false;
+    clearInterval(moveModeTimer);
+    moveModeTimer = null;
+    if (moveModeDeadline) { clearTimeout(moveModeDeadline); moveModeDeadline = null; }
+    if (persist) {
+      try {
+        if (overlayWin && !overlayWin.isDestroyed() && typeof overlayWin.getPosition === 'function') {
+          const [x, y] = overlayWin.getPosition();
+          overlayStore.save({ position: { x, y } });
+          assertTopmost(overlayWin);
+        }
+      } catch { /* best-effort persistence only */ }
+    }
+    return true;
+  }
+
+  /* -------------------------------------------------------------
    * Radial menu (AssistiveTouch-style): double-tapping the bubble
    * expands its tiny always-on-top window into a RADIAL_SIZE square
    * centered on the bubble, and the renderer shows a ring of circular
@@ -1265,6 +1316,14 @@ function createOverlayBridge({
       { label: 'Open full browser', click: () => restoreMainWindow() },
       { type: 'separator' },
       {
+        label: 'Move bubble (follows your cursor - click it to drop)',
+        click: () => {
+          // Explicit menu action: moving is the user's intent, so a
+          // position lock never blocks it - just moves the locked spot.
+          startBubbleMoveMode();
+        }
+      },
+      {
         label: locked ? 'Unlock movement (or triple-click)' : 'Lock position here (or triple-click)',
         click: () => togglePositionLock()
       },
@@ -1419,14 +1478,23 @@ function createOverlayBridge({
   ipcMain.on('yayra:overlay-restore', () => restoreMainWindow());
   // Single bubble click: toggle the floating mini browser (independent of
   // the main window). Right-click: quick menu with full-browser/quit.
-  ipcMain.on('yayra:overlay-bubble-click', () => toggleMiniPanel());
+  ipcMain.on('yayra:overlay-bubble-click', () => {
+    if (stopBubbleMoveMode({ persist: true })) return; // click = drop here
+    toggleMiniPanel();
+  });
   ipcMain.on('yayra:overlay-bubble-menu', () => openBubbleMenu());
   // Settled tap-count gestures from the bubble renderer: 1 = mini,
   // 2 = full browser, 3 = lock/unlock position (see handleBubbleTap).
-  ipcMain.on('yayra:overlay-bubble-tap', (_e, count) => handleBubbleTap(count));
+  ipcMain.on('yayra:overlay-bubble-tap', (_e, count) => {
+    if (stopBubbleMoveMode({ persist: true })) return; // click = drop here
+    handleBubbleTap(count);
+  });
   // Manual drag loop (replaces the native drag region that swallowed all
   // left-button events): follow the OS cursor until pointerup.
-  ipcMain.on('yayra:overlay-drag-start', (_e, offset) => beginBubbleDrag(offset));
+  ipcMain.on('yayra:overlay-drag-start', (_e, offset) => {
+    if (stopBubbleMoveMode({ persist: true })) return;
+    beginBubbleDrag(offset);
+  });
   ipcMain.on('yayra:overlay-drag-move', (_e, point) => moveBubbleDrag(point));
   ipcMain.on('yayra:overlay-drag-end', () => endBubbleDrag());
   // A circular button in the double-tap radial menu was pressed

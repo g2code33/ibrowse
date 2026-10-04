@@ -2392,6 +2392,7 @@ export class BrowserShell {
         this.updateTabLoading(tabId, false);
         break;
       case 'navigated': {
+        const previousUrl = tab.url;
         tab.url = evt.url || tab.url;
         tab.isSecure = (tab.url || '').startsWith('https://');
         tab.canGoBack = Boolean(evt.canGoBack);
@@ -2412,13 +2413,19 @@ export class BrowserShell {
         if (tabId === this.state.activeTabId) {
           this.state.urlInputValue = this.getDisplayUrl(tab.url);
           this.updateBookmarkState(tab.url);
-          this.render();
+          // A reload reports the SAME url - rebuilding the whole chrome
+          // for it is the "blink on refresh". Only a real address change
+          // needs a full render; reloads update surgically in place.
+          if (tab.url === previousUrl) this.refreshNavigationUi(tab);
+          else this.render();
         }
         break;
       }
       case 'title-updated':
         tab.title = evt.title || tab.title;
-        if (tabId === this.state.activeTabId) this.render();
+        // Surgical in-place label update - a full render here made every
+        // page load (and every SPA title tick) flash the whole chrome.
+        this.refreshTabTitleUi(tabId);
         break;
       case 'favicon-updated':
         tab.favicon = evt.favicon || tab.favicon;
@@ -3663,6 +3670,13 @@ export class BrowserShell {
               </div>
               <input type="checkbox" id="fb-in-set-restore-session" ${this.state.settings.restoreSessionOnLaunch !== false ? 'checked' : ''} />
             </div>
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Auto-refresh Background Tabs</strong>
+                <p>Inactive tabs reload every 5 minutes so they always show current content when you switch back.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-auto-refresh-tabs" ${this.state.settings.autoRefreshBackgroundTabs !== false ? 'checked' : ''} />
+            </div>
           </section>
 
           <!-- Downloads -->
@@ -3833,6 +3847,7 @@ export class BrowserShell {
     bindToggle('#fb-in-set-https', (on) => { this.state.settings.httpsFirst = on; });
     bindToggle('#fb-in-set-adblock', (on) => { this.state.settings.adBlockEnabled = on; });
     bindToggle('#fb-in-set-restore-session', (on) => { this.state.settings.restoreSessionOnLaunch = on; });
+    bindToggle('#fb-in-set-auto-refresh-tabs', (on) => { this.state.settings.autoRefreshBackgroundTabs = on; });
     bindToggle('#fb-in-set-floating-default', (on) => { this.state.settings.floatingEnabledByDefault = on; });
 
     // Transparency/size sliders already preview live on 'input'; persist
@@ -5658,6 +5673,13 @@ export class BrowserShell {
     this._bgRefreshTimer = window.setInterval(() => {
       this.backgroundRefreshTick().catch(() => {});
     }, 4000);
+    // Background TABS auto-refresh: inactive sites reload on a cadence so
+    // switching to them shows CURRENT content, never a stale snapshot.
+    if (!this._tabAutoRefreshTimer) {
+      this._tabAutoRefreshTimer = window.setInterval(() => {
+        try { this.autoRefreshBackgroundTabs(); } catch { /* never break the shell */ }
+      }, 60 * 1000);
+    }
     this._bgStorageListener = (e) => {
       // Another same-profile window wrote shared state - sync right away.
       if (e && e.key && !String(e.key).startsWith('yayra')) return;
@@ -5666,11 +5688,52 @@ export class BrowserShell {
     window.addEventListener('storage', this._bgStorageListener);
   }
 
+  /**
+   * Keep every BACKGROUND tab fresh: an inactive http(s) tab that has
+   * not completed a load for 5+ minutes is reloaded in place, so
+   * switching back to it shows live content instead of a page frozen
+   * at whatever state it had when the user left ("looks like it is
+   * still loading until I manually refresh"). The active tab is never
+   * touched (the user is interacting with it), loading tabs are
+   * skipped, and the cadence restarts from each completed load.
+   * Settings > "Auto-refresh background tabs" turns this off.
+   */
+  autoRefreshBackgroundTabs() {
+    if (this.state.settings.autoRefreshBackgroundTabs === false) return;
+    const now = Date.now();
+    const maxAgeMs = 5 * 60 * 1000;
+    for (const tab of this.state.tabs) {
+      if (tab.id === this.state.activeTabId) continue;
+      if (tab.isLoading) continue;
+      if (!/^https?:\/\//i.test(tab.url || '')) continue;
+      if (!tab.lastLoadCompletedAt) {
+        // No load stamp yet (tab restored from a session) - start the
+        // clock now instead of instantly reloading everything at boot.
+        tab.lastLoadCompletedAt = now;
+        continue;
+      }
+      if (now - tab.lastLoadCompletedAt < maxAgeMs) continue;
+      tab.lastLoadCompletedAt = now;
+      if (this.nativeWebview && this._nativeWebviewTabIds.has(tab.id)) {
+        this.nativeWebview.reload(tab.id).catch(() => {});
+      } else if (this.webFrames && this.webFrames.has(tab.id)) {
+        const frame = this.webFrames.get(tab.id);
+        // Re-assigning src IS the reload for a pooled iframe (the only
+        // reload a cross-origin frame allows).
+        try { if (frame && frame.iframe && frame.url) frame.iframe.src = frame.url; } catch { /* frame gone */ }
+      }
+    }
+  }
+
   stopBackgroundRefresh() {
     if (this._bgRefreshTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
       window.clearInterval(this._bgRefreshTimer);
     }
     this._bgRefreshTimer = null;
+    if (this._tabAutoRefreshTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+      window.clearInterval(this._tabAutoRefreshTimer);
+    }
+    this._tabAutoRefreshTimer = null;
     if (this._bgStorageListener && typeof window !== 'undefined') {
       window.removeEventListener('storage', this._bgStorageListener);
       this._bgStorageListener = null;
@@ -9445,6 +9508,9 @@ export class BrowserShell {
     if (tab) {
       const changed = tab.isLoading !== Boolean(isLoading);
       tab.isLoading = Boolean(isLoading);
+      // Drives the background-tab auto-refresh cadence: 5 minutes from
+      // the last COMPLETED load, not from some arbitrary boot clock.
+      if (changed && !tab.isLoading) tab.lastLoadCompletedAt = Date.now();
       const countEl = this.rootElement?.querySelector('.fb-page-loading-bar');
       if (countEl) countEl.style.display = isLoading ? 'block' : 'none';
       if (changed) this.refreshLoadingUi(tabId);
@@ -9463,6 +9529,36 @@ export class BrowserShell {
    * native views (loading-start/loading-stop events), web/PWA iframes
    * (load events), desktop and mobile toolbars alike.
    */
+  /**
+   * Surgical back/forward button state for same-URL navigations
+   * (reloads): no full re-render, so refreshing never blinks.
+   */
+  refreshNavigationUi(tab) {
+    if (typeof document === 'undefined' || !tab) return;
+    const root = this.rootElement;
+    if (!root || typeof root.querySelector !== 'function') return;
+    const backBtn = root.querySelector('.fb-nav-back');
+    if (backBtn) backBtn.disabled = !tab.canGoBack;
+    const fwdBtn = root.querySelector('.fb-nav-forward');
+    if (fwdBtn) fwdBtn.disabled = !tab.canGoForward;
+  }
+
+  /** Surgical tab-strip label update (title changes never blink the chrome). */
+  refreshTabTitleUi(tabId) {
+    if (typeof document === 'undefined') return;
+    const tab = this.state.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const root = this.rootElement;
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    for (const tabEl of root.querySelectorAll('.fb-tab-item') || []) {
+      const elTabId = (tabEl.dataset && tabEl.dataset.tabId)
+        || (typeof tabEl.getAttribute === 'function' ? tabEl.getAttribute('data-tab-id') : null);
+      if (elTabId !== tabId) continue;
+      const label = typeof tabEl.querySelector === 'function' ? tabEl.querySelector('.fb-tab-title') : null;
+      if (label) label.textContent = tab.title || 'New Tab';
+    }
+  }
+
   refreshLoadingUi(tabId) {
     if (typeof document === 'undefined') return;
     const tab = this.state.tabs.find((t) => t.id === tabId);
