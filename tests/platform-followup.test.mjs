@@ -28,8 +28,13 @@ test('official branding and universal suggestion placement use the uploaded asse
   assert.match(worker, /UPDATES_MANIFEST_JSON/);
   assert.match(workerConfig, /name\s*=\s*"yayra-updates-api"/);
   assert.match(workerConfig, /workers_dev\s*=\s*true/);
-  assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 8px\)/);
-  assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*bottom:\s*calc\(100% \+ 10px\)/);
+  // Omnibox suggestions drop DIRECTLY BELOW the search bar (Chrome-style)
+  // on desktop/new-tab/mini; only the bottom-anchored mobile search sheet
+  // opens upward (its bar sits at the bottom of the screen, above the
+  // keyboard).
+  assert.match(css, /\.fb-search-suggestions\s*\{[\s\S]*?top:\s*calc\(100% \+ 8px\)/);
+  assert.match(css, /\.fb-newtab-searchbox \.fb-search-suggestions\s*\{[\s\S]*?top:\s*calc\(100% \+ 10px\)/);
+  assert.match(css, /#fb-mobile-search-form \.fb-search-suggestions\s*\{[\s\S]*?bottom:\s*calc\(100% \+ 10px\)/);
 });
 
 test('PWA and dev preview restrict pinch zoom and resize with the mobile keyboard', async () => {

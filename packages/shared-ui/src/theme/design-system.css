@@ -3755,14 +3755,20 @@ html {
   position: relative;
 }
 
+/* Default (desktop omnibox, mini omnibox, new-tab search): the dropdown
+   opens DIRECTLY BELOW the search bar, Chrome-style. Only the bottom-
+   anchored mobile search sheet (#fb-mobile-search-form below) opens
+   upward, because there the bar sits at the bottom of the screen above
+   the keyboard. */
 .fb-search-suggestions {
   position: absolute;
-  top: auto;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
+  bottom: auto;
   left: 0;
   right: 0;
   z-index: 2500;
-  overflow: hidden;
+  overflow: hidden auto;
+  max-height: min(60vh, 420px);
   padding: 6px;
   border: 1px solid var(--fb-border-glass);
   border-radius: 18px;
@@ -3773,8 +3779,8 @@ html {
 }
 
 .fb-newtab-searchbox .fb-search-suggestions {
-  top: auto;
-  bottom: calc(100% + 10px);
+  top: calc(100% + 10px);
+  bottom: auto;
 }
 
 .fb-search-suggestion {
