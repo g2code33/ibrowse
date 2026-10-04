@@ -131,5 +131,12 @@
     "name": "g2code33",
     "email": "support@yayra.app"
   },
-  "desktopName": "yayra"
+  "desktopName": "yayra",
+  "overrides": {
+    "tar": "^7.5.21",
+    "http-cache-semantics": "^4.3.0",
+    "@capacitor/cli": {
+      "tar": "~6.2.1"
+    }
+  }
 }

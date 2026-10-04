@@ -9,7 +9,12 @@ release/
 /ios/
 *.log
 .DS_Store
+# Google OAuth client configs are deployment-specific secrets/IDs and must
+# never be committed. Covers the existing Electron config plus the Web/PWA
+# and Capacitor configs introduced by the cross-platform sign-in work.
 electron/google-auth.config.json
+**/google-auth*.config.json
+**/google-auth*.config.local.*
 __pycache__/
 *.patch
 *.patch.b64
