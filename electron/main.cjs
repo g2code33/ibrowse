@@ -46,26 +46,39 @@ protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { sta
 // (drag) and always-on-top stacking - both of which native Wayland
 // windows simply do not get (the compositor refuses external positioning
 // and ignores the above hint). Running through XWayland (x11 backend)
-// keeps every bubble behavior working on Wayland desktops too, so pin
-// the hint even when the environment (ELECTRON_OZONE_PLATFORM_HINT=auto/
-// wayland) would have picked native Wayland.
+// keeps every bubble behavior working on Wayland desktops too.
+//
+// CRITICAL: on a Wayland desktop the BROWSER process picks its ozone
+// backend before this script runs, so appendSwitch('ozone-platform',
+// 'x11') here reaches only the child processes - the browser keeps
+// Wayland window handles while GPU/viz come up on x11. That mismatch is
+// a GPU crash loop (exit_code=139) plus "XGetWindowAttributes failed
+// for window 1/2", and NOTHING ever paints: the app looks like it is
+// not opening at all. The only reliable way to force x11 is to have the
+// switch on the real command line - so when we detect a Wayland session
+// with XWayland available, we relaunch ourselves ONCE with it.
+let relaunchingForX11 = false;
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
-  // The hint alone can still lose to a distro/env override (e.g.
-  // ELECTRON_OZONE_PLATFORM_HINT=wayland or a desktop file passing
-  // --ozone-platform=wayland) - and on native Wayland the compositor
-  // refuses BOTH programmatic window moves and always-on-top, which is
-  // exactly "the bubble cannot be moved and does not overlay apps".
-  // Hard-force the x11 backend (XWayland on Wayland sessions) - but ONLY
-  // when an X display is actually reachable. Forcing x11 with no
-  // $DISPLAY makes Chromium abort before any window exists ("the app is
-  // not opening at all"), so without one we fall back to the hint and
-  // keep launching on whatever backend works.
   const display = typeof process.env.DISPLAY === 'string' ? process.env.DISPLAY.trim() : '';
-  if (display !== '') {
-    app.commandLine.appendSwitch('ozone-platform', 'x11');
-  } else {
-    console.warn('[yayra] no $DISPLAY - not forcing the x11 backend; bubble drag/topmost may be limited on native Wayland');
+  const waylandDisplay = typeof process.env.WAYLAND_DISPLAY === 'string' ? process.env.WAYLAND_DISPLAY.trim() : '';
+  // An explicit --ozone-platform on the command line (ours after the
+  // relaunch, or the user's own choice) is always respected - it is
+  // also what makes this a one-shot instead of a relaunch loop.
+  const argvHasOzonePlatform = process.argv.some((arg) => typeof arg === 'string' && arg.startsWith('--ozone-platform='));
+  if (!argvHasOzonePlatform && waylandDisplay !== '' && display !== '') {
+    relaunchingForX11 = true;
+    const relaunchOpts = { args: process.argv.slice(1).concat(['--ozone-platform=x11']) };
+    // AppImage: relaunch the AppImage itself, not the binary inside the
+    // temporary mount (which disappears with this process).
+    if (typeof process.env.APPIMAGE === 'string' && process.env.APPIMAGE.trim() !== '') {
+      relaunchOpts.execPath = process.env.APPIMAGE;
+    }
+    console.log('[yayra] Wayland session with XWayland detected - relaunching once with --ozone-platform=x11 so the bubble can move and stay above every app');
+    app.relaunch(relaunchOpts);
+    app.exit(0);
+  } else if (display === '') {
+    console.warn('[yayra] no $DISPLAY - staying on the native backend; bubble drag/topmost may be limited on native Wayland');
   }
 }
 
@@ -129,8 +142,12 @@ if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
 // manual launch - the classic cause of TWO floating bubbles) just focuses
 // the existing instance instead of spawning a duplicate app + duplicate
 // bubble.
-const isPrimaryInstance = app.requestSingleInstanceLock();
-if (!isPrimaryInstance) {
+// (Skipped while relaunching for x11: this process is already exiting
+// and must not grab the lock the relaunched instance needs.)
+const isPrimaryInstance = relaunchingForX11 ? false : app.requestSingleInstanceLock();
+if (relaunchingForX11) {
+  // app.exit() already scheduled - nothing else to set up.
+} else if (!isPrimaryInstance) {
   // Exiting with NO output looks exactly like "the app is not opening
   // at all" when the primary instance is wedged - say so out loud.
   console.log('[yayra] another Yayra process already holds the single-instance lock - signaled it to come to the front and exiting this duplicate. If no window appeared, the resident process is stuck: run `pkill -9 -f yayra` and launch again.');
