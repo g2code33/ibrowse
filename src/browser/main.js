@@ -105,6 +105,14 @@ if (root) {
   try {
     windowProfileId = new URLSearchParams(window.location.search).get('profile') || null;
   } catch { /* no usable location (tests) */ }
+  // Deep-link boot param: the bubble's radial menu / right-click "Ask
+  // Yayra AI" opens the mini shell straight on an internal page
+  // (?page=yayra://ai) - see electron/overlayWindow.cjs openMiniPanelAt.
+  let bootPage = null;
+  try {
+    const rawPage = new URLSearchParams(window.location.search).get('page');
+    if (rawPage && rawPage.startsWith('yayra://')) bootPage = rawPage;
+  } catch { /* no usable location (tests) */ }
   const browserShell = new BrowserShell({
     container: root,
     platform: target,
@@ -114,7 +122,7 @@ if (root) {
     // WebContentsView engine through the same preload bridge.
     isMobile: isMiniShell || ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
     updateService: service,
-    initialUrl: 'yayra://newtab'
+    initialUrl: bootPage || 'yayra://newtab'
   });
   browserShell.initialize().then(() => {
     browserShell.render(root);

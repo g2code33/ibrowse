@@ -7575,6 +7575,7 @@ export class BrowserShell {
     if (trimmed === 'passwords') return 'yayra://passwords';
     if (trimmed === 'extensions') return 'yayra://extensions';
     if (trimmed === 'permissions') return 'yayra://permissions';
+    if (trimmed === 'ai') return 'yayra://ai';
     if (trimmed === 'about') return 'yayra://about';
 
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {

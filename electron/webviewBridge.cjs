@@ -301,12 +301,22 @@ function buildContextMenuTemplate({ params, wc, tabId, send, clipboard }) {
       {
         label: `Search Google for "${shortText}"`,
         click: () => send(tabId, 'new-window-request', { url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}` })
+      },
+      {
+        // Chrome-style AI option on selected text: hands the selection to
+        // the yayra://ai page, which auto-asks it (see BrowserShell
+        // renderInternalAiPage + services/aiService.js).
+        label: `Ask Yayra AI about "${shortText}"`,
+        click: () => send(tabId, 'new-window-request', { url: `yayra://ai?q=${encodeURIComponent(trimmed)}` })
       }
     );
   }
 
   if (template.length) template.push({ type: 'separator' });
   template.push(
+    // Always available, Chrome-style: open the in-browser AI chat.
+    { label: 'Ask Yayra AI', click: () => send(tabId, 'new-window-request', { url: 'yayra://ai' }) },
+    { type: 'separator' },
     { label: 'Back', enabled: historyCanGoBack(wc), click: () => historyGoBack(wc) },
     { label: 'Forward', enabled: historyCanGoForward(wc), click: () => historyGoForward(wc) },
     { label: 'Reload', click: () => wc.reload() },

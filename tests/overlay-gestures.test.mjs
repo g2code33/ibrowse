@@ -9,7 +9,8 @@
  * native drag region entirely: dragging is a manual cursor-follow loop
  * in the main process, and real pointer events drive tap gestures:
  *   1 tap  -> toggle the floating mini browser
- *   2 taps -> open/restore the full browser
+ *   2 taps -> toggle the AssistiveTouch-style RADIAL MENU of circular
+ *             action buttons (Yayra AI / mini / full / lock / hide / quit)
  *   3 taps -> LOCK the bubble position where it is; 3 more taps unlock.
  *
  * Covered here: the gesture dispatcher, the drag loop (including its
@@ -61,6 +62,11 @@ function makeFakeBrowserWindowClass() {
     setMovable(flag) { this.movable = flag; }
     setPosition(x, y) { this._position = [x, y]; }
     getPosition() { return this._position; }
+    setBounds(bounds) {
+      this.bounds = { ...bounds };
+      this._position = [bounds.x, bounds.y];
+      this._listeners.moved?.();
+    }
     loadURL(url) { this.loadedUrl = url; }
     on(event, cb) { this._listeners[event] = cb; }
     hide() { this.hidden = true; }
@@ -114,15 +120,18 @@ test('bubble HTML: NO native drag region (it swallowed left clicks) + pointer ge
   assert.ok(html.includes("api.tap"), 'settled tap counts are sent to the main process');
   assert.ok(html.includes('dragStart') && html.includes('dragEnd'), 'manual drag bridges present');
   assert.ok(html.includes('contextmenu'), 'right-click menu still wired');
-  // Still only the logo - the no-circle contract holds.
-  assert.ok(!html.includes('radial-gradient') && !html.includes('border-radius:50%'));
+  // Still only the logo - the no-circle contract holds for the BUBBLE
+  // (the radial menu's circular buttons are a separate hidden layer).
+  const bubbleRule = /#bubble\s*\{[^}]*\}/.exec(html)?.[0] || '';
+  assert.ok(!html.includes('radial-gradient') && bubbleRule && !bubbleRule.includes('border-radius'));
 });
 
 /* ------------------------------ tap gestures ------------------------------ */
 
-test('gestures: 1 tap toggles the mini browser, 2 taps opens the full browser', () => {
-  const { bridge, instances, mainWindowCalls } = makeHarness();
+test('gestures: 1 tap toggles the mini browser, 2 taps opens the RADIAL circular-button menu', () => {
+  const { bridge, instances } = makeHarness();
   bridge.ensureOverlayWindow();
+  const bubble = instances[0];
 
   bridge.handleBubbleTap(1);
   const mini = bridge.getMiniWindow();
@@ -130,9 +139,95 @@ test('gestures: 1 tap toggles the mini browser, 2 taps opens the full browser', 
   bridge.handleBubbleTap(1);
   assert.equal(mini.hidden, true, 'second single-tap toggles it away');
 
+  const before = [...bubble.getPosition()];
   bridge.handleBubbleTap(2);
-  assert.ok(mainWindowCalls.includes('create'), 'double tap opens/restores the FULL browser');
-  assert.equal(instances[0].isDestroyed(), false, 'bubble itself stays');
+  assert.equal(bridge.isRadialOpen(), true, 'double tap opens the radial menu');
+  assert.equal(bubble.bounds.width, 300, 'window expanded to host the ring of buttons');
+  assert.deepEqual(bubble.sent.at(-1).channel, 'yayra:overlay-radial', 'renderer told to show the ring');
+  assert.equal(bubble.sent.at(-1).payload.open, true);
+
+  bridge.handleBubbleTap(2);
+  assert.equal(bridge.isRadialOpen(), false, 'double tap again closes it');
+  assert.equal(bubble.bounds.width, 64, 'window shrank back to bubble size');
+  assert.deepEqual(bubble.getPosition(), before, 'bubble back exactly where it was');
+  assert.equal(bubble.isDestroyed(), false, 'bubble itself stays');
+});
+
+test('radial: single tap while open just closes the menu (no accidental mini)', () => {
+  const { bridge } = makeHarness();
+  bridge.ensureOverlayWindow();
+  bridge.handleBubbleTap(2);
+  assert.equal(bridge.isRadialOpen(), true);
+  bridge.handleBubbleTap(1);
+  assert.equal(bridge.isRadialOpen(), false);
+  assert.equal(bridge.getMiniWindow(), null, 'mini did NOT open from the closing tap');
+});
+
+test('radial: the AI button opens yayra mini directly on the yayra://ai page', () => {
+  const { bridge } = makeHarness();
+  bridge.ensureOverlayWindow();
+  bridge.handleBubbleTap(2);
+
+  bridge.handleRadialAction('ai');
+  assert.equal(bridge.isRadialOpen(), false, 'menu closes');
+  const mini = bridge.getMiniWindow();
+  assert.ok(mini, 'mini opened');
+  assert.ok(mini.loadedUrl.includes('page=yayra%3A%2F%2Fai'), `mini deep-links to the AI page: ${mini.loadedUrl}`);
+});
+
+test('radial: full/mini/lock/hide buttons all do their real actions', () => {
+  const { bridge, mainWindowCalls, overlayStore } = makeHarness();
+  bridge.ensureOverlayWindow();
+
+  bridge.handleBubbleTap(2);
+  bridge.handleRadialAction('full');
+  assert.ok(mainWindowCalls.includes('create'), 'full-browser button opens/restores the main window');
+  assert.equal(bridge.isRadialOpen(), false);
+
+  bridge.handleBubbleTap(2);
+  bridge.handleRadialAction('mini');
+  assert.ok(bridge.getMiniWindow(), 'mini button opens yayra mini');
+
+  bridge.handleBubbleTap(2);
+  bridge.handleRadialAction('lock');
+  assert.equal(overlayStore.load().positionLocked, true, 'lock button = the triple-click lock');
+  assert.equal(bridge.isRadialOpen(), true, 'menu stays open so the icon flip is visible');
+  bridge.handleRadialAction('lock');
+  assert.equal(overlayStore.load().positionLocked, false);
+
+  bridge.handleRadialAction('hide');
+  assert.equal(bridge.getOverlayWindow(), null, 'hide button disables the bubble');
+  assert.equal(overlayStore.load().enabled, false);
+});
+
+test('radial: bubble HTML renders the ring - Yayra AI button included - and wires the actions', () => {
+  const { bridge, instances } = makeHarness();
+  bridge.ensureOverlayWindow();
+  const html = decodeURIComponent(instances[0].loadedUrl.replace('data:text/html;charset=utf-8,', ''));
+
+  assert.ok(html.includes('id="radial"'), 'radial container present');
+  for (const action of ['ai', 'mini', 'full', 'lock', 'hide', 'quit', 'close']) {
+    assert.ok(html.includes(`data-action="${action}"`), `circular button for "${action}"`);
+  }
+  assert.ok(html.includes('Ask Yayra AI'), 'AI button labelled');
+  assert.ok(html.includes('radialAction'), 'buttons report back to the main process');
+  assert.ok(html.includes('onRadial'), 'renderer listens for open/close from the main process');
+});
+
+test('radial: dragging is refused while the menu is open, and the enlarged position is never persisted', async () => {
+  const { bridge, overlayStore, screenState } = makeHarness({ cursor: { x: 500, y: 300 } });
+  bridge.ensureOverlayWindow();
+  const savedBefore = overlayStore.load().position;
+
+  bridge.handleBubbleTap(2);
+  assert.equal(bridge.beginBubbleDrag({ x: 0, y: 0 }), false, 'no dragging the expanded menu');
+  screenState.cursor = { x: 900, y: 900 };
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(overlayStore.load().position, savedBefore, 'radial setBounds did not pollute the saved bubble position');
+
+  bridge.handleBubbleTap(2); // close
+  assert.equal(bridge.beginBubbleDrag({ x: 0, y: 0 }), true, 'dragging works again once closed');
+  bridge.endBubbleDrag({ persist: false });
 });
 
 test('gestures: 3 taps locks the position, 3 more unlocks - persisted and announced to the bubble', () => {
@@ -167,6 +262,7 @@ test('gestures: IPC channels are registered for tap, drag and the settings lock 
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-bubble-tap'));
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-drag-start'));
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-drag-end'));
+  assert.ok(ipcMain.onHandlers.has('yayra:overlay-radial-action'));
   assert.ok(ipcMain.handlers.has('yayra:overlay-set-position-locked'));
 
   // The settings toggle mirrors the triple-click.

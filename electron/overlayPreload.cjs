@@ -17,6 +17,14 @@ contextBridge.exposeInMainWorld('yayraOverlay', {
   // swallow left-button events, which was the "clicking does nothing" bug).
   dragStart: (offset) => ipcRenderer.send('yayra:overlay-drag-start', offset),
   dragEnd: () => ipcRenderer.send('yayra:overlay-drag-end'),
+  // Double-tap radial menu: a circular button was pressed
+  // (ai / mini / full / lock / hide / quit / close).
+  radialAction: (action) => ipcRenderer.send('yayra:overlay-radial-action', action),
+  onRadial: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('yayra:overlay-radial', listener);
+    return () => ipcRenderer.removeListener('yayra:overlay-radial', listener);
+  },
   onLockChanged: (callback) => {
     const listener = (_event, locked) => callback(locked);
     ipcRenderer.on('yayra:overlay-lock-changed', listener);

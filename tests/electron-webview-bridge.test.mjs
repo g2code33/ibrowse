@@ -361,6 +361,39 @@ test('buildContextMenuTemplate: selected text offers Copy + Search Google for ".
   assert.match(sent[0].url, /google\.com\/search\?q=hello%20world/);
 });
 
+test('buildContextMenuTemplate: selected text also offers Ask Yayra AI about "..." (Chrome-style AI option)', () => {
+  const sent = [];
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {}, copy: () => {} };
+  const template = buildContextMenuTemplate({
+    params: { selectionText: 'hello world' },
+    wc,
+    tabId: 'tab-1',
+    send: (tabId, type, payload) => sent.push({ type, payload }),
+    clipboard: { writeText: () => {} }
+  });
+  const aiItem = findItem(template, 'Ask Yayra AI about "hello world"');
+  assert.ok(aiItem, 'AI item present on selections');
+  aiItem.click();
+  assert.equal(sent[0].type, 'new-window-request');
+  assert.equal(sent[0].payload.url, 'yayra://ai?q=hello%20world', 'selection handed to the AI page, which auto-asks it');
+});
+
+test('buildContextMenuTemplate: every right-click offers a general Ask Yayra AI entry', () => {
+  const sent = [];
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {} };
+  const template = buildContextMenuTemplate({
+    params: { x: 1, y: 1 },
+    wc,
+    tabId: 't1',
+    send: (tabId, type, payload) => sent.push(payload),
+    clipboard: { writeText: () => {} }
+  });
+  const aiItem = findItem(template, 'Ask Yayra AI');
+  assert.ok(aiItem, 'AI entry present even with nothing selected');
+  aiItem.click();
+  assert.equal(sent[0].url, 'yayra://ai', 'opens the in-browser AI chat page');
+});
+
 test('buildContextMenuTemplate: editable fields offer Cut/Copy/Paste/Undo/Redo/Select All honoring editFlags', () => {
   const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {} };
   const template = buildContextMenuTemplate({

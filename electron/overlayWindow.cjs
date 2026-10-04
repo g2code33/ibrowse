@@ -51,6 +51,10 @@
  * see tests/overlay-window.test.mjs.
  */
 
+// Square size (px) the bubble window expands to while the radial menu of
+// circular action buttons is open (double-tap the bubble to toggle it).
+const RADIAL_SIZE = 300;
+
 function createOverlayBridge({
   BrowserWindow,
   app,
@@ -94,6 +98,11 @@ function createOverlayBridge({
   // Manual drag loop (the bubble has NO native drag region - drag regions
   // swallow left-button events, which broke clicking entirely).
   let dragTimer = null;
+  // AssistiveTouch-style radial menu state: double-tap expands the bubble
+  // window into a ring of circular action buttons (Yayra AI, mini, full
+  // browser, lock, hide, quit) and remembers the bounds to shrink back to.
+  let radialOpen = false;
+  let radialRestoreBounds = null;
 
   /**
    * Force a window back to the top of the OS z-order.
@@ -240,6 +249,38 @@ function createOverlayBridge({
     const bubbleContent = logo
       ? `<img id="bubble" src="${logo}" alt="" draggable="false" />`
       : `<div id="bubble"><span id="monogram">Y</span></div>`;
+    // Radial ring geometry: 6 circular buttons evenly spaced around the
+    // center of the RADIAL_SIZE square, AssistiveTouch-style.
+    const C = RADIAL_SIZE / 2;
+    const RING_R = 95;
+    const BTN = 54;
+    const ringPos = (index, total) => {
+      const angle = (index / total) * 2 * Math.PI - Math.PI / 2; // start at top
+      const x = Math.round(C + RING_R * Math.cos(angle) - BTN / 2);
+      const y = Math.round(C + RING_R * Math.sin(angle) - BTN / 2);
+      return `left:${x}px; top:${y}px;`;
+    };
+    const icons = {
+      ai: '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M9.5 2L8 6.5 3.5 8 8 9.5 9.5 14 11 9.5 15.5 8 11 6.5zM17.5 11l-1 3-3 1 3 1 1 3 1-3 3-1-3-1z"/></svg>',
+      mini: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="7" y="3" rx="2"/><path d="M3 7v12a2 2 0 0 0 2 2h12"/></svg>',
+      full: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20M12 2a14.5 14.5 0 0 1 0 20M2 12h20"/></svg>',
+      lockClosed: '<svg class="ic-locked" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+      lockOpen: '<svg class="ic-unlocked" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>',
+      hide: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>',
+      quit: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" x2="12" y1="2" y2="12"/></svg>',
+      close: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+    };
+    const ringButtons = [
+      { action: 'ai', label: 'Ask Yayra AI', icon: icons.ai, cls: 'radial-btn-ai' },
+      { action: 'mini', label: 'Open yayra mini', icon: icons.mini, cls: '' },
+      { action: 'full', label: 'Open full browser', icon: icons.full, cls: '' },
+      { action: 'lock', label: 'Lock / unlock position', icon: icons.lockClosed + icons.lockOpen, cls: 'radial-btn-lock' },
+      { action: 'hide', label: 'Hide bubble', icon: icons.hide, cls: '' },
+      { action: 'quit', label: 'Quit Yayra', icon: icons.quit, cls: '' }
+    ];
+    const radialButtonsHtml = ringButtons.map((btn, i) =>
+      `<button class="radial-btn ${btn.cls}" data-action="${btn.action}" title="${btn.label}" aria-label="${btn.label}" style="${ringPos(i, ringButtons.length)}">${btn.icon}</button>`
+    ).join('');
     return `<!doctype html>
 <html><head><meta charset="utf-8" />
 <style>
@@ -265,9 +306,51 @@ function createOverlayBridge({
     text-shadow:0 2px 8px rgba(0,0,0,0.6);
     pointer-events:none;
   }
+  /* --- double-tap radial menu (AssistiveTouch-style) --- */
+  #radial { position:fixed; inset:0; display:none; }
+  body.radial-open #bubble { display:none; }
+  body.radial-open #radial { display:block; }
+  .radial-btn {
+    position:absolute;
+    width:${BTN}px; height:${BTN}px;
+    border-radius:50%;
+    border:none;
+    display:flex; align-items:center; justify-content:center;
+    background:#f3f4f6;
+    color:#1f2430;
+    cursor:pointer;
+    box-shadow:0 4px 14px rgba(0,0,0,0.45);
+    transition:transform 120ms ease;
+    animation:radial-pop 160ms ease;
+  }
+  .radial-btn:hover { transform:scale(1.1); }
+  .radial-btn:active { transform:scale(0.92); }
+  .radial-btn-ai { background:#15181f; color:#c4b5fd; }
+  #radial-close {
+    position:absolute;
+    left:${C - 29}px; top:${C - 29}px;
+    width:58px; height:58px;
+    border-radius:50%;
+    border:none;
+    display:flex; align-items:center; justify-content:center;
+    background:rgba(28, 32, 42, 0.92);
+    color:#f3f4f6;
+    cursor:pointer;
+    box-shadow:0 4px 16px rgba(0,0,0,0.5);
+    animation:radial-pop 160ms ease;
+  }
+  .radial-btn-lock .ic-unlocked { display:none; }
+  body.pos-locked .radial-btn-lock .ic-locked { display:none; }
+  body.pos-locked .radial-btn-lock .ic-unlocked { display:block; }
+  body.pos-locked .radial-btn-lock { background:#fbbf24; color:#3b2f06; }
+  @keyframes radial-pop { from { transform:scale(0.4); opacity:0; } to { transform:scale(1); opacity:1; } }
 </style></head>
 <body>
   ${bubbleContent}
+  <div id="radial">
+    ${radialButtonsHtml}
+    <button id="radial-close" data-action="close" title="Close menu" aria-label="Close menu">${icons.close}</button>
+  </div>
   <script>
     const bubbleEl = document.getElementById('bubble');
     const api = window.yayraOverlay || {};
@@ -277,9 +360,10 @@ function createOverlayBridge({
 
     function applyLockUi() {
       bubbleEl.classList.toggle('locked', locked);
+      document.body.classList.toggle('pos-locked', locked);
       bubbleEl.title = locked
         ? 'Yayra - position locked (triple-click to unlock)'
-        : 'Yayra - click: mini  |  double-click: full browser  |  triple-click: lock position  |  drag to move';
+        : 'Yayra - click: mini  |  double-click: menu  |  triple-click: lock position  |  drag to move';
     }
     function pulse() {
       bubbleEl.classList.add('pulse');
@@ -342,6 +426,35 @@ function createOverlayBridge({
       e.preventDefault();
       if (typeof api.openMenu === 'function') api.openMenu();
     });
+
+    // --- double-tap radial menu of circular action buttons ---
+    // Opening/closing is driven by the MAIN process (it resizes this
+    // window around the bubble first); buttons report their action back.
+    const radialEl = document.getElementById('radial');
+    if (typeof api.onRadial === 'function') {
+      api.onRadial((payload) => {
+        const open = Boolean(payload && payload.open);
+        document.body.classList.toggle('radial-open', open);
+        if (payload && typeof payload.locked === 'boolean') {
+          locked = payload.locked;
+          applyLockUi();
+        }
+      });
+    }
+    radialEl.querySelectorAll('[data-action]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (typeof api.radialAction === 'function') api.radialAction(btn.dataset.action);
+      });
+    });
+    // Tapping the empty space around the ring closes the menu.
+    radialEl.addEventListener('pointerdown', (e) => {
+      if (e.target === radialEl && typeof api.radialAction === 'function') api.radialAction('close');
+    });
+    radialEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (typeof api.openMenu === 'function') api.openMenu();
+    });
   </script>
 </body></html>`;
   }
@@ -397,6 +510,9 @@ function createOverlayBridge({
     overlayWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(settings))}`);
 
     overlayWin.on('moved', () => {
+      // While the radial menu is open the window is the ENLARGED square -
+      // persisting that position would teleport the bubble on restart.
+      if (radialOpen) return;
       try {
         const [x, y] = overlayWin.getPosition();
         overlayStore.save({ position: { x, y } });
@@ -408,6 +524,8 @@ function createOverlayBridge({
     overlayWin.on('closed', () => {
       overlayWin = null;
       endBubbleDrag({ persist: false });
+      radialOpen = false;
+      radialRestoreBounds = null;
       overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     });
 
@@ -416,6 +534,8 @@ function createOverlayBridge({
 
   function destroyOverlayWindow() {
     endBubbleDrag({ persist: false });
+    radialOpen = false;
+    radialRestoreBounds = null;
     overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     if (overlayWin && !overlayWin.isDestroyed()) {
       overlayWin.close();
@@ -455,7 +575,7 @@ function createOverlayBridge({
     }
   }
 
-  function ensureMiniWindow() {
+  function ensureMiniWindow(urlOverride = null) {
     if (!mainPreloadPath) return null;
     if (miniWin && !miniWin.isDestroyed()) return miniWin;
     const bounds = miniDefaultBounds();
@@ -487,12 +607,26 @@ function createOverlayBridge({
     // so the heartbeat is what keeps it topmost after focus round-trips.
     miniTopmostTimer = stopTopmostGuard(miniTopmostTimer);
     miniTopmostTimer = startTopmostGuard(miniWin);
-    miniWin.loadURL(miniUrl);
+    miniWin.loadURL(urlOverride || miniUrl);
     miniWin.on('closed', () => {
       miniWin = null;
       miniTopmostTimer = stopTopmostGuard(miniTopmostTimer);
     });
     return miniWin;
+  }
+
+  /**
+   * Open the floating mini browser directly on an internal page (e.g.
+   * 'yayra://ai' from the radial menu's AI button or the bubble's
+   * right-click menu). The &page= boot param is read by
+   * src/browser/main.js, which starts the mini shell on that page.
+   * An already-open mini is recreated - deep-linking wins over reuse.
+   */
+  function openMiniPanelAt(page) {
+    if (!mainPreloadPath) return restoreMainWindow();
+    destroyMiniWindow();
+    const sep = miniUrl.includes('?') ? '&' : '?';
+    return ensureMiniWindow(`${miniUrl}${sep}page=${encodeURIComponent(String(page || ''))}`);
   }
 
   function destroyMiniWindow() {
@@ -536,6 +670,7 @@ function createOverlayBridge({
 
   function beginBubbleDrag(offset) {
     if (!overlayWin || overlayWin.isDestroyed()) return false;
+    if (radialOpen) return false; // the expanded menu never drags
     if (overlayStore.load().positionLocked) return false; // triple-click lock
     const dx = Math.round(Number(offset?.x)) || 0;
     const dy = Math.round(Number(offset?.y)) || 0;
@@ -568,6 +703,98 @@ function createOverlayBridge({
     }
   }
 
+  /* -------------------------------------------------------------
+   * Radial menu (AssistiveTouch-style): double-tapping the bubble
+   * expands its tiny always-on-top window into a RADIAL_SIZE square
+   * centered on the bubble, and the renderer shows a ring of circular
+   * action buttons (see buildOverlayHtml): Yayra AI, yayra mini, full
+   * browser, lock/unlock position, hide bubble, quit. Closing shrinks
+   * the window back to exactly where the bubble was.
+   * ----------------------------------------------------------- */
+
+  function openRadialMenu() {
+    if (!overlayWin || overlayWin.isDestroyed() || radialOpen) return false;
+    if (typeof overlayWin.setBounds !== 'function') return false;
+    // Stop any in-flight drag WITHOUT persisting here: real moves already
+    // persist via the 'moved' handler, and saving now would race the
+    // expansion below.
+    endBubbleDrag({ persist: false });
+    const settings = overlayStore.load();
+    const size = settings.size || 64;
+    const [x, y] = overlayWin.getPosition();
+    radialRestoreBounds = { x, y, width: size, height: size };
+    // Center the expanded square on the bubble's center, clamped on-screen.
+    let rx = Math.round(x + size / 2 - RADIAL_SIZE / 2);
+    let ry = Math.round(y + size / 2 - RADIAL_SIZE / 2);
+    try {
+      const area = screen.getPrimaryDisplay().workAreaSize;
+      rx = Math.min(Math.max(0, rx), Math.max(0, area.width - RADIAL_SIZE));
+      ry = Math.min(Math.max(0, ry), Math.max(0, area.height - RADIAL_SIZE));
+    } catch {
+      // No display info (tests/headless) - keep the unclamped center.
+    }
+    radialOpen = true;
+    overlayWin.setBounds({ x: rx, y: ry, width: RADIAL_SIZE, height: RADIAL_SIZE });
+    try {
+      overlayWin.webContents?.send?.('yayra:overlay-radial', {
+        open: true,
+        locked: Boolean(settings.positionLocked)
+      });
+    } catch {
+      // Renderer gone mid-open.
+    }
+    return true;
+  }
+
+  function closeRadialMenu() {
+    if (!radialOpen) return false;
+    radialOpen = false;
+    try {
+      if (overlayWin && !overlayWin.isDestroyed()) {
+        if (radialRestoreBounds && typeof overlayWin.setBounds === 'function') {
+          overlayWin.setBounds(radialRestoreBounds);
+        }
+        overlayWin.webContents?.send?.('yayra:overlay-radial', { open: false });
+      }
+    } catch {
+      // Renderer/window gone mid-close - state is reset either way.
+    }
+    radialRestoreBounds = null;
+    return true;
+  }
+
+  function isRadialOpen() {
+    return radialOpen;
+  }
+
+  /** A circular button in the radial menu was pressed. */
+  function handleRadialAction(action) {
+    switch (action) {
+      case 'ai':
+        closeRadialMenu();
+        return openMiniPanelAt('yayra://ai');
+      case 'mini':
+        closeRadialMenu();
+        return toggleMiniPanel();
+      case 'full':
+        closeRadialMenu();
+        return restoreMainWindow();
+      case 'lock':
+        // Stays open so the button's icon flip is visible immediately.
+        return togglePositionLock();
+      case 'hide':
+        closeRadialMenu();
+        return setEnabled(false);
+      case 'quit':
+        try { app.quit(); } catch { /* already quitting */ }
+        return null;
+      case 'close':
+      default:
+        closeRadialMenu();
+        return null;
+    }
+  }
+
   function setPositionLocked(locked) {
     const next = overlayStore.save({ positionLocked: Boolean(locked) });
     if (next.positionLocked) endBubbleDrag({ persist: true }); // a mid-drag lock freezes in place
@@ -589,15 +816,18 @@ function createOverlayBridge({
 
   /**
    * Gesture dispatch for the bubble (counts settled by the renderer):
-   *   1 tap -> toggle the floating mini browser (AssistiveTouch expand);
-   *   2 taps -> open/restore the FULL browser window;
+   *   1 tap -> toggle the floating mini browser (or close an open radial);
+   *   2 taps -> toggle the AssistiveTouch-style RADIAL MENU of circular
+   *             action buttons (Yayra AI / mini / full browser / lock /
+   *             hide / quit) around the bubble;
    *   3 taps -> lock the bubble's position right where it is - and
    *             triple-clicking again unlocks movement.
    */
   function handleBubbleTap(count) {
     const taps = Math.max(1, Math.round(Number(count)) || 1);
     if (taps >= 3) return togglePositionLock();
-    if (taps === 2) return restoreMainWindow();
+    if (taps === 2) return radialOpen ? closeRadialMenu() : openRadialMenu();
+    if (radialOpen) return closeRadialMenu();
     return toggleMiniPanel();
   }
 
@@ -626,6 +856,8 @@ function createOverlayBridge({
     if (!Menu || !overlayWin || overlayWin.isDestroyed()) return;
     const locked = Boolean(overlayStore.load().positionLocked);
     const template = [
+      { label: 'Ask Yayra AI', click: () => openMiniPanelAt('yayra://ai') },
+      { type: 'separator' },
       { label: 'Open yayra mini', click: () => toggleMiniPanel() },
       { label: 'Open full browser', click: () => restoreMainWindow() },
       { type: 'separator' },
@@ -734,6 +966,9 @@ function createOverlayBridge({
   // left-button events): follow the OS cursor until pointerup.
   ipcMain.on('yayra:overlay-drag-start', (_e, offset) => beginBubbleDrag(offset));
   ipcMain.on('yayra:overlay-drag-end', () => endBubbleDrag());
+  // A circular button in the double-tap radial menu was pressed
+  // (ai / mini / full / lock / hide / quit / close).
+  ipcMain.on('yayra:overlay-radial-action', (_e, action) => handleRadialAction(action));
   // Settings toggle mirrors the triple-click lock.
   ipcMain.handle('yayra:overlay-set-position-locked', (_e, locked) => setPositionLocked(locked));
   // Sent from the mini shell's own chrome (close / expand buttons).
@@ -777,6 +1012,11 @@ function createOverlayBridge({
     handleBubbleTap,
     beginBubbleDrag,
     endBubbleDrag,
+    openRadialMenu,
+    closeRadialMenu,
+    isRadialOpen,
+    handleRadialAction,
+    openMiniPanelAt,
     initializeOnStartup,
     applyLoginItemSettings
   };

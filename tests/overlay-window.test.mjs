@@ -379,8 +379,13 @@ test('overlayWindow: bubble shows ONLY the Yayra logo - inlined data URL, no cir
   );
   assert.ok(html.includes('<img id="bubble"'), 'bubble element IS the logo image itself');
   assert.ok(!html.includes('radial-gradient'), 'no circular gradient plate behind the logo');
-  assert.ok(!html.includes('border-radius:50%'), 'no circle clipping around the logo');
-  assert.ok(html.includes('background:transparent'), 'bubble background stays fully transparent');
+  // The BUBBLE itself has no circle clipping or plate. (The double-tap
+  // radial menu's action buttons are circles by design - that is a
+  // separate, initially hidden layer, not the bubble.)
+  const bubbleRule = /#bubble\s*\{[^}]*\}/.exec(html)?.[0] || '';
+  assert.ok(bubbleRule, 'bubble CSS rule present');
+  assert.ok(!bubbleRule.includes('border-radius'), 'no circle clipping around the logo');
+  assert.ok(bubbleRule.includes('background:transparent'), 'bubble background stays fully transparent');
 });
 
 test('overlayWindow: bubble falls back to a bare monogram (still no circle) when the logo asset is missing', () => {
@@ -406,7 +411,8 @@ test('overlayWindow: bubble falls back to a bare monogram (still no circle) when
 
   assert.ok(html.includes('id="monogram"'), 'fallback renders the bare Y monogram');
   assert.ok(!html.includes('radial-gradient'), 'fallback has no circular gradient either');
-  assert.ok(!html.includes('border-radius:50%'), 'fallback has no circle clipping either');
+  const bubbleRule = /#bubble\s*\{[^}]*\}/.exec(html)?.[0] || '';
+  assert.ok(bubbleRule && !bubbleRule.includes('border-radius'), 'fallback bubble has no circle clipping either');
 });
 
 test('overlayWindow: setBubbleSize live-resizes the bubble window and persists the size', () => {
