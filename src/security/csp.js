@@ -1,7 +1,13 @@
 export const DESKTOP_CUSTOM_SCHEME = 'yayra';
 export const ASSET_ORIGINS = Object.freeze([
   'https://yayra.pages.dev',
-  'https://icons.duckduckgo.com'
+  'https://icons.duckduckgo.com',
+  // Google's OAuth userinfo "picture" claim always resolves to this exact
+  // host (confirmed across Google's own docs/SDKs) - needed so a signed-in
+  // user's avatar renders in Settings -> Account instead of a broken image
+  // icon. Deliberately NOT *.googleusercontent.com, which also serves
+  // arbitrary user-uploaded content for many unrelated Google products.
+  'https://lh3.googleusercontent.com'
 ]);
 export const API_ORIGINS = Object.freeze(['https://yayra-updates-api.g2code335.workers.dev']);
 

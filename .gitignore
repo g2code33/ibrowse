@@ -9,3 +9,14 @@ release/
 /ios/
 *.log
 .DS_Store
+electron/google-auth.config.json
+__pycache__/
+*.patch
+*.patch.b64
+*.patch.gz.b64
+*.py.b64
+dist-patches/
+yayra-updates/
+yayra-updates*.txt
+yayra-updates*.tar.gz
+*.bak-before-*

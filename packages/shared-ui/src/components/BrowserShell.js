@@ -47,7 +47,33 @@ export const DEVELOPER_AD_LINKS = [
   { id: 'ad-clinicalrx30', title: 'Clinical RX 30', url: 'https://clinicalrx30.vercel.app/', domain: 'clinicalrx30.vercel.app' }
 ];
 
+// Apex hostnames (and all their subdomains) that are known to send
+// X-Frame-Options / CSP frame-ancestors headers forbidding ANY iframe
+// embedding — enforced by the target site itself, not something Yayra's
+// own CSP can override. Kept as a static list so the floating browser can
+// proactively fall back to "open in a new tab" instead of ever attempting
+// (and visibly failing) to embed these.
+const FRAME_EMBEDDING_BLOCKED_HOSTS = [
+  'google.com', 'youtube.com',
+  'facebook.com', 'instagram.com', 'threads.net', 'twitter.com', 'x.com', 'linkedin.com',
+  'github.com',
+  'amazon.com',
+  'microsoft.com', 'live.com', 'outlook.com', 'office.com',
+  'apple.com', 'icloud.com',
+  'paypal.com',
+  'netflix.com',
+  'pinterest.com',
+  'reddit.com',
+  'yahoo.com',
+  'stackoverflow.com', 'stackexchange.com',
+  'nytimes.com', 'wsj.com',
+  'twitch.tv',
+  'bing.com'
+];
+
 export class BrowserShell {
+  static FRAME_EMBEDDING_BLOCKED_HOSTS = FRAME_EMBEDDING_BLOCKED_HOSTS;
+
   constructor(options = {}) {
     this.options = options;
     this.platform = options.platform || this.detectPlatform();
@@ -118,10 +144,17 @@ export class BrowserShell {
       closedTabsHistory: [],
       historyItems: [],
       bookmarksItems: [],
-      downloadsItems: [
-        { id: 'dl-1', filename: 'yayra-v0.1.0-setup.exe', path: 'C:\\Users\\User\\Downloads\\yayra-v0.1.0-setup.exe', url: 'https://yayra.app/download', size: '58.4 MB', state: 'Completed', date: 'Just now' },
-        { id: 'dl-2', filename: 'offline-manual.pdf', path: '/home/user/Downloads/offline-manual.pdf', url: 'https://docs.yayra.app/manual.pdf', size: '2.8 MB', state: 'Completed', date: 'Yesterday' }
-      ],
+      // Starts empty - no seeded/sample rows. On the Electron desktop build
+      // this is populated from real `will-download` history (see
+      // electron/downloadsBridge.cjs) in initialize() below; on builds
+      // without that bridge (web/PWA/mobile) it honestly stays empty rather
+      // than showing fake placeholder downloads.
+      downloadsItems: [],
+      downloadRoot: null,
+      // System-wide floating overlay bubble (see electron/overlayWindow.cjs).
+      // These mirror the Electron-side defaults so the UI shows sane values
+      // even before overlayBridge.getSettings() resolves.
+      overlaySettings: { enabled: true, launchAtStartup: true, overlayAllApps: true },
       passwordsItems: [],
       extensionsItems: [...BUILT_IN_EXTENSIONS],
       sponsoredLinks: DEVELOPER_AD_LINKS.map((item) => ({
@@ -159,11 +192,31 @@ export class BrowserShell {
       },
       updateState: {
         status: 'idle', // 'idle' | 'checking' | 'available' | 'ready' | 'uptodate'
-        installedVersion: '0.1.0',
+        // Prefer the real installed version carried by the UpdateService (set
+        // from the build's injected version at startup - see src/browser/main.js).
+        // Falling back to a hardcoded literal here previously caused every
+        // check to treat the live install as "behind" forever - see
+        // checkForUpdates() below for the full fix.
+        installedVersion: options.updateService?.installedVersion || null,
         availableVersion: null,
         notes: null
       },
-      updatePromptShown: false
+      updatePromptShown: false,
+      // Real "Sign in with Google" app-level identity (Electron desktop only
+      // for now - see electron/googleAuth.cjs + electron/authBridge.cjs).
+      // This is unrelated to, and does not attempt, signing in to Google
+      // services INSIDE the embedded browsing view, which Google's own
+      // policy forbids for any embedded surface.
+      googleAccount: {
+        status: 'idle', // 'idle' | 'checking' | 'signing-in' | 'signed-in' | 'error'
+        signedIn: false,
+        profile: null,
+        error: null,
+        savedAt: null
+      },
+      // Persistent top-right account menu (see renderAccountDropdown()) -
+      // separate from the Settings > Account page, which stays available too.
+      isAccountMenuOpen: false
     };
 
     this.state.tabs.forEach((tab) => this.ensureNavigationState(tab));
@@ -190,6 +243,25 @@ export class BrowserShell {
       this._unsubscribeNativeWebview = this.nativeWebview.onEvent((evt) => this.handleNativeWebviewEvent(evt));
     }
 
+    // "Sign in with Google" bridge (Electron desktop only - see get authBridge()
+    // below). Restores any previously-signed-in session and keeps the UI in
+    // sync with sign-in/sign-out/error events fired from the main process.
+    this._unsubscribeAuthBridge = null;
+    if (this.authBridge) {
+      this._unsubscribeAuthBridge = this.authBridge.onEvent((evt) => this.handleGoogleAuthEvent(evt));
+      this.authBridge.getSession()
+        .then((session) => {
+          if (session?.signedIn) {
+            this.state.googleAccount = { status: 'signed-in', signedIn: true, profile: session.profile, error: null, savedAt: session.savedAt || null };
+            this.render();
+          }
+        })
+        .catch(() => {
+          // No prior session or the bridge isn't ready yet - leave the
+          // default signed-out state as-is.
+        });
+    }
+
     if (typeof window !== 'undefined') {
       setTimeout(() => {
         this.checkForUpdates(false);
@@ -204,6 +276,99 @@ export class BrowserShell {
   get nativeWebview() {
     if (typeof window === 'undefined') return null;
     return (window.yayra && window.yayra.webview) || (window.ibrowse && window.ibrowse.webview) || null;
+  }
+
+  // window.yayra.auth (exposed by electron/preload.cjs, backed by
+  // electron/authBridge.cjs + electron/googleAuth.cjs) only exists on the
+  // Electron desktop build. Its absence is the signal that real "Sign in
+  // with Google" app-level identity isn't wired up for this build yet (web/
+  // PWA/mobile), so the Settings UI shows an honest "not available on this
+  // build" message instead of a button that would silently do nothing.
+  get authBridge() {
+    if (typeof window === 'undefined') return null;
+    return (window.yayra && window.yayra.auth) || (window.ibrowse && window.ibrowse.auth) || null;
+  }
+
+  // window.yayra.downloads (exposed by electron/preload.cjs, backed by
+  // electron/downloadsBridge.cjs) only exists on the Electron desktop
+  // build. Its absence means there is no real OS-level download tracking
+  // available for this build, so the Downloads page honestly shows an
+  // empty list instead of decorative placeholder rows.
+  get downloadsBridge() {
+    if (typeof window === 'undefined') return null;
+    return (window.yayra && window.yayra.downloads) || (window.ibrowse && window.ibrowse.downloads) || null;
+  }
+
+  // window.yayra.overlay (exposed by electron/preload.cjs, backed by
+  // electron/overlayWindow.cjs) - the system-wide floating overlay bubble's
+  // settings. See Settings > Floating Overlay.
+  get overlayBridge() {
+    if (typeof window === 'undefined') return null;
+    return (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
+  }
+
+  async signInWithGoogle() {
+    if (!this.authBridge) return;
+    this.state.googleAccount = { ...this.state.googleAccount, status: 'signing-in', error: null };
+    this.render();
+    const result = await this.authBridge.signIn();
+    if (!result?.ok) {
+      this.state.googleAccount = { status: 'error', signedIn: false, profile: null, error: result?.error || 'sign_in_failed', savedAt: null };
+      this.render();
+    }
+    // On success the 'signed-in' event from handleGoogleAuthEvent() already
+    // updates state + re-renders; nothing further to do here.
+  }
+
+  // "Switch account" reuses the exact same sign-in flow: the authorization
+  // URL built in electron/googleAuth.cjs already passes
+  // `prompt=consent select_account`, so Google shows its account chooser
+  // again even though a session is already saved, and the newly chosen
+  // profile simply overwrites the old one on success.
+  async switchGoogleAccount() {
+    this.state.isAccountMenuOpen = false;
+    return this.signInWithGoogle();
+  }
+
+  async signOutOfGoogle() {
+    if (!this.authBridge) return;
+    this.state.isAccountMenuOpen = false;
+    await this.authBridge.signOut();
+  }
+
+  // Opens Google's own "Manage your Account" page in the user's system
+  // browser (never embedded - see electron/authBridge.cjs for why).
+  async openGoogleAccountPage() {
+    if (!this.authBridge?.openAccountPage) return;
+    this.state.isAccountMenuOpen = false;
+    this.render();
+    await this.authBridge.openAccountPage();
+  }
+
+  toggleAccountMenu() {
+    this.state.isAccountMenuOpen = !this.state.isAccountMenuOpen;
+    this.render();
+  }
+
+  handleGoogleAuthEvent(evt) {
+    if (!evt) return;
+    switch (evt.type) {
+      case 'signing-in':
+        this.state.googleAccount = { ...this.state.googleAccount, status: 'signing-in', error: null };
+        break;
+      case 'signed-in':
+        this.state.googleAccount = { status: 'signed-in', signedIn: true, profile: evt.profile, error: null, savedAt: new Date().toISOString() };
+        break;
+      case 'signed-out':
+        this.state.googleAccount = { status: 'idle', signedIn: false, profile: null, error: null, savedAt: null };
+        break;
+      case 'error':
+        this.state.googleAccount = { status: 'error', signedIn: false, profile: null, error: evt.message || 'sign_in_failed', savedAt: null };
+        break;
+      default:
+        return;
+    }
+    this.render();
   }
 
   // Capacitor's native in-app browser (SFSafariViewController on iOS, Chrome
@@ -227,27 +392,6 @@ export class BrowserShell {
   // because electron/webviewBridge.cjs is a CommonJS, Electron-only module
   // and this file ships in the plain web/PWA/Capacitor bundle too.
   static SYSTEM_BROWSER_AUTH_HOSTS = ['accounts.google.com', 'appleid.apple.com', 'login.live.com', 'login.microsoftonline.com'];
-
-  // Apex hostnames (and all their subdomains) that are known to send
-  // X-Frame-Options / CSP frame-ancestors headers forbidding ANY iframe
-  // embedding, enforced by the target site itself.
-  static FRAME_EMBEDDING_BLOCKED_HOSTS = [
-    'google.com', 'youtube.com',
-    'facebook.com', 'instagram.com', 'threads.net', 'twitter.com', 'x.com', 'linkedin.com',
-    'github.com',
-    'amazon.com',
-    'microsoft.com', 'live.com', 'outlook.com', 'office.com',
-    'apple.com', 'icloud.com',
-    'paypal.com',
-    'netflix.com',
-    'pinterest.com',
-    'reddit.com',
-    'yahoo.com',
-    'stackoverflow.com', 'stackexchange.com',
-    'nytimes.com', 'wsj.com',
-    'twitch.tv',
-    'bing.com'
-  ];
 
   isSystemBrowserAuthHost(url) {
     try {
@@ -321,6 +465,44 @@ export class BrowserShell {
         this.state.bookmarksItems = await this.bookmarksRepo.getAllBookmarks();
       } catch (err) {
         console.warn('Failed to load bookmarks in BrowserShell:', err);
+      }
+    }
+
+    // Real download history + the user's chosen storage root (Electron
+    // desktop build only - see electron/downloadsBridge.cjs). Also listens
+    // for live progress/completion events so the Downloads page updates in
+    // real time while something is downloading, instead of only on next
+    // render.
+    if (this.downloadsBridge) {
+      try {
+        const { items, downloadRoot } = await this.downloadsBridge.list();
+        this.state.downloadsItems = items || [];
+        this.state.downloadRoot = downloadRoot || null;
+      } catch (err) {
+        console.warn('Failed to load downloads in BrowserShell:', err);
+      }
+      if (typeof this.downloadsBridge.onEvent === 'function') {
+        this.downloadsBridge.onEvent((payload) => {
+          const items = this.state.downloadsItems.slice();
+          const idx = items.findIndex((it) => it.id === payload.id);
+          if (idx === -1) items.unshift(payload);
+          else items[idx] = { ...items[idx], ...payload };
+          this.state.downloadsItems = items;
+          this.render();
+        });
+      }
+    }
+
+    // System-wide floating overlay bubble settings (Electron desktop build
+    // only - see electron/overlayWindow.cjs). The overlay window itself
+    // runs independently of this renderer; this just reflects/edits its
+    // settings from Settings > Floating & Transparency.
+    if (this.overlayBridge) {
+      try {
+        const settings = await this.overlayBridge.getSettings();
+        if (settings) this.state.overlaySettings = { ...this.state.overlaySettings, ...settings };
+      } catch (err) {
+        console.warn('Failed to load overlay settings in BrowserShell:', err);
       }
     }
 
@@ -412,6 +594,11 @@ export class BrowserShell {
       this.renderSecurityDropdown(shell);
     }
 
+    // Persistent Account Dropdown (top-right account button)
+    if (this.state.isAccountMenuOpen) {
+      this.renderAccountDropdown(shell);
+    }
+
     // Find in Page Toolbar
     if (this.state.findInPage.isOpen) {
       this.renderFindInPageBar(shell);
@@ -494,6 +681,13 @@ export class BrowserShell {
         }
       });
 
+      // Right-click: Chrome-style tab context menu (New Tab, Reload,
+      // Duplicate, Close Tab / Other Tabs / Tabs to the Right).
+      tabEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        this.renderTabContextMenu(e.clientX, e.clientY, tab);
+      });
+
       // Tab drag reordering
       tabEl.addEventListener('dragstart', (e) => {
         if (e.dataTransfer) {
@@ -525,55 +719,16 @@ export class BrowserShell {
 
     tabStrip.appendChild(tabsScroll);
 
-    // Desktop Window Header Actions (Minimize to Bubble, Window Controls)
-    const windowActions = document.createElement('div');
-    windowActions.className = 'fb-window-actions';
-
-    // Minimize to Floating Bubble button
-    const minimizeToBubbleBtn = document.createElement('button');
-    minimizeToBubbleBtn.className = 'fb-btn-action fb-btn-minimize-bubble';
-    minimizeToBubbleBtn.setAttribute('title', 'Minimize to Floating Circle');
-    minimizeToBubbleBtn.setAttribute('aria-label', 'Minimize to floating bubble');
-    minimizeToBubbleBtn.innerHTML = Icons.bubble;
-    minimizeToBubbleBtn.addEventListener('click', () => {
-      this.minimizeToBubble();
-    });
-    windowActions.appendChild(minimizeToBubbleBtn);
-
-    // Minimize window button
-    const minBtn = document.createElement('button');
-    minBtn.className = 'fb-btn-action fb-btn-win-min';
-    minBtn.setAttribute('title', 'Minimize Window');
-    minBtn.setAttribute('aria-label', 'Minimize');
-    minBtn.innerHTML = Icons.minimize;
-    minBtn.addEventListener('click', () => {
-      this.minimizeToBubble();
-    });
-    windowActions.appendChild(minBtn);
-
-    // Maximize / Restore window button
-    const maxBtn = document.createElement('button');
-    maxBtn.className = 'fb-btn-action fb-btn-win-max';
-    maxBtn.setAttribute('title', this.state.isFullscreen ? 'Restore Window' : 'Maximize Window');
-    maxBtn.setAttribute('aria-label', 'Maximize');
-    maxBtn.innerHTML = Icons.maximize;
-    maxBtn.addEventListener('click', () => {
-      this.toggleFullscreen();
-    });
-    windowActions.appendChild(maxBtn);
-
-    // Close window button
-    const closeWinBtn = document.createElement('button');
-    closeWinBtn.className = 'fb-btn-action fb-btn-win-close';
-    closeWinBtn.setAttribute('title', 'Close Browser (Hides to Bubble)');
-    closeWinBtn.setAttribute('aria-label', 'Close');
-    closeWinBtn.innerHTML = Icons.close;
-    closeWinBtn.addEventListener('click', () => {
-      this.minimizeToBubble();
-    });
-    windowActions.appendChild(closeWinBtn);
-
-    tabStrip.appendChild(windowActions);
+    // NOTE: a duplicate "window controls" cluster (minimize-to-bubble circle,
+    // minimize, maximize, close) used to be rendered here at the far right of
+    // the tab strip. It has been removed: the real OS title bar already
+    // provides real minimize/maximize/close for this window (Electron's
+    // BrowserWindow uses the native frame), so this second row of buttons was
+    // a redundant duplicate - and a misleading one, since its "Close" button
+    // didn't actually close anything, it just hid the window into the
+    // floating bubble. The floating bubble itself is no longer something you
+    // have to manually open from here either; see renderFloatingBubbleOverlay
+    // / the system tray + always-on-top overlay window wired from main.cjs.
     root.appendChild(tabStrip);
     this.tabStripElement = tabStrip;
 
@@ -635,7 +790,7 @@ export class BrowserShell {
       <span class="fb-toolbar-brand-orb">${Icons.officialOrb}</span>
       <span class="fb-toolbar-brand-text">${Icons.officialWordmark}<span class="fb-brand-text-fallback">yayra</span></span>
     `;
-    toolbarBrand.setAttribute('title', 'Yayra Floating Browser v0.1.0');
+    toolbarBrand.setAttribute('title', this.state.updateState.installedVersion ? `Yayra Floating Browser v${this.state.updateState.installedVersion}` : 'Yayra Floating Browser');
     toolbarBrand.addEventListener('click', () => this.openInternalPage('yayra://newtab'));
     omnibox.appendChild(toolbarBrand);
 
@@ -728,6 +883,30 @@ export class BrowserShell {
       this.toggleDesktopMode();
     });
     toolbarActions.appendChild(modePill);
+
+    // Persistent Top-Right Account Button (Yayra app-level "Sign in with
+    // Google" - see electron/authBridge.cjs). Lives here, next to the 3-dot
+    // menu, so it stays in the same place across every tab/page, not just
+    // inside Settings. Only rendered on builds that actually support it
+    // (Electron desktop) - see get authBridge() above.
+    if (this.authBridge) {
+      const account = this.state.googleAccount || { status: 'idle' };
+      const acctBtn = document.createElement('button');
+      acctBtn.className = `fb-action-btn fb-account-btn fb-toolbar-action-btn${account.status === 'signing-in' ? ' fb-account-btn-busy' : ''}`;
+      acctBtn.setAttribute(
+        'title',
+        account.signedIn
+          ? `Yayra account: ${account.profile?.name || account.profile?.email || 'Signed in'}`
+          : (account.status === 'signing-in' ? 'Signing in with Google…' : 'Yayra account')
+      );
+      acctBtn.setAttribute('aria-label', 'Account');
+      acctBtn.innerHTML = this.renderAccountAvatarHtml(account.signedIn ? account.profile : null, 26);
+      acctBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.toggleAccountMenu();
+      });
+      toolbarActions.appendChild(acctBtn);
+    }
 
     // Requirement 5: 3-Dot Browser Menu Button (Opens Full Right-Side Drawer without Blur)
     const menuBtn = document.createElement('button');
@@ -1568,6 +1747,84 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * 2. FIREFOX-STYLE SETTINGS IN-TAB PAGE (PHASE 9 & 10)
    * ----------------------------------------------------------- */
+  // Renders the body of the Settings > Account section for "Sign in with
+  // Google". Kept as a small standalone helper (rather than inline in the
+  // giant settings template literal) so the sign-in/signing-in/signed-in/
+  // error states stay easy to follow. See get authBridge() above for why
+  // this is Electron-desktop-only for now.
+  // Shared avatar renderer used by both the Settings > Account page and the
+  // persistent top-right account button. Google profile photo URLs
+  // occasionally 404/expire or fail to load (offline, blocked tracker
+  // lists, etc.), so this always has a solid fallback: the signed-in
+  // user's initials on a colored circle, never a broken-image icon.
+  renderAccountAvatarHtml(profile, size = 32) {
+    if (!profile) {
+      return `<span class="fb-avatar fb-avatar-signed-out" style="width:${size}px; height:${size}px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:rgba(255,255,255,0.08); color:var(--fb-text-secondary);">${Icons.userCircle}</span>`;
+    }
+    const label = (profile.name || profile.email || '?').trim();
+    const initials = label
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join('')
+      .toUpperCase() || '?';
+    const fallback = `<span class="fb-avatar-fallback" style="width:${size}px; height:${size}px; border-radius:50%; display:${profile.picture ? 'none' : 'flex'}; align-items:center; justify-content:center; background:linear-gradient(135deg,#06b6d4,#3b82f6); color:#fff; font-weight:700; font-size:${Math.max(11, Math.round(size * 0.4))}px;">${initials}</span>`;
+    const img = profile.picture
+      ? `<img src="${profile.picture}" alt="" class="fb-avatar-img" style="width:${size}px; height:${size}px; border-radius:50%; object-fit:cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />`
+      : '';
+    return `<span class="fb-avatar" style="position:relative; width:${size}px; height:${size}px; display:inline-flex;">${img}${fallback}</span>`;
+  }
+
+  renderGoogleAccountSectionHtml() {
+    if (!this.authBridge) {
+      return `
+        <p>Sign in with Google is available in the Yayra desktop app. This build of Yayra doesn't support it yet.</p>
+      `;
+    }
+
+    const account = this.state.googleAccount || { status: 'idle' };
+
+    if (account.status === 'signing-in') {
+      return `
+        <p>Continue in the browser window that just opened to finish signing in to Google.</p>
+        <button class="fb-btn fb-btn-secondary" disabled>Waiting for sign-in&hellip;</button>
+      `;
+    }
+
+    if (account.status === 'signed-in' && account.profile) {
+      const { name, email } = account.profile;
+      const sinceLabel = account.savedAt
+        ? new Date(account.savedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+        : null;
+      return `
+        <div style="display:flex; align-items:center; gap:12px;">
+          ${this.renderAccountAvatarHtml(account.profile, 40)}
+          <div>
+            <strong>${name || email || 'Signed in'}</strong>
+            ${email ? `<p style="margin:2px 0 0;">${email}</p>` : ''}
+            ${sinceLabel ? `<p style="margin:2px 0 0; font-size:0.8rem; color:var(--fb-text-muted);">Signed in since ${sinceLabel}</p>` : ''}
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="fb-btn fb-btn-secondary fb-in-google-manage-btn">Manage Google Account ${Icons.externalLink || '↗'}</button>
+          <button class="fb-btn fb-btn-secondary fb-in-google-switch-btn">Switch account</button>
+          <button class="fb-btn fb-btn-secondary fb-in-google-signout-btn">Sign out</button>
+        </div>
+      `;
+    }
+
+    const errorNote = account.status === 'error'
+      ? `<p style="color:#f66;">Couldn't sign in: ${account.error === 'not_configured' ? 'Google sign-in isn\u2019t configured for this build yet.' : (account.error || 'please try again.')}</p>`
+      : '';
+
+    return `
+      <p>Sign in with your Google account to personalize Yayra. Sign-in opens in your default browser for security, per Google's own policy.</p>
+      ${errorNote}
+      <button class="fb-btn fb-btn-primary fb-in-google-signin-btn" style="align-self:flex-start;">Sign in with Google</button>
+    `;
+  }
+
   renderInternalSettingsPage(viewport) {
     const page = document.createElement('div');
     page.className = 'fb-internal-page fb-settings-app fb-settings-inpage-layout';
@@ -1581,6 +1838,9 @@ export class BrowserShell {
           <span class="fb-internal-search-icon">${Icons.search}</span>
           <input type="text" id="fb-in-settings-search" class="fb-settings-search-input" placeholder="Search settings" value="${this.state.settingsSearchQuery || ''}" style="width:100%; box-sizing:border-box;" />
         </div>
+        <button class="fb-settings-nav-item ${activeCat === 'account' ? 'active' : ''}" data-cat="account" data-category="account">
+          ${Icons.info} <span>Account</span>
+        </button>
         <button class="fb-settings-nav-item ${activeCat === 'floating' ? 'active' : ''}" data-cat="floating" data-category="floating">
           ${Icons.bubble} <span>Floating & Transparency</span>
         </button>
@@ -1609,6 +1869,12 @@ export class BrowserShell {
 
       <main class="fb-settings-content-pane">
         <div class="fb-settings-category-panel">
+          <!-- Account -->
+          <section class="fb-settings-group-card" id="sec-account" style="${activeCat === 'account' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
+            <h3 class="fb-settings-group-title">${Icons.info} Account</h3>
+            ${this.renderGoogleAccountSectionHtml()}
+          </section>
+
           <!-- Floating & Transparency -->
           <section class="fb-settings-group-card" id="sec-floating" style="${activeCat === 'floating' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
             <h3 class="fb-settings-group-title">${Icons.bubble} Floating Browser & Assistive Bubble</h3>
@@ -1663,6 +1929,40 @@ export class BrowserShell {
             <div style="display:flex; gap:12px;">
               <button class="fb-btn fb-btn-secondary fb-in-reset-transparency-btn">Reset Defaults</button>
               <button class="fb-btn fb-btn-primary fb-in-save-btn">Save Changes</button>
+            </div>
+          </section>
+
+          <!-- System-Wide Floating Overlay Bubble -->
+          <section class="fb-settings-group-card" id="sec-overlay" style="${activeCat === 'floating' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
+            <h3 class="fb-settings-group-title">${Icons.bubble} System-Wide Overlay Bubble</h3>
+            <p style="font-size:0.82rem; color:var(--fb-text-muted); margin:0;">
+              ${this.overlayBridge
+                ? 'A small Yayra bubble that floats on top of every other window on your desktop - like Apple\u2019s AssistiveTouch - so you can jump back into Yayra without digging through your taskbar. It starts automatically, before you ever open Yayra.'
+                : 'This build can\u2019t run a true system-wide overlay yet. On the Yayra desktop app this runs as its own always-on-top window outside the browser. On Android it needs the "draw over other apps" permission (not wired up in this build); Apple does not allow any third-party app to overlay other apps on iOS, so it will never be available there.'}
+            </p>
+
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Enable floating overlay</strong>
+                <p>Shows the bubble right after Yayra starts - no need to open the app first.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-overlay-enabled" ${this.state.overlaySettings.enabled ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
+            </div>
+
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Launch at system startup</strong>
+                <p>Yayra's overlay starts automatically right after you log in or reboot.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-overlay-autostart" ${this.state.overlaySettings.launchAtStartup ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
+            </div>
+
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Overlay on top of every app or window</strong>
+                <p>Keeps the bubble above other applications (desktop-only). Turning this off keeps it only above Yayra's own window.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-overlay-allapps" ${this.state.overlaySettings.overlayAllApps ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
             </div>
           </section>
 
@@ -1747,9 +2047,11 @@ export class BrowserShell {
           <section class="fb-settings-group-card" id="sec-downloads" style="${activeCat === 'downloads' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
             <h3 class="fb-settings-group-title">${Icons.download} Downloads</h3>
             <div class="fb-setting-row">
-              <label>Default Download Location</label>
-              <input type="text" class="fb-input" value="~/Downloads/Yayra" readonly style="flex:1;" />
+              <label>Save files to</label>
+              <input type="text" class="fb-input" value="${this.downloadsBridge ? (this.state.downloadRoot || 'Default Downloads folder') : 'Requires the Yayra desktop app'}" readonly style="flex:1;" />
+              <button class="fb-btn fb-btn-secondary fb-in-set-dl-choose-root" ${this.downloadsBridge ? '' : 'disabled'}>Change…</button>
             </div>
+            <p style="font-size:0.78rem; color:var(--fb-text-muted); margin:0;">Every new download is saved here. ${this.downloadsBridge ? '' : 'Picking a custom folder (e.g. an external drive) requires the Yayra desktop app.'}</p>
           </section>
 
           <!-- Extensions -->
@@ -1764,7 +2066,7 @@ export class BrowserShell {
           <!-- About -->
           <section class="fb-settings-group-card" id="sec-about" style="${activeCat === 'about' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
             <h3 class="fb-settings-group-title">${Icons.info} About Yayra</h3>
-            <p>Version 0.1.0 • Fast, Private Floating Browser with Glassmorphism Overlay.</p>
+            <p>Version ${this.state.updateState.installedVersion || 'unknown'} • Fast, Private Floating Browser with Glassmorphism Overlay.</p>
             <button class="fb-btn fb-btn-secondary fb-in-jump-about" style="align-self:flex-start;">View Release Information</button>
           </section>
         </div>
@@ -1864,6 +2166,36 @@ export class BrowserShell {
       this.openModal('clear-data');
     });
 
+    page.querySelector('#fb-in-set-overlay-enabled')?.addEventListener('change', async (e) => {
+      if (!this.overlayBridge) return;
+      const next = await this.overlayBridge.setEnabled(e.target.checked);
+      this.state.overlaySettings = { ...this.state.overlaySettings, ...next };
+      this.render();
+    });
+
+    page.querySelector('#fb-in-set-overlay-autostart')?.addEventListener('change', async (e) => {
+      if (!this.overlayBridge) return;
+      const next = await this.overlayBridge.setLaunchAtStartup(e.target.checked);
+      this.state.overlaySettings = { ...this.state.overlaySettings, ...next };
+      this.render();
+    });
+
+    page.querySelector('#fb-in-set-overlay-allapps')?.addEventListener('change', async (e) => {
+      if (!this.overlayBridge) return;
+      const next = await this.overlayBridge.setOverlayAllApps(e.target.checked);
+      this.state.overlaySettings = { ...this.state.overlaySettings, ...next };
+      this.render();
+    });
+
+    page.querySelector('.fb-in-set-dl-choose-root')?.addEventListener('click', async () => {
+      if (!this.downloadsBridge) return;
+      const result = await this.downloadsBridge.chooseRoot();
+      if (result?.ok) {
+        this.state.downloadRoot = result.root;
+        this.render();
+      }
+    });
+
     page.querySelector('.fb-in-jump-passwords')?.addEventListener('click', () => {
       this.openInternalPage('yayra://passwords');
     });
@@ -1874,6 +2206,22 @@ export class BrowserShell {
 
     page.querySelector('.fb-in-jump-about')?.addEventListener('click', () => {
       this.openInternalPage('yayra://about');
+    });
+
+    page.querySelector('.fb-in-google-signin-btn')?.addEventListener('click', () => {
+      this.signInWithGoogle();
+    });
+
+    page.querySelector('.fb-in-google-signout-btn')?.addEventListener('click', () => {
+      this.signOutOfGoogle();
+    });
+
+    page.querySelector('.fb-in-google-switch-btn')?.addEventListener('click', () => {
+      this.switchGoogleAccount();
+    });
+
+    page.querySelector('.fb-in-google-manage-btn')?.addEventListener('click', () => {
+      this.openGoogleAccountPage();
     });
 
     viewport.appendChild(page);
@@ -2075,6 +2423,14 @@ export class BrowserShell {
 
     const items = this.state.downloadsItems || [];
     const viewMode = this.state.downloadsViewMode || 'list';
+    const hasRealBridge = Boolean(this.downloadsBridge);
+    const root = this.state.downloadRoot;
+
+    const actionButtons = (dl) => `
+      <button class="fb-in-dl-location-btn" data-id="${dl.id}" title="Show in folder" ${hasRealBridge ? '' : 'disabled'}>${Icons.folder} Show in Folder</button>
+      <button class="fb-btn fb-btn-secondary fb-in-dl-open" data-id="${dl.id}" ${hasRealBridge ? '' : 'disabled'}>Open</button>
+      <button class="fb-btn fb-btn-secondary fb-in-dl-del" data-id="${dl.id}">${Icons.close}</button>
+    `;
 
     page.innerHTML = `
       <div class="fb-internal-container">
@@ -2093,6 +2449,14 @@ export class BrowserShell {
           </div>
         </header>
 
+        <div class="fb-settings-group-card" style="margin-bottom:12px; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+          <div>
+            <strong style="display:block; font-size:0.85rem;">Save files to</strong>
+            <span style="font-size:0.78rem; color:var(--fb-text-muted);">${hasRealBridge ? (root || 'Default Downloads folder') : 'Choosing a custom folder requires the Yayra desktop app'}</span>
+          </div>
+          <button class="fb-btn fb-btn-secondary fb-in-dl-choose-root" ${hasRealBridge ? '' : 'disabled'}>Change…</button>
+        </div>
+
         ${viewMode === 'list' ? `
           <!-- List View -->
           <div class="fb-downloads-list-layout" style="display:flex; flex-direction:column; gap:8px;">
@@ -2102,17 +2466,14 @@ export class BrowserShell {
                   <span style="color:var(--fb-accent-primary);">${Icons.download}</span>
                   <div>
                     <strong style="display:block; font-size:0.9rem;">${dl.filename}</strong>
-                    <span style="font-size:0.75rem; color:var(--fb-text-muted);">${dl.size} • ${dl.state} • ${dl.date || 'Today'}</span>
+                    <span style="font-size:0.75rem; color:var(--fb-text-muted);">${dl.size} • ${dl.state}${dl.progress != null && dl.state === 'Downloading' ? ` (${dl.progress}%)` : ''} • ${dl.date || 'Today'}</span>
                   </div>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
-                  <!-- Requirement 11: Visit File Location Button -->
-                  <button class="fb-in-dl-location-btn" data-path="${dl.path || dl.filename}" data-name="${dl.filename}" title="Show in folder">${Icons.folder} Show in Folder</button>
-                  <button class="fb-btn fb-btn-secondary fb-in-dl-open" data-name="${dl.filename}">Open</button>
-                  <button class="fb-btn fb-btn-secondary fb-in-dl-del" data-id="${dl.id}">${Icons.close}</button>
+                  ${actionButtons(dl)}
                 </div>
               </div>
-            `).join('') : '<div class="fb-empty-state">No recent downloads found.</div>'}
+            `).join('') : `<div class="fb-empty-state">No downloads yet${hasRealBridge ? '' : ' (download tracking requires the Yayra desktop app)'}.</div>`}
           </div>
         ` : `
           <!-- Card Grid View -->
@@ -2125,12 +2486,10 @@ export class BrowserShell {
                 </div>
                 <span class="fb-card-meta">${dl.size} • ${dl.state}</span>
                 <div class="fb-card-actions" style="margin-top:12px;">
-                  <button class="fb-in-dl-location-btn" data-path="${dl.path || dl.filename}" data-name="${dl.filename}">${Icons.folder} Show in Folder</button>
-                  <button class="fb-btn fb-btn-secondary fb-in-dl-open" data-name="${dl.filename}">Open</button>
-                  <button class="fb-btn fb-btn-secondary fb-in-dl-del" data-id="${dl.id}">${Icons.close}</button>
+                  ${actionButtons(dl)}
                 </div>
               </div>
-            `).join('') : '<div class="fb-empty-state">No recent downloads found.</div>'}
+            `).join('') : `<div class="fb-empty-state">No downloads yet${hasRealBridge ? '' : ' (download tracking requires the Yayra desktop app)'}.</div>`}
           </div>
         `}
       </div>
@@ -2144,33 +2503,52 @@ export class BrowserShell {
       });
     });
 
-    page.querySelector('.fb-in-clear-dl-btn')?.addEventListener('click', () => {
-      this.state.downloadsItems = [];
+    page.querySelector('.fb-in-clear-dl-btn')?.addEventListener('click', async () => {
+      if (this.downloadsBridge) {
+        const result = await this.downloadsBridge.clear();
+        this.state.downloadsItems = result?.items || [];
+      } else {
+        this.state.downloadsItems = [];
+      }
       this.render();
     });
 
-    // Requirement 11: Visit Location Button
+    page.querySelector('.fb-in-dl-choose-root')?.addEventListener('click', async () => {
+      if (!this.downloadsBridge) return;
+      const result = await this.downloadsBridge.chooseRoot();
+      if (result?.ok) {
+        this.state.downloadRoot = result.root;
+        this.render();
+      }
+    });
+
+    // Requirement 11: Visit Location Button - now a real OS "reveal in file
+    // manager" call (electron shell.showItemInFolder) instead of a
+    // clipboard+alert placeholder.
     page.querySelectorAll('.fb-in-dl-location-btn').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const p = btn.dataset.path || btn.dataset.name;
-        if (typeof navigator !== 'undefined' && navigator.clipboard) {
-          navigator.clipboard.writeText(p);
-        }
-        alert(`File located at:\n${p}\n\n(Path copied to clipboard)`);
+        if (!this.downloadsBridge) return;
+        await this.downloadsBridge.showInFolder(btn.dataset.id);
       });
     });
 
     page.querySelectorAll('.fb-in-dl-open').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        alert(`Opening ${btn.dataset.name}...`);
+      btn.addEventListener('click', async () => {
+        if (!this.downloadsBridge) return;
+        await this.downloadsBridge.open(btn.dataset.id);
       });
     });
 
     page.querySelectorAll('.fb-in-dl-del').forEach((btn) => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const id = btn.dataset.id;
-        this.state.downloadsItems = this.state.downloadsItems.filter((d) => d.id !== id);
+        if (this.downloadsBridge) {
+          const result = await this.downloadsBridge.remove(id);
+          this.state.downloadsItems = result?.items || [];
+        } else {
+          this.state.downloadsItems = this.state.downloadsItems.filter((d) => d.id !== id);
+        }
         this.render();
       });
     });
@@ -2429,7 +2807,7 @@ export class BrowserShell {
         <div class="fb-about-hero">
           <div class="fb-about-logo">${Icons.officialOrb}</div>
           <div class="fb-about-appname" role="img" aria-label="yayra">${Icons.officialWordmark}</div>
-          <span class="fb-about-version fb-about-version-badge">Version 0.1.0 (Stable 64-bit Release)</span>
+          <span class="fb-about-version fb-about-version-badge">Version ${this.state.updateState.installedVersion || 'unknown'} (Stable 64-bit Release)</span>
           <p style="max-width:480px; color:var(--fb-text-secondary); font-size:0.9rem; margin:8px 0 16px;">
             Fast, private floating browser with native glassmorphism overlay and persistent assistive bubble.
           </p>
@@ -2792,6 +3170,7 @@ export class BrowserShell {
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-download-btn" title="Downloads" aria-label="Downloads">${Icons.download}</button>
           <button class="fb-action-btn fb-toolbar-action-btn fb-mini-extensions-btn" title="Extensions and Shields" aria-label="Extensions and Shields">${Icons.shield}</button>
           <button class="fb-mode-pill fb-mini-mode-btn" title="Switch floating mode" aria-label="Switch floating mode"><span class="fb-mode-dot"></span><span class="fb-mode-text">${this.state.desktopFloatingMode === 'browser-first' ? 'Browser' : 'Bubble'}</span></button>
+          ${this.authBridge ? `<button class="fb-action-btn fb-toolbar-action-btn fb-account-btn fb-mini-account-btn" title="Yayra account" aria-label="Account">${this.renderAccountAvatarHtml(this.state.googleAccount?.signedIn ? this.state.googleAccount.profile : null, 22)}</button>` : ''}
           <button class="fb-action-btn fb-menu-btn fb-toolbar-action-btn fb-mini-drawer-btn" title="Customize and control Yayra" aria-label="Main menu">${Icons.moreVertical}</button>
         </div>
       </nav>
@@ -2865,6 +3244,17 @@ export class BrowserShell {
       }
     });
 
+    win.querySelector('.fb-mini-account-btn')?.addEventListener('click', () => {
+      const existingDropdown = win.querySelector('.fb-account-dropdown');
+      if (existingDropdown) {
+        existingDropdown.remove();
+        this.state.isAccountMenuOpen = false;
+      } else {
+        this.state.isAccountMenuOpen = true;
+        this.renderAccountDropdown(win);
+      }
+    });
+
     win.querySelectorAll('.fb-mini-tab-item').forEach((tabEl) => {
       tabEl.addEventListener('click', (event) => {
         if (event.target.closest('.fb-mini-tab-close')) return;
@@ -2932,7 +3322,28 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * REQUIREMENT 3: SECURITY & SEARCH ENGINE DROPDOWN
    * ----------------------------------------------------------- */
+  // Shared full-viewport scrim for lightweight dropdowns (security badge,
+  // account menu). Unlike a plain "click outside" listener, this is a real
+  // element that sits above everything else except the main side drawer, so
+  // it reliably captures the click/scroll instead of letting it fall
+  // through to whatever is rendered underneath - exactly how Chrome's own
+  // toolbar dropdowns behave.
+  appendDropdownScrim(root, onClose) {
+    const scrim = document.createElement('button');
+    scrim.type = 'button';
+    scrim.className = 'fb-dropdown-scrim';
+    scrim.setAttribute('aria-label', 'Close menu');
+    scrim.addEventListener('click', onClose);
+    root.appendChild(scrim);
+    return scrim;
+  }
+
   renderSecurityDropdown(root) {
+    this.appendDropdownScrim(root, () => {
+      this.state.isSecurityDropdownOpen = false;
+      this.render();
+    });
+
     const dropdown = document.createElement('div');
     dropdown.className = 'fb-security-dropdown';
 
@@ -2991,59 +3402,146 @@ export class BrowserShell {
     root.appendChild(dropdown);
   }
 
+  /* -------------------------------------------------------------
+   * PERSISTENT TOP-RIGHT ACCOUNT DROPDOWN
+   * ----------------------------------------------------------- */
+  renderAccountDropdown(root) {
+    this.appendDropdownScrim(root, () => {
+      this.state.isAccountMenuOpen = false;
+      this.render();
+    });
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'fb-account-dropdown';
+
+    const account = this.state.googleAccount || { status: 'idle' };
+
+    if (account.status === 'signed-in' && account.profile) {
+      const { name, email } = account.profile;
+      const sinceLabel = account.savedAt
+        ? new Date(account.savedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+        : null;
+      dropdown.innerHTML = `
+        <div class="fb-account-dropdown-header">
+          ${this.renderAccountAvatarHtml(account.profile, 40)}
+          <div>
+            <strong>${name || email || 'Signed in'}</strong>
+            ${email ? `<p style="margin:2px 0 0; font-size:0.8rem; color:var(--fb-text-muted);">${email}</p>` : ''}
+          </div>
+        </div>
+        ${sinceLabel ? `<p style="margin:0; padding:0 2px; font-size:0.75rem; color:var(--fb-text-muted);">Signed in since ${sinceLabel}</p>` : ''}
+        <div class="fb-account-dropdown-actions">
+          <button class="fb-btn fb-btn-secondary fb-account-manage-btn" style="width:100%; justify-content:flex-start;">${Icons.externalLink} Manage Google Account</button>
+          <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
+          <button class="fb-btn fb-btn-secondary fb-account-switch-btn" style="width:100%; justify-content:flex-start;">${Icons.userCircle} Switch account</button>
+          <button class="fb-btn fb-btn-secondary fb-account-signout-btn" style="width:100%; justify-content:flex-start;">${Icons.close} Sign out</button>
+        </div>
+      `;
+    } else {
+      const isSigningIn = account.status === 'signing-in';
+      const errorNote = account.status === 'error'
+        ? `<p style="margin:0; color:#f66; font-size:0.8rem;">Couldn't sign in: ${account.error === 'not_configured' ? 'Google sign-in isn\u2019t configured for this build yet.' : (account.error || 'please try again.')}</p>`
+        : '';
+      dropdown.innerHTML = `
+        <div class="fb-account-dropdown-header">
+          ${this.renderAccountAvatarHtml(null, 40)}
+          <div>
+            <strong>Not signed in</strong>
+            <p style="margin:2px 0 0; font-size:0.8rem; color:var(--fb-text-muted);">Sign in to personalize Yayra</p>
+          </div>
+        </div>
+        ${errorNote}
+        <div class="fb-account-dropdown-actions">
+          <button class="fb-btn fb-btn-primary fb-account-signin-btn" style="width:100%;" ${isSigningIn ? 'disabled' : ''}>${isSigningIn ? 'Signing in&hellip;' : 'Sign in with Google'}</button>
+          <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
+        </div>
+      `;
+    }
+
+    dropdown.querySelector('.fb-account-manage-btn')?.addEventListener('click', () => this.openGoogleAccountPage());
+    dropdown.querySelector('.fb-account-switch-btn')?.addEventListener('click', () => this.switchGoogleAccount());
+    dropdown.querySelector('.fb-account-signout-btn')?.addEventListener('click', () => this.signOutOfGoogle());
+    dropdown.querySelector('.fb-account-signin-btn')?.addEventListener('click', () => this.signInWithGoogle());
+    dropdown.querySelector('.fb-account-settings-btn')?.addEventListener('click', () => {
+      this.state.isAccountMenuOpen = false;
+      this.state.settingsActiveCategory = 'account';
+      this.state.activeSettingsCategory = 'account';
+      this.openInternalPage('yayra://settings');
+    });
+
+    root.appendChild(dropdown);
+  }
+
   async checkForUpdates(manual = false) {
     if (this.state.updateState.status === 'checking') return;
     this.state.updateState = { ...this.state.updateState, status: 'checking' };
     this.render();
 
+    // The Cloudflare Worker's /updates/manifest.json (via UpdateService) is
+    // the single source of truth for "is a real update available" - it
+    // already encodes per-target min-supported versions, staged rollout
+    // percentages and ETag-cached fetches. There used to be a second,
+    // independent "fallback" check here that fetched the raw GitHub Releases
+    // API directly and compared the tag against a version string that was
+    // hardcoded to '0.1.0' and never updated. That meant the fallback judged
+    // the installed app "out of date" against EVERY release forever (0.1.0
+    // never equals any real tag), even right after the UpdateService itself
+    // had just confirmed the app was fully up to date - producing an
+    // "update ready" prompt on every load/reload that could never be
+    // satisfied. Removed entirely rather than patched, since UpdateService
+    // already does this correctly and duplicating it only reintroduces the
+    // same class of bug. See tests/update-service.test.mjs and
+    // tests/browser-shell-update-check.test.mjs.
+    if (!this.updateService || typeof this.updateService.check !== 'function') {
+      this.state.updateState = {
+        ...this.state.updateState,
+        status: 'unknown',
+        availableVersion: null,
+        notes: 'No update service configured.'
+      };
+      this.render();
+      return;
+    }
+
+    // Only the network call to the Worker-backed UpdateService is wrapped in
+    // try/catch here (offline/5xx/etc). Showing the confirm()/alert()
+    // dialogs afterward is deliberately kept OUTSIDE that try block: if a
+    // browser blocks repeated dialogs (e.g. Chrome's "Prevent this page from
+    // creating additional dialogs" safeguard, which can trip after a prior
+    // dialog loop like the one this fix addresses) or a WebView lacks
+    // window.alert/confirm, that must never be swallowed as if the update
+    // check itself had failed - doing so previously reset the state back to
+    // "uptodate" and skipped window.location.reload() silently, with no
+    // visible error, right after telling the user an update was ready.
+    let res;
     try {
-      // 1. Try local UpdateService if present
-      if (this.updateService && typeof this.updateService.check === 'function') {
-        const res = await this.updateService.check({ manual });
-        if (res && (res.status === 'available' || res.status === 'ready')) {
-          this.state.updateState = {
-            status: 'ready',
-            installedVersion: this.state.updateState.installedVersion || '0.1.0',
-            availableVersion: res.availableVersion || '0.1.1',
-            notes: res.notes || 'Update ready.'
-          };
-          this.promptUpdateReady();
-          this.render();
-          return;
-        }
-      }
-
-      // 2. Query GitHub Releases API from public repo
-      const ghRes = await fetch('https://yayra-updates-api.g2code335.workers.dev/api/latest-release', {
-        headers: { Accept: 'application/vnd.github.v3+json' }
-      }).catch(() => null);
-
-      if (ghRes && ghRes.ok) {
-        const ghData = await ghRes.json();
-        const latestTag = (ghData.tag_name || '').replace(/^v/, '');
-        if (latestTag && latestTag !== this.state.updateState.installedVersion) {
-          this.state.updateState = {
-            status: 'ready',
-            installedVersion: '0.1.0',
-            availableVersion: latestTag,
-            notes: ghData.body || 'New GitHub release available.'
-          };
-          this.promptUpdateReady();
-          this.render();
-          return;
-        }
-      }
-
+      res = await this.updateService.check({ manual });
+    } catch {
       this.state.updateState = {
         ...this.state.updateState,
         status: 'uptodate',
         availableVersion: null
       };
       this.render();
-    } catch {
+      return;
+    }
+
+    if (res && (res.status === 'available' || res.status === 'ready')) {
+      this.state.updateState = {
+        status: 'ready',
+        installedVersion: res.installedVersion ?? this.state.updateState.installedVersion,
+        availableVersion: res.version || null,
+        notes: res.notes || (res.force ? 'A required update is ready.' : 'Update ready.')
+      };
+      this.render();
+      this.promptUpdateReady();
+    } else {
+      // 'upToDate', 'ahead', 'unknown', 'disabled', etc. - never a reason to
+      // show the "update ready" dialog.
       this.state.updateState = {
         ...this.state.updateState,
-        status: 'uptodate',
+        status: res?.status === 'upToDate' ? 'uptodate' : (res?.status || 'uptodate'),
+        installedVersion: res?.installedVersion ?? this.state.updateState.installedVersion,
         availableVersion: null
       };
       this.render();
@@ -3054,14 +3552,27 @@ export class BrowserShell {
     if (this.state.updatePromptShown) return;
     this.state.updatePromptShown = true;
     const msg = `An update for Yayra (v${this.state.updateState.availableVersion || '0.1.1'}) is ready!\n\nWould you like to restart and apply the update now?`;
-    if (typeof window !== 'undefined' && window.confirm && window.confirm(msg)) {
-      this.applyUpdate();
+    try {
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function' && window.confirm(msg)) {
+        this.applyUpdate();
+      }
+    } catch (err) {
+      // A blocked/unavailable confirm() must not crash the update flow or be
+      // mistaken for "no update available" elsewhere.
+      this.logger?.(`[updates] confirm dialog unavailable: ${err?.message || err}`);
     }
   }
 
   applyUpdate() {
-    alert('Updating Yayra to latest version in background...');
-    if (typeof window !== 'undefined' && window.location) {
+    try {
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert('Updating Yayra to latest version in background...');
+      }
+    } catch {
+      // Dialogs can be blocked by the browser after repeated prompts - that
+      // must never prevent the actual reload/update below from happening.
+    }
+    if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
       window.location.reload();
     }
   }
@@ -3100,7 +3611,7 @@ export class BrowserShell {
             <button class="fb-drawer-update-btn fb-update-ready-btn" title="Click to restart and apply update">
               <span class="fb-update-badge-icon">${Icons.update}</span>
               <div class="fb-update-text-group">
-                <strong>Update Yayra (${this.state.updateState.availableVersion || 'v0.1.1 Available'})</strong>
+                <strong>Update Yayra (${this.state.updateState.availableVersion ? `v${this.state.updateState.availableVersion}` : 'Update available'})</strong>
                 <span>Click to restart & update now</span>
               </div>
             </button>
@@ -3108,7 +3619,7 @@ export class BrowserShell {
             <div class="fb-drawer-update-status-row">
               <div class="fb-update-status-left">
                 <span class="fb-status-orb ${this.state.updateState.status === 'checking' ? 'pulse' : 'green'}"></span>
-                <span class="fb-update-status-text">${this.state.updateState.status === 'checking' ? 'Checking for updates...' : 'Yayra v0.1.0 (Latest)'}</span>
+                <span class="fb-update-status-text">${this.state.updateState.status === 'checking' ? 'Checking for updates...' : (this.state.updateState.installedVersion ? `Yayra v${this.state.updateState.installedVersion} (Latest)` : 'Yayra is up to date')}</span>
               </div>
               <button class="fb-btn-action fb-check-updates-btn" title="Check for updates">${Icons.refresh}</button>
             </div>
@@ -4499,6 +5010,106 @@ export class BrowserShell {
     }
   }
 
+  // --- Tab strip right-click actions (Chrome parity - see renderTabContextMenu) ---
+
+  duplicateTabById(tabId) {
+    const tab = this.state.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const newId = `tab-${Date.now()}`;
+    const index = this.state.tabs.findIndex((t) => t.id === tabId);
+    const duplicate = { ...tab, id: newId, isLoading: false };
+    this.state.tabs.splice(index + 1, 0, duplicate);
+    this.selectTab(newId);
+  }
+
+  reloadTabById(tabId) {
+    if (tabId === this.state.activeTabId) {
+      this.reload();
+      return;
+    }
+    // Background tabs rendered via the native engine can still be reloaded
+    // directly through the webview bridge; iframe-rendered tabs simply pick
+    // up the reload once the user switches to them (no native handle to
+    // force a reload while not visible).
+    if (this.nativeWebview?.reload) this.nativeWebview.reload(tabId);
+  }
+
+  closeOtherTabs(tabId) {
+    const keep = this.state.tabs.find((t) => t.id === tabId);
+    if (!keep) return;
+    for (const tab of [...this.state.tabs]) {
+      if (tab.id !== tabId) this.closeTab(tab.id);
+    }
+    if (this.state.activeTabId !== tabId) this.selectTab(tabId);
+  }
+
+  closeTabsToTheRight(tabId) {
+    const index = this.state.tabs.findIndex((t) => t.id === tabId);
+    if (index === -1) return;
+    for (const tab of this.state.tabs.slice(index + 1)) {
+      this.closeTab(tab.id);
+    }
+  }
+
+  /* -------------------------------------------------------------
+   * CHROME-STYLE RIGHT-CLICK CONTEXT MENU FOR THE TAB STRIP
+   * ----------------------------------------------------------- */
+  renderTabContextMenu(x, y, tab) {
+    document.body.querySelector('.fb-tab-context-menu')?.remove();
+    document.body.querySelector('.fb-dropdown-scrim[data-tab-ctx]')?.remove();
+
+    const scrim = document.createElement('button');
+    scrim.type = 'button';
+    scrim.className = 'fb-dropdown-scrim';
+    scrim.dataset.tabCtx = 'true';
+    scrim.setAttribute('aria-label', 'Close menu');
+    scrim.addEventListener('click', () => scrim.remove());
+    scrim.addEventListener('contextmenu', (e) => { e.preventDefault(); scrim.remove(); });
+
+    const menu = document.createElement('div');
+    menu.className = 'fb-tab-context-menu';
+    const canCloseOthers = this.state.tabs.length > 1;
+    const tabIndex = this.state.tabs.findIndex((t) => t.id === tab.id);
+    const canCloseRight = tabIndex > -1 && tabIndex < this.state.tabs.length - 1;
+
+    const items = [
+      { label: 'New Tab', action: () => this.createNewTab() },
+      null,
+      { label: 'Reload', action: () => this.reloadTabById(tab.id) },
+      { label: 'Duplicate Tab', action: () => this.duplicateTabById(tab.id) },
+      null,
+      { label: 'Close Tab', action: () => this.closeTab(tab.id) },
+      { label: 'Close Other Tabs', action: () => this.closeOtherTabs(tab.id), disabled: !canCloseOthers },
+      { label: 'Close Tabs to the Right', action: () => this.closeTabsToTheRight(tab.id), disabled: !canCloseRight }
+    ];
+
+    menu.innerHTML = items.map((item, i) => item === null
+      ? '<div class="fb-tab-context-menu-sep"></div>'
+      : `<button type="button" class="fb-tab-context-menu-item" data-idx="${i}" ${item.disabled ? 'disabled' : ''}>${item.label}</button>`
+    ).join('');
+
+    menu.querySelectorAll('.fb-tab-context-menu-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const item = items[Number(btn.dataset.idx)];
+        scrim.remove();
+        menu.remove();
+        item?.action?.();
+        this.render();
+      });
+    });
+
+    document.body.appendChild(scrim);
+    document.body.appendChild(menu);
+
+    // Clamp to viewport so it never renders off-screen near the right/bottom edge.
+    const menuWidth = 220;
+    const menuHeight = items.length * 34 + 16;
+    const left = Math.min(x, window.innerWidth - menuWidth - 8);
+    const top = Math.min(y, window.innerHeight - menuHeight - 8);
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+  }
+
   restoreLastClosedTab() {
     if (this.state.closedTabsHistory.length === 0) return;
 
@@ -5009,6 +5620,10 @@ export class BrowserShell {
         this.state.isSecurityDropdownOpen = false;
         this.render();
       }
+      if (this.state.isAccountMenuOpen) {
+        this.state.isAccountMenuOpen = false;
+        this.render();
+      }
       if (this.state.isSideDrawerOpen) {
         this.state.isSideDrawerOpen = false;
         this.render();
@@ -5024,6 +5639,10 @@ export class BrowserShell {
     if (this._unsubscribeNativeWebview) {
       this._unsubscribeNativeWebview();
       this._unsubscribeNativeWebview = null;
+    }
+    if (this._unsubscribeAuthBridge) {
+      this._unsubscribeAuthBridge();
+      this._unsubscribeAuthBridge = null;
     }
     for (const tabId of Array.from(this._nativeWebviewTabIds || [])) {
       this.destroyNativeWebview(tabId);

@@ -31,14 +31,26 @@
  *
  * GOOGLE / IDENTITY PROVIDER SIGN-IN
  * -----------------------------------
- * Independent of iframes, Google (and several other identity providers)
- * actively detect and refuse to complete sign-in inside ANY embedded browser
- * surface - including a legitimate WebContentsView - as an anti-phishing
- * measure. See https://developers.google.com/identity/protocols/oauth2/policies#embedded-webviews.
- * Yayra does not attempt to spoof or bypass that detection. Instead,
- * navigations to a known identity-provider sign-in host are handed off to the
- * user's default system browser via `shell.openExternal`, which is Google's
- * own documented recommendation for native/desktop apps.
+ * Google (and several other identity providers) actively detect and refuse
+ * to complete sign-in inside embedded browser surfaces as an anti-phishing
+ * measure - see https://developers.google.com/identity/protocols/oauth2/policies#embedded-webviews.
+ * An earlier version of this file tried presenting a desktop-Chrome identity
+ * string (see `buildBrowserUserAgent()` below) specifically to get Google
+ * sign-in itself to complete embedded. That did not work: Google also
+ * inspects Client Hints (`navigator.userAgentData`, `Sec-CH-UA*` headers),
+ * which a simple User-Agent string override does not change, and multiple
+ * independent reports confirm Google has been actively closing this
+ * loophole even for full Client Hints spoofing. Chasing that further is a
+ * fragile, ever-escalating fight against Google's own anti-phishing system
+ * for uncertain payoff, so Google sign-in is back on the system-browser
+ * handoff path here, same as Apple/Microsoft, per Google's own
+ * recommendation and RFC 8252 ("OAuth 2.0 for Native Apps").
+ *
+ * `buildBrowserUserAgent()` is kept and still applied to every tab, but only
+ * for ordinary general-purpose site compatibility (many sites show "upgrade
+ * your browser" nags or misrender for a Electron/x.y.z identity string) -
+ * not as an attempt to defeat any site's anti-phishing/anti-automation
+ * checks, which remain in effect and are handled by the handoff below.
  */
 
 // Apex hostnames (and all subdomains) that must be completed in the user's
@@ -52,6 +64,23 @@ const SYSTEM_BROWSER_AUTH_HOSTS = Object.freeze([
 
 const WEBVIEW_EVENT_CHANNEL = 'yayra:webview-event';
 
+/**
+ * Builds a standard desktop Chrome User-Agent string for the current
+ * platform/Chromium version, deliberately omitting the "Electron/x.y.z"
+ * token Electron appends by default. Pure function (reads only static
+ * `process.versions`/`process.platform`), fully unit-testable. Used only for
+ * general site compatibility - see the "GOOGLE / IDENTITY PROVIDER SIGN-IN"
+ * note above.
+ */
+function buildBrowserUserAgent({ platform = process.platform, chromeVersion = process.versions.chrome } = {}) {
+  const platformToken = platform === 'win32'
+    ? 'Windows NT 10.0; Win64; x64'
+    : platform === 'darwin'
+      ? 'Macintosh; Intel Mac OS X 10_15_7'
+      : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${platformToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+}
+
 function hostnameOf(rawUrl) {
   try {
     return new URL(rawUrl).hostname.toLowerCase();
@@ -64,6 +93,76 @@ function requiresSystemBrowserAuth(rawUrl, hosts = SYSTEM_BROWSER_AUTH_HOSTS) {
   const hostname = hostnameOf(rawUrl);
   if (!hostname) return false;
   return hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+}
+
+/**
+ * Builds a Chrome-equivalent native right-click context menu template for a
+ * WebContentsView, from the `params` Electron's own `context-menu` webContents
+ * event already hands us (link/image/selection/editable info - no manual
+ * DOM inspection needed). Pure(ish) function - only touches the passed-in
+ * `wc` (to read canGoBack/canGoForward and to run the actual action when a
+ * user clicks an item) and `clipboard`/`send` - so it is fully unit-testable
+ * without a real Electron `Menu`. See tests/electron-webview-bridge.test.mjs.
+ */
+function buildContextMenuTemplate({ params, wc, tabId, send, clipboard }) {
+  const template = [];
+  const isLink = !!(params && params.linkURL);
+  const isImage = !!(params && params.mediaType === 'image' && params.srcURL);
+  const isEditable = !!(params && params.isEditable);
+  const hasSelection = !!(params && params.selectionText && params.selectionText.trim());
+
+  if (isLink) {
+    template.push(
+      { label: 'Open Link in New Tab', click: () => send(tabId, 'new-window-request', { url: params.linkURL }) },
+      { label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) }
+    );
+  }
+
+  if (isImage) {
+    if (template.length) template.push({ type: 'separator' });
+    template.push(
+      { label: 'Open Image in New Tab', click: () => send(tabId, 'new-window-request', { url: params.srcURL }) },
+      { label: 'Save Image As\u2026', click: () => wc.downloadURL(params.srcURL) },
+      { label: 'Copy Image Address', click: () => clipboard.writeText(params.srcURL) }
+    );
+  }
+
+  if (isEditable) {
+    if (template.length) template.push({ type: 'separator' });
+    const flags = params.editFlags || {};
+    template.push(
+      { label: 'Undo', enabled: flags.canUndo !== false, click: () => wc.undo() },
+      { label: 'Redo', enabled: flags.canRedo === true, click: () => wc.redo() },
+      { type: 'separator' },
+      { label: 'Cut', enabled: flags.canCut !== false, click: () => wc.cut() },
+      { label: 'Copy', enabled: flags.canCopy !== false, click: () => wc.copy() },
+      { label: 'Paste', enabled: flags.canPaste !== false, click: () => wc.paste() },
+      { type: 'separator' },
+      { label: 'Select All', enabled: flags.canSelectAll !== false, click: () => wc.selectAll() }
+    );
+  } else if (hasSelection) {
+    if (template.length) template.push({ type: 'separator' });
+    const trimmed = params.selectionText.trim();
+    const shortText = trimmed.length > 32 ? `${trimmed.slice(0, 32)}\u2026` : trimmed;
+    template.push(
+      { label: 'Copy', click: () => wc.copy() },
+      {
+        label: `Search Google for "${shortText}"`,
+        click: () => send(tabId, 'new-window-request', { url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}` })
+      }
+    );
+  }
+
+  if (template.length) template.push({ type: 'separator' });
+  template.push(
+    { label: 'Back', enabled: wc.canGoBack(), click: () => wc.goBack() },
+    { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
+    { label: 'Reload', click: () => wc.reload() },
+    { type: 'separator' },
+    { label: 'Inspect', click: () => wc.inspectElement((params && params.x) || 0, (params && params.y) || 0) }
+  );
+
+  return template;
 }
 
 function sanitizeBounds(bounds) {
@@ -89,6 +188,12 @@ function createWebviewBridge({
   shell,
   getMainWindow,
   authHosts = SYSTEM_BROWSER_AUTH_HOSTS,
+  // Injected (rather than `require('electron')`'d directly) so this stays
+  // unit-testable with fakes - see tests/electron-webview-bridge.test.mjs.
+  // Both are optional: if a host app doesn't pass them, right-click simply
+  // does nothing instead of throwing.
+  Menu = null,
+  clipboard = null,
   logger = console
 }) {
   const views = new Map(); // tabId -> { view, lastUrl }
@@ -131,6 +236,23 @@ function createWebviewBridge({
       if (!isMainFrame || errorCode === -3) return;
       send(tabId, 'fail-load', { errorCode, errorDescription, url: validatedUrl });
     });
+    // Chrome-equivalent native right-click menu. A WebContentsView (unlike
+    // a plain <webview> tag) shows NO context menu at all by default, so
+    // without this, right-clicking any real website inside Yayra would
+    // silently do nothing.
+    wc.on('context-menu', (_event, params) => {
+      if (!Menu) return;
+      const template = buildContextMenuTemplate({
+        params,
+        wc,
+        tabId,
+        send,
+        clipboard: clipboard || { writeText: () => {} }
+      });
+      const win = getMainWindow();
+      if (!win || win.isDestroyed()) return;
+      Menu.buildFromTemplate(template).popup({ window: win });
+    });
     wc.setWindowOpenHandler(({ url }) => {
       if (requiresSystemBrowserAuth(url, authHosts)) {
         shell.openExternal(url).catch((err) => logger.error('[yayra:webview] failed to open external auth url', err));
@@ -152,6 +274,9 @@ function createWebviewBridge({
         partition: isPrivate ? `incognito-${tabId}` : 'persist:yayra-webview'
       }
     });
+    if (typeof view.webContents.setUserAgent === 'function') {
+      view.webContents.setUserAgent(buildBrowserUserAgent());
+    }
     const entry = { view, lastUrl: null };
     views.set(tabId, entry);
     attachListeners(tabId, view);
@@ -267,5 +392,7 @@ module.exports = {
   SYSTEM_BROWSER_AUTH_HOSTS,
   requiresSystemBrowserAuth,
   sanitizeBounds,
+  buildBrowserUserAgent,
+  buildContextMenuTemplate,
   createWebviewBridge
 };

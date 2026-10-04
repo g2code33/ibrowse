@@ -1,0 +1,208 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createOverlayBridge } from '../electron/overlayWindow.cjs';
+import { createOverlayStore } from '../electron/overlayStore.cjs';
+
+function makeTempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'yayra-overlay-window-'));
+}
+
+function fakeIpcMain() {
+  const handlers = new Map();
+  const onHandlers = new Map();
+  return {
+    handlers,
+    onHandlers,
+    handle: (channel, fn) => handlers.set(channel, fn),
+    on: (channel, fn) => onHandlers.set(channel, fn)
+  };
+}
+
+function fakeScreen() {
+  return { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) };
+}
+
+function makeFakeBrowserWindowClass() {
+  const instances = [];
+  class FakeBrowserWindow {
+    constructor(opts) {
+      this.opts = opts;
+      this.destroyed = false;
+      this.alwaysOnTop = null;
+      this.visibleOnAllWorkspaces = null;
+      this.loadedUrl = null;
+      this._listeners = {};
+      this._position = [opts.x, opts.y];
+      instances.push(this);
+    }
+    setAlwaysOnTop(flag, level) { this.alwaysOnTop = { flag, level }; }
+    setVisibleOnAllWorkspaces(flag, opts) { this.visibleOnAllWorkspaces = { flag, opts }; }
+    setContentProtection() {}
+    loadURL(url) { this.loadedUrl = url; }
+    on(event, cb) { this._listeners[event] = cb; }
+    getPosition() { return this._position; }
+    close() { this.destroyed = true; this._listeners.closed?.(); }
+    isDestroyed() { return this.destroyed; }
+  }
+  return { FakeBrowserWindow, instances };
+}
+
+function fakeApp() {
+  const calls = [];
+  return {
+    calls,
+    setLoginItemSettings: (opts) => calls.push(opts),
+    getPath: () => '/tmp'
+  };
+}
+
+test('overlayWindow: initializeOnStartup() creates the bubble window on launch - with no main window ever having opened', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const app = fakeApp();
+  const ipcMain = fakeIpcMain();
+
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app,
+    ipcMain,
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null // main browser window was never opened
+  });
+
+  bridge.initializeOnStartup();
+
+  assert.equal(instances.length, 1, 'overlay window is created independently of the main window');
+  assert.equal(app.calls.at(-1).openAtLogin, true, 'launch-at-startup default is committed to the OS on first run');
+  const win = instances[0];
+  assert.equal(win.alwaysOnTop.level, 'screen-saver', 'uses the highest always-on-top level Electron exposes');
+  assert.equal(win.visibleOnAllWorkspaces.flag, true, 'stays visible across virtual desktops/Spaces and fullscreen apps');
+  assert.ok(win.loadedUrl.startsWith('data:text/html'));
+});
+
+test('overlayWindow: setEnabled(false) destroys the window and setEnabled(true) recreates it', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.ensureOverlayWindow();
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].isDestroyed(), false);
+
+  bridge.setEnabled(false);
+  assert.equal(instances[0].isDestroyed(), true);
+  assert.equal(overlayStore.load().enabled, false);
+  assert.equal(bridge.getOverlayWindow(), null);
+
+  bridge.setEnabled(true);
+  assert.equal(instances.length, 2);
+  assert.equal(overlayStore.load().enabled, true);
+});
+
+test('overlayWindow: setLaunchAtStartup() both persists the preference and calls the real OS login-item API', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const app = fakeApp();
+  const bridge = createOverlayBridge({
+    BrowserWindow: makeFakeBrowserWindowClass().FakeBrowserWindow,
+    app,
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.setLaunchAtStartup(false);
+  assert.equal(overlayStore.load().launchAtStartup, false);
+  assert.equal(app.calls.at(-1).openAtLogin, false);
+});
+
+test('overlayWindow: moving the window persists its new position so it stays put across restarts', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.ensureOverlayWindow();
+  const win = instances[0];
+  win._position = [500, 600];
+  win._listeners.moved();
+
+  assert.deepEqual(overlayStore.load().position, { x: 500, y: 600 });
+});
+
+test('overlayWindow: clicking the bubble (yayra:overlay-restore) shows, un-minimizes, and focuses the main window', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const ipcMain = fakeIpcMain();
+  const calls = [];
+  const fakeMainWindow = {
+    isDestroyed: () => false,
+    isMinimized: () => true,
+    restore: () => calls.push('restore'),
+    show: () => calls.push('show'),
+    focus: () => calls.push('focus')
+  };
+
+  createOverlayBridge({
+    BrowserWindow: makeFakeBrowserWindowClass().FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain,
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => fakeMainWindow
+  });
+
+  ipcMain.onHandlers.get('yayra:overlay-restore')();
+  assert.deepEqual(calls, ['restore', 'show', 'focus']);
+});
+
+test('overlayWindow: disabled-by-default means ensureOverlayWindow() is a no-op once the user turns it off', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  overlayStore.save({ enabled: false });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.initializeOnStartup();
+  assert.equal(instances.length, 0);
+});

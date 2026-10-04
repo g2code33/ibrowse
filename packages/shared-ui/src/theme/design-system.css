@@ -528,13 +528,6 @@ html {
   color: var(--fb-text-primary);
 }
 
-.fb-window-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-
 .fb-btn-action {
   background: transparent;
   border: none;
@@ -2646,7 +2639,7 @@ html {
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
   padding: 14px;
-  z-index: 1000;
+  z-index: 500001;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2687,10 +2680,134 @@ html {
   color: var(--fb-text-primary);
 }
 
+/* =============================================================
+   3d. CHROME-STYLE RIGHT-CLICK CONTEXT MENUS (tab strip, etc.)
+   ============================================================= */
+.fb-tab-context-menu {
+  position: fixed;
+  width: 220px;
+  background: #171c2b;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 6px;
+  z-index: 500001;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: fb-fade-in 0.1s ease;
+  font-size: 0.85rem;
+}
+
+.fb-tab-context-menu-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--fb-text-primary);
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.fb-tab-context-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fb-tab-context-menu-item:disabled {
+  color: var(--fb-text-muted);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fb-tab-context-menu-sep {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 4px 2px;
+}
+
+/* =============================================================
+   3c. SHARED LIGHTWEIGHT DROPDOWN SCRIM (Security & Account dropdowns)
+   - Always covers the full viewport (position: fixed, not absolute) and
+     sits above every other overlay tier except the main "yayra" side
+     drawer, so these dropdowns are reliably topmost when opened and a
+     stray click/scroll never reaches whatever is rendered underneath
+     them - it just closes the dropdown instead, exactly like Chrome.
+   ============================================================= */
+.fb-dropdown-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 500000;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.12);
+  cursor: default;
+  animation: fb-fade-in 0.12s ease;
+}
+
 .fb-search-engine-option.active {
   background: rgba(6, 182, 212, 0.15);
   color: var(--fb-accent-primary);
   font-weight: 700;
+}
+
+/* =============================================================
+   3b. PERSISTENT TOP-RIGHT ACCOUNT BUTTON & DROPDOWN
+   ============================================================= */
+.fb-account-btn {
+  padding: 3px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fb-account-btn-busy {
+  animation: fb-account-btn-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes fb-account-btn-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.fb-account-dropdown {
+  position: absolute;
+  top: 44px;
+  right: 16px;
+  width: 300px;
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 14px;
+  z-index: 500001;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fb-slide-up 0.15s ease;
+}
+
+.fb-account-dropdown-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fb-account-dropdown-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-account-dropdown-actions .fb-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
 }
 
 /* =============================================================
@@ -2737,15 +2854,16 @@ html {
    5. FULL RIGHT-SIDE DRAWER MENU (NO BLUR)
    ============================================================= */
 .fb-side-drawer-scrim {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 1999;
+  z-index: 600000;
   width: 100%;
   height: 100%;
   padding: 0;
   border: 0;
-  background: transparent;
+  background: rgba(0, 0, 0, 0.45);
   cursor: default;
+  animation: fb-fade-in 0.15s ease;
 }
 
 .fb-side-drawer-menu {
@@ -2759,7 +2877,7 @@ html {
   box-shadow: -10px 0 36px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
-  z-index: 2000;
+  z-index: 600001;
   animation: fb-drawer-slide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   /* CRITICAL: NO BLUR ON WORKSPACE */
   backdrop-filter: none !important;

@@ -445,6 +445,12 @@ test('Requirement 11: Downloads page includes Visit File Location button and Lis
   });
 
   await shell.initialize();
+  // The Downloads list starts empty (no seeded/fake rows - see
+  // BrowserShell.js state.downloadsItems); inject one real-shaped item here
+  // purely to exercise the per-row action buttons/view toggle.
+  shell.state.downloadsItems = [
+    { id: 'dl-test-1', filename: 'report.pdf', path: '/tmp/report.pdf', size: '1.2 MB', state: 'Completed', date: 'Just now' }
+  ];
   shell.render(container);
 
   // Navigate to Downloads

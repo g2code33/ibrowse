@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   requiresSystemBrowserAuth,
   sanitizeBounds,
+  buildBrowserUserAgent,
+  buildContextMenuTemplate,
   createWebviewBridge,
   WEBVIEW_EVENT_CHANNEL
 } from '../electron/webviewBridge.cjs';
@@ -23,6 +25,15 @@ test('requiresSystemBrowserAuth: does not flag ordinary browsing (including othe
   assert.equal(requiresSystemBrowserAuth('not a url'), false);
 });
 
+test('buildBrowserUserAgent: never includes the Electron identity token, on any platform', () => {
+  for (const platform of ['win32', 'darwin', 'linux']) {
+    const ua = buildBrowserUserAgent({ platform, chromeVersion: '130.0.6723.70' });
+    assert.doesNotMatch(ua, /Electron/i);
+    assert.match(ua, /Chrome\/130\.0\.6723\.70/);
+    assert.match(ua, /AppleWebKit\/537\.36/);
+  }
+});
+
 test('sanitizeBounds: clamps negative/missing values and rounds floats', () => {
   assert.deepEqual(sanitizeBounds({ x: -5, y: 12.6, width: 300.2, height: NaN }), { x: 0, y: 13, width: 300, height: 0 });
   assert.deepEqual(sanitizeBounds(undefined), { x: 0, y: 0, width: 0, height: 0 });
@@ -36,17 +47,21 @@ function createFakeWebContents() {
   let destroyed = false;
   let backStack = [];
   let forwardStack = [];
+  let userAgent = null;
+  const calls = [];
   return {
     loadURL: async () => {},
-    reload: () => {},
+    reload: () => { calls.push('reload'); },
     stop: () => {},
     close: () => { destroyed = true; },
     isDestroyed: () => destroyed,
     canGoBack: () => backStack.length > 0,
     canGoForward: () => forwardStack.length > 0,
-    goBack: () => { if (backStack.length) forwardStack.push(backStack.pop()); },
-    goForward: () => { if (forwardStack.length) backStack.push(forwardStack.pop()); },
+    goBack: () => { if (backStack.length) forwardStack.push(backStack.pop()); calls.push('goBack'); },
+    goForward: () => { if (forwardStack.length) backStack.push(forwardStack.pop()); calls.push('goForward'); },
     setWindowOpenHandler: (fn) => { windowOpenHandler = fn; },
+    setUserAgent: (ua) => { userAgent = ua; },
+    get userAgent() { return userAgent; },
     on: (event, fn) => {
       if (!listeners.has(event)) listeners.set(event, []);
       listeners.get(event).push(fn);
@@ -55,10 +70,24 @@ function createFakeWebContents() {
       for (const fn of listeners.get(event) || []) fn(...args);
     },
     _simulateWindowOpen: (details) => windowOpenHandler(details),
+    _simulateContextMenu: (params) => {
+      for (const fn of listeners.get('context-menu') || []) fn({}, params);
+    },
     _backStack: backStack,
-    _forwardStack: forwardStack
+    _forwardStack: forwardStack,
+    _calls: calls,
+    // Right-click menu actions (Chrome parity) - see buildContextMenuTemplate.
+    copy: () => calls.push('copy'),
+    cut: () => calls.push('cut'),
+    paste: () => calls.push('paste'),
+    undo: () => calls.push('undo'),
+    redo: () => calls.push('redo'),
+    selectAll: () => calls.push('selectAll'),
+    inspectElement: (x, y) => calls.push(`inspectElement:${x},${y}`),
+    downloadURL: (url) => calls.push(`downloadURL:${url}`)
   };
 }
+
 
 function createFakeWebContentsView() {
   const webContents = createFakeWebContents();
@@ -95,16 +124,28 @@ function makeHarness({ authHosts } = {}) {
     return view;
   };
 
+  const clipboardWrites = [];
+  const clipboard = { writeText: (text) => clipboardWrites.push(text) };
+  const popupCalls = [];
+  const Menu = {
+    buildFromTemplate: (template) => ({
+      template,
+      popup: (opts) => popupCalls.push({ template, opts })
+    })
+  };
+
   const bridge = createWebviewBridge({
     WebContentsView,
     ipcMain,
     shell,
+    Menu,
+    clipboard,
     getMainWindow: () => fakeWin,
     authHosts,
     logger: { error: () => {} }
   });
 
-  return { bridge, handlers, sentEvents, fakeWin, externalCalls, views };
+  return { bridge, handlers, sentEvents, fakeWin, externalCalls, views, clipboardWrites, popupCalls };
 }
 
 test('webview bridge: creating a tab adds a WebContentsView as a child view and loads the URL', async () => {
@@ -127,19 +168,38 @@ test('webview bridge: re-ensuring the same tab with the same URL does not reload
   assert.equal(loadCount, 1, 'navigates when the URL actually changes');
 });
 
-test('webview bridge: identity-provider sign-in hosts are handed off to the system browser, never embedded', async () => {
+test('webview bridge: identity-provider sign-in hosts (Google/Apple/Microsoft) are handed off to the system browser, never embedded', async () => {
   const { handlers, sentEvents, externalCalls, views } = makeHarness();
-  const result = await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-auth', url: 'https://accounts.google.com/signin' });
+  const result = await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-auth', url: 'https://appleid.apple.com/auth/authorize' });
 
   assert.equal(views.length, 0, 'no native view is ever created for an auth host');
-  assert.deepEqual(externalCalls, ['https://accounts.google.com/signin']);
+  assert.deepEqual(externalCalls, ['https://appleid.apple.com/auth/authorize']);
   assert.equal(result.handedOffToSystemBrowser, true);
   const handoffEvent = sentEvents.find((e) => e.payload.type === 'system-browser-handoff');
   assert.ok(handoffEvent, 'renderer is notified of the handoff');
   assert.equal(handoffEvent.channel, WEBVIEW_EVENT_CHANNEL);
 });
 
-test('webview bridge: popups to a sign-in host from an already-open tab are also handed off externally, not opened as a child view', async () => {
+test('webview bridge: Google sign-in is also handed off to the system browser (not embedded), same as Apple/Microsoft', async () => {
+  const { handlers, externalCalls, views } = makeHarness();
+  const result = await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-auth', url: 'https://accounts.google.com/signin' });
+
+  assert.equal(result.handedOffToSystemBrowser, true);
+  assert.deepEqual(externalCalls, ['https://accounts.google.com/signin']);
+  assert.equal(views.length, 0, 'no native view is ever created for Google sign-in');
+});
+
+test('webview bridge: popups to an identity-provider sign-in host from an already-open tab are also handed off externally, not opened as a child view', async () => {
+  const { handlers, views, externalCalls } = makeHarness();
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://mail.google.com/' });
+  const guestWebContents = views[0].webContents;
+
+  const response = guestWebContents._simulateWindowOpen({ url: 'https://appleid.apple.com/auth/authorize' });
+  assert.deepEqual(response, { action: 'deny' });
+  assert.deepEqual(externalCalls, ['https://appleid.apple.com/auth/authorize']);
+});
+
+test('webview bridge: popups to accounts.google.com are also handed off externally, not opened as a child view', async () => {
   const { handlers, views, externalCalls } = makeHarness();
   await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://mail.google.com/' });
   const guestWebContents = views[0].webContents;
@@ -147,6 +207,13 @@ test('webview bridge: popups to a sign-in host from an already-open tab are also
   const response = guestWebContents._simulateWindowOpen({ url: 'https://accounts.google.com/signin/oauth' });
   assert.deepEqual(response, { action: 'deny' });
   assert.deepEqual(externalCalls, ['https://accounts.google.com/signin/oauth']);
+});
+
+test('webview bridge: every new tab gets a browser-like user agent without the Electron token', async () => {
+  const { handlers, views } = makeHarness();
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
+  assert.ok(views[0].webContents.userAgent, 'a custom user agent was set');
+  assert.doesNotMatch(views[0].webContents.userAgent, /Electron/i);
 });
 
 test('webview bridge: ordinary popups are denied locally and reported to the renderer as new-window-request (opened as a Yayra tab)', async () => {
@@ -195,4 +262,111 @@ test('webview bridge: setBounds and setVisible(false) manipulate the native view
   await handlers.get('yayra:webview-set-visible')(null, { tabId: 'tab-1', visible: false });
   assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 0, height: 0 }, 'hidden by zeroing bounds, not by destroying the guest page');
   assert.equal(views[0].webContents.isDestroyed(), false);
+});
+
+// --- Chrome-equivalent native right-click context menu ------------------
+
+function findItem(template, label) {
+  return template.find((item) => item.label === label);
+}
+
+test('buildContextMenuTemplate: plain page click offers Back/Forward/Reload/Inspect, Chrome-style', () => {
+  const wc = { canGoBack: () => true, canGoForward: () => false, goBack: () => {}, goForward: () => {}, reload: () => {}, inspectElement: () => {} };
+  const template = buildContextMenuTemplate({ params: { x: 5, y: 9 }, wc, tabId: 't1', send: () => {}, clipboard: { writeText: () => {} } });
+  assert.ok(findItem(template, 'Back').enabled);
+  assert.equal(findItem(template, 'Forward').enabled, false);
+  assert.ok(findItem(template, 'Reload'));
+  assert.ok(findItem(template, 'Inspect'));
+});
+
+test('buildContextMenuTemplate: right-clicking a link offers Open Link in New Tab + Copy Link Address', () => {
+  const written = [];
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {} };
+  const sent = [];
+  const template = buildContextMenuTemplate({
+    params: { linkURL: 'https://example.com/page' },
+    wc,
+    tabId: 'tab-1',
+    send: (tabId, type, payload) => sent.push({ tabId, type, payload }),
+    clipboard: { writeText: (text) => written.push(text) }
+  });
+  findItem(template, 'Open Link in New Tab').click();
+  assert.deepEqual(sent[0], { tabId: 'tab-1', type: 'new-window-request', payload: { url: 'https://example.com/page' } });
+  findItem(template, 'Copy Link Address').click();
+  assert.deepEqual(written, ['https://example.com/page']);
+});
+
+test('buildContextMenuTemplate: right-clicking an image offers Open/Save/Copy Image actions', () => {
+  const downloaded = [];
+  const written = [];
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {}, downloadURL: (url) => downloaded.push(url) };
+  const template = buildContextMenuTemplate({
+    params: { mediaType: 'image', srcURL: 'https://example.com/cat.png' },
+    wc,
+    tabId: 'tab-1',
+    send: () => {},
+    clipboard: { writeText: (text) => written.push(text) }
+  });
+  assert.ok(findItem(template, 'Open Image in New Tab'));
+  findItem(template, 'Save Image As\u2026').click();
+  assert.deepEqual(downloaded, ['https://example.com/cat.png']);
+  findItem(template, 'Copy Image Address').click();
+  assert.deepEqual(written, ['https://example.com/cat.png']);
+});
+
+test('buildContextMenuTemplate: selected text offers Copy + Search Google for "..."', () => {
+  const sent = [];
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {}, copy: () => {} };
+  const template = buildContextMenuTemplate({
+    params: { selectionText: 'hello world' },
+    wc,
+    tabId: 'tab-1',
+    send: (tabId, type, payload) => sent.push(payload),
+    clipboard: { writeText: () => {} }
+  });
+  assert.ok(findItem(template, 'Copy'));
+  findItem(template, 'Search Google for "hello world"').click();
+  assert.match(sent[0].url, /google\.com\/search\?q=hello%20world/);
+});
+
+test('buildContextMenuTemplate: editable fields offer Cut/Copy/Paste/Undo/Redo/Select All honoring editFlags', () => {
+  const wc = { canGoBack: () => false, canGoForward: () => false, inspectElement: () => {} };
+  const template = buildContextMenuTemplate({
+    params: { isEditable: true, editFlags: { canUndo: true, canRedo: false, canCut: true, canCopy: true, canPaste: false, canSelectAll: true } },
+    wc,
+    tabId: 'tab-1',
+    send: () => {},
+    clipboard: { writeText: () => {} }
+  });
+  assert.equal(findItem(template, 'Undo').enabled, true);
+  assert.equal(findItem(template, 'Redo').enabled, false);
+  assert.equal(findItem(template, 'Paste').enabled, false);
+  assert.equal(findItem(template, 'Select All').enabled, true);
+});
+
+test('webview bridge: right-clicking inside an embedded page pops a native Chrome-style menu', async () => {
+  const { handlers, views, popupCalls, fakeWin } = makeHarness();
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
+  const wc = views[0].webContents;
+
+  wc._simulateContextMenu({ x: 10, y: 20 });
+  assert.equal(popupCalls.length, 1, 'a native menu is shown on context-menu');
+  assert.equal(popupCalls[0].opts.window, fakeWin);
+  assert.ok(popupCalls[0].template.some((item) => item.label === 'Reload'));
+});
+
+test('webview bridge: right-click does nothing (never throws) when no Menu implementation is injected', async () => {
+  const handlers = new Map();
+  const ipcMain = { handle: (channel, fn) => handlers.set(channel, fn) };
+  const fakeWin = { destroyed: false, isDestroyed() { return this.destroyed; }, webContents: { send: () => {} }, contentView: { children: [], addChildView(v) { this.children.push(v); }, removeChildView() {} } };
+  const views = [];
+  const WebContentsView = function FakeWebContentsView() {
+    const view = createFakeWebContentsView();
+    views.push(view);
+    return view;
+  };
+  createWebviewBridge({ WebContentsView, ipcMain, shell: { openExternal: async () => {} }, getMainWindow: () => fakeWin, logger: { error: () => {} } });
+
+  await handlers.get('yayra:webview-ensure')(null, { tabId: 'tab-1', url: 'https://example.com/' });
+  assert.doesNotThrow(() => views[0].webContents._simulateContextMenu({ x: 1, y: 1 }));
 });

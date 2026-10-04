@@ -8,7 +8,7 @@ test('CSP is pinned to self, exact hosts, and desktop custom scheme', () => {
   assert.match(csp, /default-src 'self' yayra:/);
   assert.match(csp, /script-src 'self' yayra:/);
   assert.match(csp, /style-src 'self' 'unsafe-inline' yayra:/);
-  assert.match(csp, /img-src 'self' data: blob: yayra: https:\/\/yayra\.pages\.dev/);
+  assert.match(csp, /img-src 'self' data: blob: yayra: https:\/\/yayra\.pages\.dev https:\/\/icons\.duckduckgo\.com https:\/\/lh3\.googleusercontent\.com/);
   assert.match(csp, /connect-src 'self' yayra: https:\/\/yayra-updates-api\.g2code335\.workers\.dev/);
   assert.equal(DESKTOP_CUSTOM_SCHEME, 'yayra');
 });
