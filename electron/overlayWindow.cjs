@@ -30,14 +30,15 @@
  *     itself starts (including right after a fresh install's first launch,
  *     and after every subsequent reboot once login-item autostart is on).
  *
+ * Siblings on other platforms:
+ *   - Android: the true system-wide "draw over other apps" overlay (the
+ *     same category as Facebook Messenger's chat heads) IS implemented -
+ *     `SYSTEM_ALERT_WINDOW` permission + foreground Service + WindowManager
+ *     TYPE_APPLICATION_OVERLAY views in packages/floating-android/src/kotlin,
+ *     bridged to the web shell by YayraOverlayPlugin.kt and installed into
+ *     the generated android/ project by scripts/ensure-capacitor-platform.mjs.
+ *
  * What this CANNOT honestly do, and why (do not ask for this to be faked):
- *   - Android: a true system-wide "draw over other apps" overlay (the same
- *     category as Facebook Messenger's chat heads) requires the
- *     `SYSTEM_ALERT_WINDOW` runtime permission plus a native foreground
- *     `Service` written in Kotlin/Java and registered in
- *     AndroidManifest.xml. Capacitor's WebView shell has no public API for
- *     this; it needs a real native plugin, which does not exist in this
- *     repo yet. See native/android/ for where that work would live.
  *   - iOS: Apple does not expose ANY API, public or private-but-App-Store-safe,
  *     that lets a third-party app draw above other apps or the home screen -
  *     AssistiveTouch is a first-party OS accessibility feature, not a
@@ -86,6 +87,58 @@ function createOverlayBridge({
   let overlayWin = null;
   let miniWin = null;
   let cachedLogoDataUrl;
+  // Heartbeats that keep the bubble/mini windows genuinely above every
+  // other application - see assertTopmost() for why this is needed.
+  let overlayTopmostTimer = null;
+  let miniTopmostTimer = null;
+
+  /**
+   * Force a window back to the top of the OS z-order.
+   *
+   * `alwaysOnTop: 'screen-saver'` is set at creation, but on real desktops
+   * it is NOT a one-shot guarantee: Windows silently strips/undercuts the
+   * topmost flag in several situations (fullscreen/exclusive apps, UAC
+   * desktop switches, explorer restarts, other topmost apps calling
+   * SetWindowPos above us), and some Linux WMs drop the hint on workspace
+   * or compositor changes. The user-visible symptom is exactly "the bubble
+   * only floats over the desktop, not over the apps I open". So the
+   * topmost claim is re-asserted (a) whenever the OS reports it changed,
+   * and (b) on a cheap heartbeat - the same strategy chat-head/overlay
+   * utilities use. Re-asserting when already topmost is a no-op for the OS,
+   * so the heartbeat causes no flicker.
+   */
+  function assertTopmost(win) {
+    if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return;
+    try {
+      win.setAlwaysOnTop(true, 'screen-saver');
+      if (typeof win.moveTop === 'function') win.moveTop();
+      if (typeof win.setVisibleOnAllWorkspaces === 'function') {
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+      }
+    } catch {
+      // Window raced destruction between the check and the call.
+    }
+  }
+
+  function startTopmostGuard(win, { onEvent = true } = {}) {
+    if (!win) return null;
+    if (onEvent && typeof win.on === 'function') {
+      // Fired when anything (OS or another app) toggles our topmost state.
+      win.on('always-on-top-changed', (_e, isOnTop) => {
+        if (!isOnTop) assertTopmost(win);
+      });
+      win.on('show', () => assertTopmost(win));
+    }
+    if (typeof setInterval !== 'function') return null;
+    const timer = setInterval(() => assertTopmost(win), 4000);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    return timer;
+  }
+
+  function stopTopmostGuard(timer) {
+    if (timer) clearInterval(timer);
+    return null;
+  }
 
   function logoDataUrl() {
     if (cachedLogoDataUrl !== undefined) return cachedLogoDataUrl;
@@ -233,6 +286,11 @@ function createOverlayBridge({
       skipTaskbar: true,
       hasShadow: false,
       alwaysOnTop: true,
+      // Never steal keyboard focus: a focusable overlay gets pulled into
+      // normal window activation ordering, which is one of the ways the
+      // bubble ends up BEHIND the app the user just clicked into. A
+      // non-focusable window still receives mouse clicks/drags.
+      focusable: false,
       webPreferences: {
         preload: preloadPath,
         contextIsolation: true,
@@ -249,6 +307,10 @@ function createOverlayBridge({
       overlayWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
     overlayWin.setContentProtection(false);
+    // Keep it above every opened app, not just the desktop: re-assert the
+    // topmost claim whenever the OS drops it and on a heartbeat.
+    overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
+    overlayTopmostTimer = startTopmostGuard(overlayWin);
     overlayWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(settings))}`);
 
     overlayWin.on('moved', () => {
@@ -262,12 +324,14 @@ function createOverlayBridge({
 
     overlayWin.on('closed', () => {
       overlayWin = null;
+      overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     });
 
     return overlayWin;
   }
 
   function destroyOverlayWindow() {
+    overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     if (overlayWin && !overlayWin.isDestroyed()) {
       overlayWin.close();
     }
@@ -332,12 +396,22 @@ function createOverlayBridge({
     if (typeof miniWin.setVisibleOnAllWorkspaces === 'function') {
       miniWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
+    // The mini panel must also stay above whatever app is focused (it opens
+    // from the bubble while the user is inside another application). It
+    // stays focusable - it hosts a real browser that needs the keyboard -
+    // so the heartbeat is what keeps it topmost after focus round-trips.
+    miniTopmostTimer = stopTopmostGuard(miniTopmostTimer);
+    miniTopmostTimer = startTopmostGuard(miniWin);
     miniWin.loadURL(miniUrl);
-    miniWin.on('closed', () => { miniWin = null; });
+    miniWin.on('closed', () => {
+      miniWin = null;
+      miniTopmostTimer = stopTopmostGuard(miniTopmostTimer);
+    });
     return miniWin;
   }
 
   function destroyMiniWindow() {
+    miniTopmostTimer = stopTopmostGuard(miniTopmostTimer);
     if (miniWin && !miniWin.isDestroyed()) miniWin.close();
     miniWin = null;
   }

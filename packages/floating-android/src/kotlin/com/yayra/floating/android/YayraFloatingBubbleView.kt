@@ -92,6 +92,19 @@ class YayraFloatingBubbleView @JvmOverloads constructor(
         color = Color.argb(120, 255, 255, 255)
     }
 
+    // Brand logo bitmap (logo-ONLY bubble, matching desktop/web): the
+    // ensure-capacitor-platform script copies the transparent brand PNG
+    // into res/drawable as `yayra_bubble_logo`. Resolved by name so this
+    // file compiles even in a project without the asset - in that case
+    // the legacy shader-drawn orb below is the fallback.
+    private val logoPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val logoBitmap: Bitmap? = try {
+        val resId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
+        if (resId != 0) BitmapFactory.decodeResource(context.resources, resId) else null
+    } catch (_err: Exception) {
+        null
+    }
+
     init {
         alpha = idleOpacity
         setLayerType(LAYER_TYPE_HARDWARE, null)
@@ -107,6 +120,16 @@ class YayraFloatingBubbleView @JvmOverloads constructor(
         val cx = width / 2f
         val cy = height / 2f
         val r = radius - 4f // Inset for glow and stroke
+
+        // Logo-ONLY bubble (product requirement on every platform): when the
+        // brand asset is available the bubble IS the logo - no circular
+        // glass plate, ring or glow painted behind it.
+        val logo = logoBitmap
+        if (logo != null) {
+            val dest = RectF(0f, 0f, width.toFloat(), height.toFloat())
+            canvas.drawBitmap(logo, null, dest, logoPaint)
+            return
+        }
 
         // 1. Subtle Outer Cyan Glow
         glowPaint.shader = RadialGradient(

@@ -1,5 +1,20 @@
 # Yayra Android Floating Bubble & WindowManager Integration
 
+> **Wired into the app (v1.0.0):** these Kotlin sources are no longer
+> documentation-only. `scripts/ensure-capacitor-platform.mjs` (run by
+> `npm run build:android`) copies them into the generated `android/`
+> project, enables the Kotlin gradle plugin, injects the
+> `SYSTEM_ALERT_WINDOW`/foreground-service permissions and the
+> `YayraFloatBubbleService` declaration into `AndroidManifest.xml`,
+> registers `YayraOverlayPlugin` in `MainActivity`, and installs
+> `assets/brand/logomain1-transparent.png` as `res/drawable/yayra_bubble_logo`
+> so the bubble renders as the **logo only** (no circular plate), matching
+> every other platform. The web shell (`BrowserShell.js`) feature-detects
+> `window.Capacitor.Plugins.YayraOverlay`, asks for the "Display over other
+> apps" permission once, starts the service, and suppresses its in-page
+> fallback bubble while the OS-level bubble is live - so the bubble truly
+> floats over **every opened app**, not just inside Yayra.
+
 ## 1. Architectural Overview
 
 The Yayra Android Floating Bubble (`@yayra/floating-android`) delivers a persistent, system-wide glassmorphism floating circle. It uses Android `WindowManager` overlay surfaces anchored to a user-controlled, policy-compliant Foreground Service, ensuring smooth edge-docking physics and seamless transition to the browser.

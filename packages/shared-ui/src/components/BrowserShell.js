@@ -154,6 +154,9 @@ export class BrowserShell {
       activeTabId: options.activeTabId || initialTabs[0]?.id || 'tab-1',
       desktopFloatingMode: options.desktopFloatingMode || 'browser-first',
       isMinimizedToBubble: false,
+      // True while the native Android system-wide bubble service is live
+      // (YayraOverlayPlugin) - suppresses the duplicate in-page bubble.
+      systemBubbleActive: false,
       isMobile: options.isMobile !== undefined ? options.isMobile : this.checkMobileViewport(),
       urlInputValue: initialTabs[0]?.url || 'yayra://newtab',
       activeModal: null, // 'menu', 'tab-switcher', 'sponsored-manager', etc.
@@ -283,6 +286,7 @@ export class BrowserShell {
     this.activeWebFrameTabId = null;
     this.lastRenderTarget = null;
     this._updateCheckTimer = null;
+    this._overlayPermissionPromptShown = false;
 
     this.boundResizeHandler = () => this.handleViewportResize();
     this.boundKeyHandler = (e) => this.handleGlobalKeyDown(e);
@@ -337,6 +341,11 @@ export class BrowserShell {
         this.checkForUpdates(false);
       }, 1200);
       this.startBackgroundUpdateChecks();
+      // Android (Capacitor): bring up the REAL system-wide bubble so it
+      // floats over every opened app from the moment Yayra starts.
+      setTimeout(() => {
+        this.ensureSystemOverlayBubble();
+      }, 600);
     }
 
     // When the theme preference is "system", follow live OS light/dark
@@ -507,6 +516,55 @@ export class BrowserShell {
     const capacitor = window.Capacitor;
     if (!capacitor || typeof capacitor.isNativePlatform !== 'function' || !capacitor.isNativePlatform()) return null;
     return (capacitor.Plugins && capacitor.Plugins.Browser) || null;
+  }
+
+  // Native Android system-wide floating bubble bridge (YayraOverlayPlugin -
+  // see packages/floating-android/src/kotlin and
+  // scripts/ensure-capacitor-platform.mjs). When present AND the user has
+  // granted "Display over other apps", the bubble is a REAL OS overlay that
+  // floats above every other application - the Android equivalent of the
+  // Electron native overlay window. Feature-detected, so plain web/PWA and
+  // test environments without the plugin fall back to the in-page bubble.
+  get capacitorOverlay() {
+    if (typeof window === 'undefined') return null;
+    const capacitor = window.Capacitor;
+    if (!capacitor || typeof capacitor.isNativePlatform !== 'function' || !capacitor.isNativePlatform()) return null;
+    const plugin = capacitor.Plugins && capacitor.Plugins.YayraOverlay;
+    if (!plugin || typeof plugin.show !== 'function') return null;
+    return plugin;
+  }
+
+  /**
+   * Start the Android system-wide bubble so it floats over EVERY opened
+   * app, not just inside Yayra. Called once shortly after startup and
+   * again from minimizeToBubble(). If the overlay permission hasn't been
+   * granted yet, the user is told why and taken to the system "Display
+   * over other apps" page (once per session - never a nag loop).
+   */
+  async ensureSystemOverlayBubble({ fromUserAction = false } = {}) {
+    const overlay = this.capacitorOverlay;
+    if (!overlay) return false;
+    try {
+      const res = typeof overlay.hasPermission === 'function' ? await overlay.hasPermission() : { granted: true };
+      if (res && res.granted) {
+        await overlay.show();
+        if (!this.state.systemBubbleActive) {
+          this.state.systemBubbleActive = true;
+          // The native bubble replaces the in-page one - re-render so
+          // ensurePersistentAssistiveBubble can remove the duplicate.
+          this.render();
+        }
+        return true;
+      }
+      if (!this._overlayPermissionPromptShown && (fromUserAction || typeof overlay.requestPermission === 'function')) {
+        this._overlayPermissionPromptShown = true;
+        this.showTransientNotice('Allow "Display over other apps" so the Yayra bubble can float over everything.');
+        await overlay.requestPermission?.();
+      }
+    } catch (err) {
+      this.logger?.(`[overlay] system bubble unavailable: ${err?.message || err}`);
+    }
+    return false;
   }
 
   // Keep in sync with SYSTEM_BROWSER_AUTH_HOSTS in electron/webviewBridge.cjs
@@ -5942,6 +6000,16 @@ export class BrowserShell {
       return;
     }
 
+    // Android (Capacitor) with the native system-wide bubble live: exactly
+    // like Electron above, the OS-level overlay (YayraFloatBubbleService)
+    // IS the one bubble - it floats over every app including Yayra itself,
+    // so the in-page DOM copy would be a duplicate.
+    if (this.state.systemBubbleActive && this.capacitorOverlay) {
+      document.getElementById('yayra-persistent-assistive-bubble')?.remove();
+      document.getElementById('yayra-floating-bubble-persistent')?.remove();
+      return;
+    }
+
     let bubble = document.getElementById('yayra-persistent-assistive-bubble') || document.getElementById('yayra-floating-bubble-persistent');
     if (!bubble) {
       bubble = document.createElement('div');
@@ -6076,6 +6144,21 @@ export class BrowserShell {
       overlay.minimizeMainWindow();
       if (this.options.onMinimizeToBubble) this.options.onMinimizeToBubble();
       return;
+    }
+    // Android (Capacitor): the system-wide bubble takes over - start it
+    // (asking for the overlay permission on first use) and send the app to
+    // the background so the bubble is immediately floating over whatever
+    // the user switches to. Only when the permission isn't granted yet do
+    // we fall through to the in-page bubble below.
+    const sysOverlay = this.capacitorOverlay;
+    if (sysOverlay) {
+      this.ensureSystemOverlayBubble({ fromUserAction: true }).then((active) => {
+        if (active && typeof sysOverlay.minimizeApp === 'function') sysOverlay.minimizeApp();
+      });
+      if (this.state.systemBubbleActive) {
+        if (this.options.onMinimizeToBubble) this.options.onMinimizeToBubble();
+        return;
+      }
     }
     this.state.isMinimizedToBubble = true;
     if (this.options.onMinimizeToBubble) {

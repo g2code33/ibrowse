@@ -79,8 +79,132 @@ async function injectIosUrlScheme() {
   console.log('injected Google sign-in URL scheme into Info.plist');
 }
 
+// --- System-wide floating bubble (SYSTEM_ALERT_WINDOW overlay) -----------
+// The bubble must float over EVERY opened app - a real OS-level overlay
+// (same mechanism as Messenger chat heads), not a <div> inside Yayra's own
+// WebView. The native stack already lives in packages/floating-android
+// (foreground Service + WindowManager TYPE_APPLICATION_OVERLAY views + the
+// YayraOverlayPlugin Capacitor bridge); android/ is generated/gitignored,
+// so everything is (re)installed here idempotently on every build:
+//   1. Kotlin sources copied into the app module
+//   2. Kotlin gradle plugin enabled (Capacitor's template is Java-only)
+//   3. Manifest permissions + <service> entry injected
+//   4. Plugin registered in MainActivity
+//   5. Brand logo installed as the bubble drawable (logo-ONLY bubble)
+const OVERLAY_MARKER = 'YAYRA FLOATING BUBBLE OVERLAY';
+
+async function installAndroidOverlayNative() {
+  if (!existsSync(path.join(root, 'android'))) return;
+
+  // 1. Kotlin sources -> android/app/src/main/java/com/yayra/floating/...
+  const ktSrc = path.join(root, 'packages/floating-android/src/kotlin/com');
+  const ktDest = path.join(root, 'android/app/src/main/java/com');
+  if (existsSync(ktSrc)) {
+    await cp(ktSrc, ktDest, { recursive: true, force: true });
+    console.log('copied floating-bubble Kotlin sources into android/app');
+  }
+
+  // 2. Brand logo as the bubble drawable (drawable names must be lowercase).
+  const logoSrc = path.join(root, 'assets/brand/logomain1-transparent.png');
+  const drawableDir = path.join(root, 'android/app/src/main/res/drawable');
+  if (existsSync(logoSrc)) {
+    await mkdir(drawableDir, { recursive: true });
+    await cp(logoSrc, path.join(drawableDir, 'yayra_bubble_logo.png'));
+  }
+
+  // 3. Kotlin gradle support (idempotent).
+  const rootGradle = path.join(root, 'android/build.gradle');
+  if (existsSync(rootGradle)) {
+    let gradle = await readFile(rootGradle, 'utf8');
+    if (!gradle.includes('kotlin-gradle-plugin')) {
+      gradle = gradle.replace(
+        /(dependencies\s*\{)/,
+        `$1\n        // ${OVERLAY_MARKER}: Kotlin support for the native bubble sources\n        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25'`
+      );
+      await writeFile(rootGradle, gradle);
+      console.log('enabled Kotlin gradle plugin classpath in android/build.gradle');
+    }
+  }
+  const appGradle = path.join(root, 'android/app/build.gradle');
+  if (existsSync(appGradle)) {
+    let gradle = await readFile(appGradle, 'utf8');
+    if (!gradle.includes("apply plugin: 'kotlin-android'")) {
+      gradle = gradle.replace(
+        /(apply plugin: 'com\.android\.application')/,
+        `$1\n// ${OVERLAY_MARKER}\napply plugin: 'kotlin-android'`
+      );
+      await writeFile(appGradle, gradle);
+      console.log("applied kotlin-android plugin in android/app/build.gradle");
+    }
+  }
+
+  // 4. Manifest: overlay/service permissions + the foreground service.
+  const manifestPath = path.join(root, 'android/app/src/main/AndroidManifest.xml');
+  if (existsSync(manifestPath)) {
+    let manifest = await readFile(manifestPath, 'utf8');
+    if (!manifest.includes(OVERLAY_MARKER)) {
+      const permissions = `
+    <!-- ${OVERLAY_MARKER}: injected by scripts/ensure-capacitor-platform.mjs.
+         SYSTEM_ALERT_WINDOW = draw the bubble over every other app (the user
+         grants it on the system "Display over other apps" page, reached via
+         YayraOverlay.requestPermission()). The FGS + notification permissions
+         keep the user-controlled bubble service alive and visible per
+         Android 13-15 policy. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+`;
+      const service = `
+        <!-- ${OVERLAY_MARKER}: user-controlled foreground service hosting the
+             system-wide floating bubble + floating mini browser window. -->
+        <service
+            android:name="com.yayra.floating.android.YayraFloatBubbleService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-controlled floating browser bubble (AssistiveTouch-style quick access over other apps)" />
+        </service>
+`;
+      if (!/<\/application>/.test(manifest)) throw new Error('</application> not found in AndroidManifest.xml');
+      manifest = manifest.replace(/(\n\s*<application)/, `\n${permissions}$1`);
+      manifest = manifest.replace(/(\n\s*<\/application>)/, `\n${service}$1`);
+      await writeFile(manifestPath, manifest);
+      console.log('injected floating-bubble permissions + service into AndroidManifest.xml');
+    }
+  }
+
+  // 5. Register the Capacitor plugin in MainActivity.
+  const mainActivity = path.join(root, 'android/app/src/main/java/com/yayra/app/MainActivity.java');
+  if (existsSync(mainActivity)) {
+    let java = await readFile(mainActivity, 'utf8');
+    if (!java.includes('YayraOverlayPlugin')) {
+      const defaultBody = /public\s+class\s+MainActivity\s+extends\s+BridgeActivity\s*\{\s*\}/;
+      if (defaultBody.test(java)) {
+        java = java.replace(
+          defaultBody,
+          `public class MainActivity extends BridgeActivity {
+    // ${OVERLAY_MARKER}: registers the system-wide floating bubble bridge.
+    @Override
+    public void onCreate(android.os.Bundle savedInstanceState) {
+        registerPlugin(com.yayra.floating.android.YayraOverlayPlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}`
+        );
+        await writeFile(mainActivity, java);
+        console.log('registered YayraOverlayPlugin in MainActivity.java');
+      } else {
+        console.warn('MainActivity.java was customized - add registerPlugin(YayraOverlayPlugin.class) in onCreate manually (docs/android-floating-bubble.md)');
+      }
+    }
+  }
+}
+
 if (platform === 'android') {
   await injectAndroidUrlSchemeIntentFilter();
+  await installAndroidOverlayNative();
   for (const density of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
     const src = path.join(root, 'native-assets/android', density, 'ic_launcher.png');
     const destDir = path.join(root, 'android/app/src/main/res', density);
