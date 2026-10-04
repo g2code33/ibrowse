@@ -82,11 +82,29 @@ function createPasskeyBridge({
     return touchIdAvailable() ? 'touch-id' : 'os-keychain';
   }
 
+  /**
+   * Linux honesty: safeStorage only gives REAL keychain-bound encryption
+   * when a secret service (gnome-keyring/kwallet) is running. Electron
+   * falls back to a hardcoded-key 'basic_text' backend otherwise - that
+   * still works, but it is NOT bound to the OS login, so the UI must say
+   * so instead of overclaiming.
+   */
+  function weakEncryption() {
+    try {
+      return platform === 'linux'
+        && typeof safeStorageImpl?.getSelectedStorageBackend === 'function'
+        && safeStorageImpl.getSelectedStorageBackend() === 'basic_text';
+    } catch {
+      return false;
+    }
+  }
+
   async function handleStatus() {
     const record = readRecord();
     return {
       available: encryptionAvailable(),
       method: method(),
+      weakEncryption: weakEncryption(),
       registered: Boolean(record),
       passkey: record ? { credentialId: record.credentialId, label: record.label, createdAt: record.createdAt, method: record.method } : null
     };
@@ -109,6 +127,14 @@ function createPasskeyBridge({
       };
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(record));
+      // Read-back verification: registration only reports success when
+      // the device record is genuinely on disk and parseable - otherwise
+      // the UI would claim "passkey active" while verify (which re-reads
+      // this file) would say nothing is registered.
+      const persisted = readRecord();
+      if (!persisted || persisted.credentialId !== record.credentialId) {
+        return { ok: false, reason: 'device-storage-failed' };
+      }
       return { ok: true, passkey: { credentialId: record.credentialId, label: record.label, createdAt: record.createdAt, method: record.method } };
     } catch (err) {
       logger?.error?.(`[yayra:passkey] register failed: ${err?.message || err}`);

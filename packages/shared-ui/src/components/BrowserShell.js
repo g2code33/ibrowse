@@ -69,6 +69,7 @@ function describePasskeyReason(reason) {
     case 'no-passkey-registered': return 'no passkey is registered yet';
     case 'keychain-unavailable': return 'the OS keychain is locked or unavailable on this device';
     case 'verification-failed': return 'the device passkey could not be verified';
+    case 'device-storage-failed': return 'the passkey could not be saved on this device (check disk/app-data permissions)';
     default: return reason || 'unknown error';
   }
 }
@@ -232,6 +233,9 @@ export class BrowserShell {
       passwordsActiveSection: 'passwords',
       // Registered Yayra account passkey metadata (null = none yet).
       passkeyInfo: null,
+      // Desktop device-passkey bridge report (availability, method,
+      // Linux weak-keyring honesty flag). Null off-desktop.
+      passkeyDeviceStatus: null,
       // Yayra AI: synchronous config snapshot (renders can't await), the
       // yayra://ai conversation of this session, and the busy flag while
       // an answer is being generated.
@@ -2254,6 +2258,18 @@ export class BrowserShell {
     }
     if (this.passkeyService && typeof this.passkeyService.getRegisteredPasskey === 'function') {
       try {
+        // Desktop: reconcile the renderer's record with the device
+        // bridge's ground truth FIRST (adopts a bridge record after a
+        // localStorage wipe; drops a stale record after the device file
+        // vanished), so the card below never claims "Passkey active"
+        // when verify would honestly fail with "nothing registered".
+        if (typeof this.passkeyService.syncWithNativeBridge === 'function') {
+          const sync = await this.passkeyService.syncWithNativeBridge();
+          this.state.passkeyDeviceStatus = sync.status || null;
+          if (sync.action === 'cleared-stale') {
+            this.showTransientNotice('Your device passkey record was missing from this computer - create it again from Passwords & Keys.');
+          }
+        }
         this.state.passkeyInfo = await this.passkeyService.getRegisteredPasskey();
       } catch {
         this.state.passkeyInfo = null;
@@ -2419,6 +2435,15 @@ export class BrowserShell {
       this.showTransientNotice('Passkey verified.');
       this.render();
       return true;
+    }
+    if (result.reason === 'no-passkey-registered') {
+      // The service self-healed (dropped the stale record); refresh the
+      // card so it offers "Create passkey" again instead of a dead
+      // "Passkey active" state, and say exactly what happened.
+      this.state.passkeyInfo = await this.passkeyService.getRegisteredPasskey();
+      this.showTransientNotice('This device\u2019s passkey record is gone (app data may have been cleared). Click "Create passkey" to set it up again.');
+      this.render();
+      return false;
     }
     this.showTransientNotice(`Passkey check failed: ${describePasskeyReason(result.reason)}`);
     return false;
@@ -3792,6 +3817,9 @@ export class BrowserShell {
                   ? 'Protect your Yayra account and vault with a device passkey bound to this computer\u2019s OS keychain (with Touch ID on supporting Macs). Only your OS user session can unlock it.'
                   : 'Protect your Yayra account and vault with your device\u2019s biometrics or PIN. Works like Windows Hello / Touch ID in Chrome.')
                 : 'Passkeys need a secure (HTTPS) context and a device authenticator; this build/runtime does not expose one.'}
+            ${this.state.passkeyDeviceStatus?.weakEncryption
+              ? ' <span style="color:#fcd34d;">Note: no OS keyring service (gnome-keyring/KWallet) was detected on this Linux system, so the secret uses Electron\u2019s fallback encryption instead of being bound to your OS login - enable a keyring for full protection.</span>'
+              : ''}
           </p>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
             ${passkey

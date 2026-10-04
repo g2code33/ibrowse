@@ -239,6 +239,103 @@ test('PasskeyService: verify success stamps lastVerifiedAt; remove clears bridge
   assert.ok(bridge.calls.some(([m]) => m === 'remove'), 'OS-side credential removed too');
 });
 
+/* --------------- renderer/device drift (the "Passkey active but
+   verify says nothing registered" screenshot bug) --------------- */
+
+test('passkeyBridge: register verifies the file actually persisted (read-back)', async () => {
+  const fs = makeFakeFs();
+  const originalWrite = fs.writeFileSync;
+  fs.writeFileSync = () => {}; // disk silently drops the write
+  const { bridge } = makeBridge({ fs });
+  const reg = await bridge.handleRegister(null, { label: 'x' });
+  assert.deepEqual(reg, { ok: false, reason: 'device-storage-failed' }, 'never claims success without a persisted record');
+
+  fs.writeFileSync = originalWrite;
+  assert.equal((await bridge.handleRegister(null, { label: 'x' })).ok, true, 'works once writes persist');
+});
+
+test('passkeyBridge: status reports weak encryption honestly on keyring-less Linux', async () => {
+  const { bridge } = makeBridge({
+    platform: 'linux',
+    safeStorageImpl: { ...fakeSafeStorage, getSelectedStorageBackend: () => 'basic_text' }
+  });
+  assert.equal((await bridge.handleStatus()).weakEncryption, true);
+
+  const { bridge: healthy } = makeBridge({
+    platform: 'linux',
+    safeStorageImpl: { ...fakeSafeStorage, getSelectedStorageBackend: () => 'gnome_libsecret' }
+  });
+  assert.equal((await healthy.handleStatus()).weakEncryption, false);
+});
+
+test('PasskeyService: sync drops a STALE renderer record when the device file is gone', async () => {
+  const storage = makeServiceStorage();
+  const svc = new PasskeyService({
+    storage,
+    nativeBridge: {
+      ...makeNativeBridgeFake(),
+      status: async () => ({ available: true, registered: false, passkey: null })
+    }
+  });
+  // The renderer believes a native passkey exists (the screenshot state)...
+  await storage.set('yayra-account-passkey-v1', { credentialId: 'device-old', accountLabel: 'ghost', method: 'os-keychain' });
+
+  const sync = await svc.syncWithNativeBridge();
+  assert.equal(sync.action, 'cleared-stale');
+  assert.equal(await svc.getRegisteredPasskey(), null, 'stale record dropped - UI offers Create passkey again');
+});
+
+test('PasskeyService: sync ADOPTS the device record after a renderer-storage wipe', async () => {
+  const svc = new PasskeyService({
+    storage: makeServiceStorage(),
+    nativeBridge: {
+      ...makeNativeBridgeFake(),
+      status: async () => ({
+        available: true,
+        registered: true,
+        passkey: { credentialId: 'device-9', label: 'ada@example.com', createdAt: 1700000000000, method: 'os-keychain' }
+      })
+    }
+  });
+  const sync = await svc.syncWithNativeBridge();
+  assert.equal(sync.action, 'adopted');
+  const stored = await svc.getRegisteredPasskey();
+  assert.equal(stored.credentialId, 'device-9');
+  assert.equal(stored.accountLabel, 'ada@example.com');
+});
+
+test('PasskeyService: sync never touches a WebAuthn (web-build) record', async () => {
+  const storage = makeServiceStorage();
+  const svc = new PasskeyService({
+    storage,
+    nativeBridge: {
+      ...makeNativeBridgeFake(),
+      status: async () => ({ available: true, registered: false, passkey: null })
+    }
+  });
+  // WebAuthn records carry no `method` - the bridge has no say over them.
+  await storage.set('yayra-account-passkey-v1', { credentialId: 'webauthn-1', accountLabel: 'web' });
+  const sync = await svc.syncWithNativeBridge();
+  assert.equal(sync.action, 'none');
+  assert.ok(await svc.getRegisteredPasskey(), 'WebAuthn record untouched');
+});
+
+test('PasskeyService: a stale verify self-heals - record cleared so the UI can offer re-creation', async () => {
+  const storage = makeServiceStorage();
+  const svc = new PasskeyService({
+    storage,
+    nativeBridge: {
+      ...makeNativeBridgeFake(),
+      verify: async () => ({ ok: false, reason: 'no-passkey-registered' })
+    }
+  });
+  await storage.set('yayra-account-passkey-v1', { credentialId: 'device-old', accountLabel: 'ghost', method: 'os-keychain' });
+
+  const result = await svc.verifyPasskey();
+  assert.deepEqual(result, { success: false, reason: 'no-passkey-registered' });
+  assert.equal(await svc.getRegisteredPasskey(), null, 'stale record dropped by the failed verify');
+});
+
 /* ------------------------- Shell: per-profile windows ------------------------- */
 
 function makeShell({ storage = new MemoryStorage(), options = {} } = {}) {

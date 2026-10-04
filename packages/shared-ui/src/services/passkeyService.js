@@ -78,6 +78,52 @@ export class PasskeyService {
   }
 
   /**
+   * Reconcile the renderer's stored passkey record with the device
+   * bridge's ground truth (the OS-keychain file in the main process).
+   * The two CAN drift - e.g. app data cleared or the device file removed
+   * between runs - which used to leave the UI claiming "Passkey active"
+   * while verify honestly failed with "no passkey is registered yet".
+   * Called on startup; self-heals both directions:
+   *   - bridge registered, storage empty  -> adopt the bridge record;
+   *   - storage has a native record, bridge empty -> drop the stale
+   *     record so the UI goes back to "Create passkey";
+   * Returns { action: 'adopted'|'cleared-stale'|'none', status } where
+   * status is the bridge's report (available/method/weakEncryption/...)
+   * or null off-desktop.
+   */
+  async syncWithNativeBridge() {
+    if (!this.usesNativeBridge || typeof this.nativeBridge.status !== 'function') {
+      return { action: 'none', status: null };
+    }
+    let status = null;
+    try {
+      status = await this.nativeBridge.status();
+    } catch {
+      return { action: 'none', status: null };
+    }
+    const stored = await this.getRegisteredPasskey();
+    if (status?.registered && status.passkey && !stored) {
+      const adopted = {
+        credentialId: status.passkey.credentialId,
+        accountLabel: status.passkey.label || 'Yayra user',
+        rpId: null,
+        method: status.passkey.method || 'os-keychain',
+        createdAt: status.passkey.createdAt || Date.now(),
+        lastVerifiedAt: null
+      };
+      await this._set(STORAGE_KEY, adopted);
+      return { action: 'adopted', status };
+    }
+    if (status && !status.registered && stored && stored.method) {
+      // Only native-bridge records (they carry `method`) are dropped here;
+      // a WebAuthn record from the web build is none of the bridge's business.
+      await this._delete(STORAGE_KEY);
+      return { action: 'cleared-stale', status };
+    }
+    return { action: 'none', status };
+  }
+
+  /**
    * Register a passkey for the Yayra account on this device.
    * Returns { success, passkey } or { success: false, reason }.
    */
@@ -159,7 +205,15 @@ export class PasskeyService {
       try {
         const res = await this.nativeBridge.verify();
         if (!res || !res.ok) {
-          return { success: false, reason: (res && res.reason) || 'verification-failed' };
+          const reason = (res && res.reason) || 'verification-failed';
+          if (reason === 'no-passkey-registered') {
+            // The device-side record is gone (app data cleared, file
+            // removed) while the renderer still held one - self-heal by
+            // dropping the stale record so the UI offers "Create passkey"
+            // again instead of a dead "Passkey active" card.
+            await this._delete(STORAGE_KEY);
+          }
+          return { success: false, reason };
         }
         await this._set(STORAGE_KEY, { ...stored, lastVerifiedAt: Date.now() });
         return { success: true };
