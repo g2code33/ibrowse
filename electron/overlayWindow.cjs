@@ -621,6 +621,10 @@ function createOverlayBridge({
     overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     overlayTopmostTimer = startTopmostGuard(overlayWin);
     overlayWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(settings))}`);
+    // The bubble can be configured nearly invisible (tiny + low opacity +
+    // tucked in a corner) - log its geometry so "the bubble did not open"
+    // is diagnosable from the terminal in one glance.
+    console.log(`[yayra] floating bubble shown at ${pos.x},${pos.y} size ${size}px opacity ${Math.round((settings.opacity ?? 1) * 100)}%${settings.positionLocked ? ' (position locked)' : ''}`);
 
     overlayWin.on('moved', () => {
       // While the radial menu is open the window is the ENLARGED square -
