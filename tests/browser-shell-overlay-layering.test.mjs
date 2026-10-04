@@ -164,7 +164,6 @@ test('desktop update pipeline: confirming an available update downloads via the 
       download: { url: 'https://github.com/g2code33/yayra/releases/download/v0.4.0/yayra-0.4.0.deb', sha256: 'abc123', bytes: 1000 }
     })
   };
-  window.confirm = () => true;
   window.alert = () => {};
   try {
     const container = document.createElement('div');
@@ -173,7 +172,12 @@ test('desktop update pipeline: confirming an available update downloads via the 
     shell.render(container);
 
     await shell.checkForUpdates(true);
-    // applyUpdate() kicks off the async desktop pipeline; let it settle.
+    // The in-app update card offers "Download & install now" / "Later" -
+    // accept it, which kicks off the async desktop pipeline; let it settle.
+    const card = container.querySelector('.fb-update-prompt-card');
+    assert.ok(card, 'update card rendered for the available update');
+    assert.match(String(card.querySelector('.fb-update-prompt-now').textContent), /Download/i, 'desktop pipeline wording');
+    card.querySelector('.fb-update-prompt-now').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     assert.equal(downloadCalls.length, 1, 'main-process download started');
@@ -184,7 +188,6 @@ test('desktop update pipeline: confirming an available update downloads via the 
     assert.deepEqual(installCalls, [{ path: '/tmp/staged/yayra-0.4.0.deb' }], 'verified staged file is handed to the OS installer');
     assert.equal(shell.state.updateState.status, 'staged');
   } finally {
-    delete window.confirm;
     delete window.alert;
     uninstall();
   }
@@ -206,18 +209,20 @@ test('desktop update pipeline: a failed/tampered download surfaces as an error s
       download: { url: 'https://example.com/yayra.deb', sha256: 'x', bytes: 10 }
     })
   };
-  window.confirm = () => true;
   window.alert = () => {};
   try {
     const container = document.createElement('div');
     const shell = new BrowserShell({ container, platform: 'linux', isMobile: false, updateService });
     await shell.initialize();
+    shell.render(container);
     await shell.checkForUpdates(true);
+    const card = container.querySelector('.fb-update-prompt-card');
+    assert.ok(card, 'update card rendered');
+    card.querySelector('.fb-update-prompt-now').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(shell.state.updateState.status, 'error');
     assert.match(shell.state.updateState.notes, /sha256-mismatch/);
   } finally {
-    delete window.confirm;
     delete window.alert;
     uninstall();
   }

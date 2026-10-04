@@ -18,12 +18,15 @@ import { BrowserShell } from '../packages/shared-ui/src/components/BrowserShell.
  * release tag, it declared an update "ready" on every single check -
  * including immediately after the user clicked "restart and apply", which
  * just reloads the page and re-runs the same broken check - producing an
- * infinite "An update for Yayra (vX.Y.Z) is ready!" confirm-dialog loop that
- * only stopped when the user clicked Cancel.
+ * infinite update-prompt loop that only stopped when the user declined.
  *
  * Fix: delete the duplicate fallback entirely; trust the Worker-backed
  * UpdateService as the single source of truth, and stop hardcoding version
  * strings anywhere in the prompt/menu UI.
+ *
+ * The prompt itself is now an IN-APP CARD (.fb-update-prompt-card) with
+ * explicit "Download & install now / Update now" and "Later" buttons -
+ * native window.confirm() is never used for updates anymore.
  */
 
 function installFakeUpdateService(resultsQueue, { installedVersion = '0.1.9' } = {}) {
@@ -39,25 +42,32 @@ function installFakeUpdateService(resultsQueue, { installedVersion = '0.1.9' } =
   };
 }
 
-function installConfirmStub(answer) {
-  const prompts = [];
-  window.confirm = (msg) => { prompts.push(msg); return answer; };
+function installDialogSpies() {
+  const confirms = [];
+  window.confirm = (msg) => { confirms.push(msg); return true; };
   window.alert = () => {};
   window.location = window.location || {};
   const reloads = [];
   window.location.reload = () => reloads.push(true);
-  return { prompts, reloads, uninstall: () => { delete window.confirm; delete window.alert; } };
+  return { confirms, reloads, uninstall: () => { delete window.confirm; delete window.alert; } };
 }
 
-test('checkForUpdates: already up to date NEVER shows the update-ready dialog, even though no real update exists', async () => {
+function findUpdateCard(container) {
+  return container.querySelector('.fb-update-prompt-card');
+}
+
+test('checkForUpdates: already up to date NEVER shows the update card, even though no real update exists', async () => {
   const container = document.createElement('div');
   const updateService = installFakeUpdateService([{ status: 'upToDate', version: '0.1.9' }]);
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true, updateService });
   await shell.initialize();
-  const { prompts, uninstall } = installConfirmStub(true);
+  shell.render(container);
+  const { confirms, uninstall } = installDialogSpies();
   try {
     await shell.checkForUpdates(false);
-    assert.equal(prompts.length, 0, 'no confirm dialog should ever be shown when already up to date');
+    assert.equal(shell.state.updatePrompt, null, 'no update card when already up to date');
+    assert.equal(findUpdateCard(container), null, 'no card in the DOM either');
+    assert.equal(confirms.length, 0, 'native confirm() must never be used for updates');
     assert.equal(shell.state.updateState.status, 'uptodate');
     assert.equal(shell.state.updateState.availableVersion, null);
   } finally {
@@ -70,47 +80,64 @@ test('checkForUpdates: repeated checks while up to date never escalate into a pr
   const updateService = installFakeUpdateService([{ status: 'upToDate', version: '0.1.9' }]);
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true, updateService });
   await shell.initialize();
-  const { prompts, uninstall } = installConfirmStub(true);
+  shell.render(container);
+  const { uninstall } = installDialogSpies();
   try {
     // Simulate several page loads worth of checks in a row (what happened in
     // production every time the broken fallback reloaded the page).
     await shell.checkForUpdates(false);
     await shell.checkForUpdates(false);
     await shell.checkForUpdates(false);
-    assert.equal(prompts.length, 0, 'no update prompt should ever fire across repeated up-to-date checks');
+    assert.equal(shell.state.updatePrompt, null, 'no update card should ever appear across repeated up-to-date checks');
   } finally {
     uninstall();
   }
 });
 
-test('checkForUpdates: a genuinely available update shows exactly one correctly-versioned prompt and applies on confirm', async () => {
+test('checkForUpdates: a genuinely available update shows ONE correctly-versioned card; "now" applies the update', async () => {
   const container = document.createElement('div');
   const updateService = installFakeUpdateService([{ status: 'available', version: '0.2.0', force: false }], { installedVersion: '0.1.9' });
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true, updateService });
   await shell.initialize();
-  const { prompts, reloads, uninstall } = installConfirmStub(true);
+  shell.render(container);
+  const { reloads, uninstall } = installDialogSpies();
   try {
     await shell.checkForUpdates(false);
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0], /v0\.2\.0/);
-    assert.equal(shell.state.updateState.status, 'ready');
-    assert.equal(shell.state.updateState.availableVersion, '0.2.0');
-    assert.equal(reloads.length, 1, 'confirming the dialog should apply (reload) exactly once');
+    assert.ok(shell.state.updatePrompt, 'card state set');
+    assert.equal(shell.state.updatePrompt.version, '0.2.0', 'card carries the REAL version, nothing hardcoded');
+    const card = findUpdateCard(container);
+    assert.ok(card, 'update card rendered');
+    const nowBtn = card.querySelector('.fb-update-prompt-now');
+    assert.ok(nowBtn, 'has an explicit "now" action');
+    assert.ok(card.querySelector('.fb-update-prompt-later'), 'has an explicit "Later" action');
+
+    nowBtn.click();
+    assert.equal(shell.state.updatePrompt, null, 'card dismissed after accepting');
+    assert.equal(reloads.length, 1, 'accepting applies (reloads) exactly once');
+
+    // A later check in the same session must not re-prompt (one per session).
+    await shell.checkForUpdates(false);
+    assert.equal(shell.state.updatePrompt, null, 'never a second card in the same session');
   } finally {
     uninstall();
   }
 });
 
-test('checkForUpdates: declining the prompt does not reload and does not loop on its own', async () => {
+test('checkForUpdates: "Later" dismisses the card without applying and does not loop on its own', async () => {
   const container = document.createElement('div');
   const updateService = installFakeUpdateService([{ status: 'available', version: '0.2.0', force: false }], { installedVersion: '0.1.9' });
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true, updateService });
   await shell.initialize();
-  const { prompts, reloads, uninstall } = installConfirmStub(false);
+  shell.render(container);
+  const { reloads, uninstall } = installDialogSpies();
   try {
     await shell.checkForUpdates(false);
-    assert.equal(prompts.length, 1);
-    assert.equal(reloads.length, 0, 'declining must not reload the page');
+    const card = findUpdateCard(container);
+    assert.ok(card, 'update card rendered');
+    card.querySelector('.fb-update-prompt-later').click();
+    assert.equal(shell.state.updatePrompt, null, 'card dismissed');
+    assert.equal(reloads.length, 0, 'Later must not reload the page');
+    assert.equal(shell.state.updateState.status, 'ready', 'update stays ready for the toolbar chip/menu');
   } finally {
     uninstall();
   }
@@ -127,7 +154,7 @@ test('checkForUpdates: never calls out to the raw GitHub Releases API directly (
     fetchCalled = true;
     throw new Error(`unexpected direct fetch during checkForUpdates: ${url}`);
   };
-  const { uninstall } = installConfirmStub(true);
+  const { uninstall } = installDialogSpies();
   try {
     await shell.checkForUpdates(false);
     assert.equal(fetchCalled, false, 'checkForUpdates must rely solely on the injected UpdateService, never a direct fetch');
@@ -141,10 +168,11 @@ test('checkForUpdates: with no updateService configured, reports "unknown" inste
   const container = document.createElement('div');
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true });
   await shell.initialize();
-  const { prompts, uninstall } = installConfirmStub(true);
+  shell.render(container);
+  const { uninstall } = installDialogSpies();
   try {
     await shell.checkForUpdates(false);
-    assert.equal(prompts.length, 0);
+    assert.equal(shell.state.updatePrompt, null);
     assert.equal(shell.state.updateState.status, 'unknown');
   } finally {
     uninstall();
@@ -156,25 +184,24 @@ test('checkForUpdates: a blocked/throwing alert() during applyUpdate must not be
   // used to call the bare `alert(...)` global (not window.alert) inside the
   // same try/catch as the network check, so if the dialog ever throws or is
   // blocked (e.g. Chrome's "Prevent this page from creating additional
-  // dialogs" safeguard - plausible after a prior dialog loop), the state was
-  // silently reset to 'uptodate' and window.location.reload() was never
-  // reached, with no visible error.
+  // dialogs" safeguard), the state was silently reset to 'uptodate' and
+  // window.location.reload() was never reached, with no visible error.
   const container = document.createElement('div');
   const updateService = installFakeUpdateService([{ status: 'available', version: '0.2.0', force: false }], { installedVersion: '0.1.9' });
   const shell = new BrowserShell({ container, platform: 'pwa', isMobile: true, updateService });
   await shell.initialize();
-  window.confirm = () => true;
+  shell.render(container);
   window.alert = () => { throw new Error('dialogs blocked by browser'); };
   window.location = window.location || {};
   const reloads = [];
   window.location.reload = () => reloads.push(true);
   try {
     await shell.checkForUpdates(false);
+    findUpdateCard(container).querySelector('.fb-update-prompt-now').click();
     assert.equal(shell.state.updateState.status, 'ready', 'a blocked alert() must not be mistaken for a failed update check');
     assert.equal(shell.state.updateState.availableVersion, '0.2.0');
     assert.equal(reloads.length, 1, 'reload must still happen even if the informational alert() throws/is blocked');
   } finally {
-    delete window.confirm;
     delete window.alert;
   }
 });

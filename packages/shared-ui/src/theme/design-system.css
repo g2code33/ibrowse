@@ -3116,6 +3116,79 @@ html {
   margin-top: 4px;
 }
 
+/* -------------------------------------------------------------
+   "UPDATE AVAILABLE - NOW OR LATER?" CARD (background auto-checks)
+   ------------------------------------------------------------- */
+.fb-update-prompt-card {
+  position: absolute;
+  top: 88px;
+  right: 16px;
+  width: 330px;
+  max-width: calc(100vw - 32px);
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 16px;
+  z-index: 500003;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: fb-slide-up 0.15s ease;
+}
+
+.fb-update-prompt-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fb-update-prompt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #60a5fa;
+  flex: 0 0 auto;
+}
+
+.fb-update-prompt-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.fb-update-prompt-text {
+  margin: 3px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--fb-text-muted, #9aa4b2);
+}
+
+.fb-update-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* -------------------------------------------------------------
+   TAB "TIME SIGN": animated hourglass in the icon slot while loading
+   ------------------------------------------------------------- */
+.fb-tab-loading-hourglass {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fb-accent-primary, #60a5fa);
+  animation: fb-hourglass-flip 1.2s ease-in-out infinite;
+}
+
+@keyframes fb-hourglass-flip {
+  0%, 55% { transform: rotate(0deg); }
+  70%, 100% { transform: rotate(180deg); }
+}
+
 /* =============================================================
    4. TOOLBAR BRAND BESIDE SECURITY BADGE
    ============================================================= */

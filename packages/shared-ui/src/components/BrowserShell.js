@@ -258,6 +258,8 @@ export class BrowserShell {
         notes: null
       },
       updatePromptShown: false,
+      // In-app "Update available" card: { version, notes, desktopPipeline }
+      updatePrompt: null,
       // Real "Sign in with Google" app-level identity (Electron desktop only
       // for now - see electron/googleAuth.cjs + electron/authBridge.cjs).
       // This is unrelated to, and does not attempt, signing in to Google
@@ -830,6 +832,11 @@ export class BrowserShell {
     // Chrome-style "Keep your browsing separate?" profile suggestion
     if (this.state.profileSuggestion) {
       this.renderProfileSuggestionCard(shell);
+    }
+
+    // "Update available - now or later?" card (auto background checks)
+    if (this.state.updatePrompt) {
+      this.renderUpdatePromptCard(shell);
     }
 
     // Find in Page Toolbar
@@ -4872,20 +4879,54 @@ export class BrowserShell {
   promptUpdateReady() {
     if (this.state.updatePromptShown) return;
     this.state.updatePromptShown = true;
-    const desktopPipeline = Boolean(this.desktopUpdatesBridge && this.state.updateState.download?.url);
-    const action = desktopPipeline
-      ? 'Download and install it now? (It will be verified before anything runs.)'
-      : 'Would you like to restart and apply the update now?';
-    const msg = `An update for Yayra (v${this.state.updateState.availableVersion || '0.1.1'}) is ready!\n\n${action}`;
-    try {
-      if (typeof window !== 'undefined' && typeof window.confirm === 'function' && window.confirm(msg)) {
-        this.applyUpdate();
-      }
-    } catch (err) {
-      // A blocked/unavailable confirm() must not crash the update flow or be
-      // mistaken for "no update available" elsewhere.
-      this.logger?.(`[updates] confirm dialog unavailable: ${err?.message || err}`);
-    }
+    // In-app card (not a native confirm() dialog): "Download & install
+    // now" / "Later". One per session; the persistent toolbar "Update"
+    // chip keeps offering the update after "Later".
+    this.state.updatePrompt = {
+      version: this.state.updateState.availableVersion || null,
+      notes: this.state.updateState.notes || '',
+      desktopPipeline: Boolean(this.desktopUpdatesBridge && this.state.updateState.download?.url)
+    };
+    this.render();
+  }
+
+  acceptUpdatePrompt() {
+    this.state.updatePrompt = null;
+    this.render();
+    this.applyUpdate();
+  }
+
+  deferUpdatePrompt() {
+    this.state.updatePrompt = null;
+    this.render();
+    this.showTransientNotice('Okay - update anytime from the "Update" chip or menu.');
+  }
+
+  renderUpdatePromptCard(root) {
+    const prompt = this.state.updatePrompt;
+    if (!prompt) return;
+    const card = document.createElement('div');
+    card.className = 'fb-update-prompt-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Update available');
+    card.innerHTML = `
+      <div class="fb-update-prompt-head">
+        <span class="fb-update-prompt-icon">${Icons.download}</span>
+        <div>
+          <strong class="fb-update-prompt-title">Update available</strong>
+          <p class="fb-update-prompt-text">Yayra v${prompt.version || 'latest'} is ready.${prompt.desktopPipeline
+            ? ' It will be downloaded and verified before anything runs.'
+            : ' It applies in seconds with a quick restart.'}</p>
+        </div>
+      </div>
+      <div class="fb-update-prompt-actions">
+        <button class="fb-btn fb-btn-secondary fb-update-prompt-later">Later</button>
+        <button class="fb-btn fb-btn-primary fb-update-prompt-now">${prompt.desktopPipeline ? 'Download &amp; install now' : 'Update now'}</button>
+      </div>
+    `;
+    card.querySelector('.fb-update-prompt-now')?.addEventListener('click', () => this.acceptUpdatePrompt());
+    card.querySelector('.fb-update-prompt-later')?.addEventListener('click', () => this.deferUpdatePrompt());
+    root.appendChild(card);
   }
 
   applyUpdate() {
@@ -6822,21 +6863,68 @@ export class BrowserShell {
   stopLoading() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
+    // Environment-aware stop: native Electron views get a real
+    // webContents.stop(); iframe-based tabs (web/PWA) get a best-effort
+    // contentWindow.stop() (only reachable for same-origin documents).
+    // Either way the UI flips back to the refresh icon IMMEDIATELY - a
+    // stop must never leave the button stuck as an X.
     if (this.nativeWebview && this._nativeWebviewTabIds.has(activeTab.id)) {
       this.nativeWebview.stop(activeTab.id).catch(() => {});
-      return;
+    } else {
+      const frame = this.webFrames?.get(activeTab.id);
+      try { frame?.iframe?.contentWindow?.stop?.(); } catch { /* cross-origin */ }
     }
-    activeTab.isLoading = false;
-    this.render();
+    this.updateTabLoading(activeTab.id, false);
   }
 
   updateTabLoading(tabId, isLoading) {
     const tab = this.state.tabs.find((t) => t.id === tabId);
     if (tab) {
-      tab.isLoading = isLoading;
+      const changed = tab.isLoading !== Boolean(isLoading);
+      tab.isLoading = Boolean(isLoading);
       const countEl = this.rootElement?.querySelector('.fb-page-loading-bar');
       if (countEl) countEl.style.display = isLoading ? 'block' : 'none';
+      if (changed) this.refreshLoadingUi(tabId);
       this.ensurePersistentAssistiveBubble();
+    }
+  }
+
+  /**
+   * Smart loading indicators, updated surgically IN PLACE (never a full
+   * re-render, so nothing flickers):
+   *  - the reload button knows the page state: X (stop) while the site is
+   *    loading, back to the refresh sign the moment it's fully loaded;
+   *  - the tab's icon slot shows an animated hourglass ("time sign")
+   *    while loading, then the real favicon again.
+   * Works for every environment that reports loading state: Electron
+   * native views (loading-start/loading-stop events), web/PWA iframes
+   * (load events), desktop and mobile toolbars alike.
+   */
+  refreshLoadingUi(tabId) {
+    if (typeof document === 'undefined') return;
+    const tab = this.state.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const root = this.rootElement || document;
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+
+    // Reload/stop button(s) - only the ACTIVE tab drives the toolbar.
+    if (tabId === this.state.activeTabId) {
+      for (const selector of ['.fb-nav-reload', '.fb-mobile-refresh-btn']) {
+        const btn = root.querySelector(selector);
+        if (!btn) continue;
+        btn.innerHTML = tab.isLoading ? Icons.stop : Icons.refresh;
+        btn.setAttribute('title', tab.isLoading ? 'Stop loading this page (Esc)' : 'Reload this page (Ctrl+R)');
+        btn.setAttribute('aria-label', tab.isLoading ? 'Stop' : 'Reload');
+      }
+    }
+
+    // The tab's icon slot: hourglass while loading, favicon when done.
+    for (const tabEl of root.querySelectorAll('.fb-tab-item') || []) {
+      const elTabId = (tabEl.dataset && tabEl.dataset.tabId)
+        || (typeof tabEl.getAttribute === 'function' ? tabEl.getAttribute('data-tab-id') : null);
+      if (elTabId !== tabId) continue;
+      const favicon = tabEl.querySelector?.('.fb-tab-favicon');
+      if (favicon) favicon.innerHTML = this.getTabFavicon(tab);
     }
   }
 
@@ -7097,6 +7185,11 @@ export class BrowserShell {
 
   getTabFavicon(tab) {
     if (!tab) return Icons.globe;
+    // "Time sign" while the page is loading: the tab's icon slot becomes
+    // an animated hourglass the moment loading starts, and flips back to
+    // the real favicon when the page is fully loaded. Updated in place by
+    // refreshLoadingUi() - never via a flickery full re-render.
+    if (tab.isLoading) return `<span class="fb-tab-loading-hourglass">${Icons.hourglass}</span>`;
     const url = tab.url || '';
     if (url.startsWith('yayra://settings')) return Icons.settings;
     if (url.startsWith('yayra://history')) return Icons.history;
