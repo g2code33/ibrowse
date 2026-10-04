@@ -1,6 +1,9 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
+const http = require('node:http');
+const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
 const { createWebviewBridge, buildContextMenuTemplate } = require('./webviewBridge.cjs');
@@ -11,8 +14,10 @@ const { resolveGoogleClientId, resolveGoogleClientSecret } = require('./googleAu
 const { createDownloadsStore } = require('./downloadsStore.cjs');
 const { createDownloadsBridge } = require('./downloadsBridge.cjs');
 const { createPasskeyBridge } = require('./passkeyBridge.cjs');
+const { createPhoneApproval } = require('./phoneApproval.cjs');
 const { createOverlayBridge } = require('./overlayWindow.cjs');
 const { createOverlayStore } = require('./overlayStore.cjs');
+const { createScreenRecorder } = require('./screenRecorder.cjs');
 const { createTrayController } = require('./tray.cjs');
 
 const CUSTOM_SCHEME = 'yayra';
@@ -92,6 +97,22 @@ app.whenReady().then(async () => {
   const isSmokeRun = process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1';
   if (!isSmokeRun) {
     const overlayStore = createOverlayStore({ fs, userDataDir: app.getPath('userData') });
+    const downloadsDirResolver = () => {
+      try { return app.getPath('downloads'); } catch { return app.getPath('userData'); }
+    };
+    // System-wide screen recorder behind the bubble's right-click menu:
+    // always captures PC system sound (OS loopback), mic optional.
+    const screenRecorder = createScreenRecorder({
+      BrowserWindow,
+      ipcMain,
+      screen,
+      path,
+      desktopCapturerImpl: desktopCapturer,
+      fsImpl: fs,
+      shellImpl: shell,
+      preloadPath: path.join(__dirname, 'recorderPreload.cjs'),
+      saveDir: downloadsDirResolver
+    });
     overlayBridge = createOverlayBridge({
       BrowserWindow,
       app,
@@ -116,9 +137,8 @@ app.whenReady().then(async () => {
       // menus: full-resolution primary-display PNG into ~/Downloads.
       desktopCapturerImpl: desktopCapturer,
       shellImpl: shell,
-      screenshotDir: () => {
-        try { return app.getPath('downloads'); } catch { return app.getPath('userData'); }
-      }
+      screenshotDir: downloadsDirResolver,
+      screenRecorder
     });
     overlayBridge.initializeOnStartup();
 
@@ -280,7 +300,14 @@ function registerIpcBridges() {
     path,
     userDataDir: app.getPath('userData'),
     safeStorageImpl: safeStorage,
-    systemPreferencesImpl: systemPreferences
+    systemPreferencesImpl: systemPreferences,
+    // Fallback #3 for devices with no biometrics/keychain: approve the
+    // vault unlock from a phone by scanning a one-time LAN QR code.
+    phoneApproval: createPhoneApproval({
+      httpImpl: http,
+      osImpl: os,
+      randomBytesImpl: (n) => crypto.randomBytes(n)
+    })
   });
 
   // Chrome-style profiles: "Add profile" / switching opens a NEW Yayra

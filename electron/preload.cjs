@@ -101,9 +101,15 @@ const api = {
   // ID prompt on supporting Macs). Web/PWA builds keep genuine WebAuthn.
   passkeys: {
     status: () => ipcRenderer.invoke('yayra:passkey-status'),
-    register: (label) => ipcRenderer.invoke('yayra:passkey-register', { label }),
-    verify: () => ipcRenderer.invoke('yayra:passkey-verify'),
-    remove: () => ipcRenderer.invoke('yayra:passkey-remove')
+    // options: { method: 'device'|'pin', pin: '123456' } - the fallback
+    // ladder for devices without biometrics/keychain access.
+    register: (label, options) => ipcRenderer.invoke('yayra:passkey-register', { label, ...(options || {}) }),
+    verify: (options) => ipcRenderer.invoke('yayra:passkey-verify', options || {}),
+    remove: () => ipcRenderer.invoke('yayra:passkey-remove'),
+    // Phone QR approval: scan a one-time LAN QR and approve on the phone.
+    phoneStart: () => ipcRenderer.invoke('yayra:passkey-phone-start'),
+    phoneStatus: () => ipcRenderer.invoke('yayra:passkey-phone-status'),
+    phoneCancel: () => ipcRenderer.invoke('yayra:passkey-phone-cancel')
   },
   // Chrome-style profiles: open a profile in its OWN new Yayra window
   // while the current window stays on its profile.

@@ -127,13 +127,17 @@ export class PasskeyService {
    * Register a passkey for the Yayra account on this device.
    * Returns { success, passkey } or { success: false, reason }.
    */
-  async registerPasskey({ accountLabel = 'Yayra user', accountId } = {}) {
+  async registerPasskey({ accountLabel = 'Yayra user', accountId, method = null, pin = null } = {}) {
     if (!this.isSupported()) {
       return { success: false, reason: 'passkeys-unsupported' };
     }
     if (this.usesNativeBridge) {
       try {
-        const res = await this.nativeBridge.register(accountLabel);
+        // method 'pin' (+ the 6 digits) is the fallback for devices with
+        // no fingerprint/Face ID/security key and no usable OS keychain;
+        // the default 'device' method binds to the OS login (system lock).
+        const options = method ? { method, pin } : undefined;
+        const res = await this.nativeBridge.register(accountLabel, options);
         if (!res || !res.ok) {
           return { success: false, reason: (res && res.reason) || 'creation-cancelled' };
         }
@@ -193,7 +197,7 @@ export class PasskeyService {
    * Run a user-verification ceremony against the registered passkey.
    * Returns { success } or { success: false, reason }.
    */
-  async verifyPasskey() {
+  async verifyPasskey({ pin = null } = {}) {
     if (!this.isSupported()) {
       return { success: false, reason: 'passkeys-unsupported' };
     }
@@ -203,7 +207,7 @@ export class PasskeyService {
     }
     if (this.usesNativeBridge) {
       try {
-        const res = await this.nativeBridge.verify();
+        const res = await this.nativeBridge.verify(pin != null ? { pin } : undefined);
         if (!res || !res.ok) {
           const reason = (res && res.reason) || 'verification-failed';
           if (reason === 'no-passkey-registered') {
@@ -240,6 +244,36 @@ export class PasskeyService {
     } catch (err) {
       return { success: false, reason: errorReason(err) };
     }
+  }
+
+  /* -------------------- phone QR approval (desktop) -------------------- */
+
+  get supportsPhoneApproval() {
+    return Boolean(this.usesNativeBridge && typeof this.nativeBridge.phoneStart === 'function');
+  }
+
+  /** Start a phone QR approval session. Returns { ok, url, expiresAt } or { ok:false, reason }. */
+  async startPhoneApproval() {
+    if (!this.supportsPhoneApproval) return { ok: false, reason: 'unavailable' };
+    try { return await this.nativeBridge.phoneStart(); } catch (err) { return { ok: false, reason: errorReason(err) }; }
+  }
+
+  /** Poll the session: { state: 'pending'|'approved'|'denied'|'expired'|'idle'|'unavailable' }. */
+  async phoneApprovalStatus() {
+    if (!this.supportsPhoneApproval) return { state: 'unavailable' };
+    try { return await this.nativeBridge.phoneStatus(); } catch { return { state: 'unavailable' }; }
+  }
+
+  async cancelPhoneApproval() {
+    if (!this.supportsPhoneApproval) return { ok: false };
+    try { return await this.nativeBridge.phoneCancel(); } catch { return { ok: false }; }
+  }
+
+  /** A completed phone approval counts as a verification ceremony. */
+  async markVerifiedViaPhone() {
+    const stored = await this.getRegisteredPasskey();
+    if (stored) await this._set(STORAGE_KEY, { ...stored, lastVerifiedAt: Date.now() });
+    return { success: true };
   }
 
   async removePasskey() {

@@ -93,6 +93,11 @@ function createOverlayBridge({
   desktopCapturerImpl = null,
   shellImpl = null,
   screenshotDir = null,
+  // Screen recorder bridge (electron/screenRecorder.cjs) powering the
+  // right-click "Screen recording" entries: PC system sound is ALWAYS
+  // captured (where the OS provides loopback); the microphone is the
+  // user's include/mute choice.
+  screenRecorder = null,
   logger = console
 }) {
   let overlayWin = null;
@@ -984,6 +989,30 @@ function createOverlayBridge({
     return null;
   }
 
+  /**
+   * Right-click "Screen recording" entries. PC system sound is always
+   * part of a recording (OS loopback - see electron/screenRecorder.cjs
+   * for the one honest exception); the mic is the include/mute choice.
+   */
+  function buildRecordingMenuItems() {
+    if (!screenRecorder || !screenRecorder.isSupported?.()) return [];
+    const rec = screenRecorder.status();
+    if (rec.active) {
+      const mins = Math.max(0, Math.floor((Date.now() - (rec.startedAt || Date.now())) / 60000));
+      return [{
+        label: `Stop screen recording (${mins}m, ${rec.mic ? 'voice on' : 'mic muted'})`,
+        click: () => { screenRecorder.stop(); }
+      }];
+    }
+    return [{
+      label: 'Screen recording',
+      submenu: [
+        { label: 'Record screen - PC sound + voice', click: () => { screenRecorder.start({ mic: true }); } },
+        { label: 'Record screen - PC sound only (mic muted)', click: () => { screenRecorder.start({ mic: false }); } }
+      ]
+    }];
+  }
+
   function openBubbleMenu() {
     if (!Menu || !overlayWin || overlayWin.isDestroyed()) return;
     const locked = Boolean(overlayStore.load().positionLocked);
@@ -1000,6 +1029,7 @@ function createOverlayBridge({
       },
       { type: 'separator' },
       { label: 'Capture screenshot', click: () => { captureScreenshot(); } },
+      ...buildRecordingMenuItems(),
       { label: 'Security & Shields', click: () => openMiniPanelAt('yayra://extensions') },
       { type: 'separator' },
       { label: 'Open yayra mini', click: () => toggleMiniPanel() },

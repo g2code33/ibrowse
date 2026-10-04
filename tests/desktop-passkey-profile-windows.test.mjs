@@ -77,7 +77,8 @@ function makeBridge(overrides = {}) {
     safeStorageImpl: overrides.safeStorageImpl ?? fakeSafeStorage,
     systemPreferencesImpl: overrides.systemPreferencesImpl ?? null,
     platform: overrides.platform ?? 'linux',
-    logger: { error: () => {} }
+    phoneApproval: overrides.phoneApproval ?? null,
+    logger: { error: () => {}, warn: () => {} }
   });
   return { bridge, fs };
 }

@@ -17,6 +17,7 @@
  */
 
 import { Icons } from '../icons/icons.js';
+import qrcode from '../vendor/qrcode.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
 import { PasskeyService } from '../services/passkeyService.js';
 import { ProfileService } from '../services/profileService.js';
@@ -70,6 +71,12 @@ function describePasskeyReason(reason) {
     case 'keychain-unavailable': return 'the OS keychain is locked or unavailable on this device';
     case 'verification-failed': return 'the device passkey could not be verified';
     case 'device-storage-failed': return 'the passkey could not be saved on this device (check disk/app-data permissions)';
+    case 'pin-invalid': return 'the PIN must be exactly 6 digits';
+    case 'pin-required': return 'enter your 6-digit PIN';
+    case 'wrong-pin': return 'wrong PIN';
+    case 'pin-locked': return 'too many wrong PIN attempts - PIN entry is locked for a minute';
+    case 'verification-cancelled': return 'the verification was cancelled';
+    case 'no-lan': return 'phone approval needs your PC to be on a Wi-Fi/LAN network the phone can reach';
     default: return reason || 'unknown error';
   }
 }
@@ -2399,13 +2406,233 @@ export class BrowserShell {
     if (!this.state.passkeyInfo) return true; // gate enabled but no passkey yet
     if (Date.now() - this._vaultUnlockedAt < 5 * 60 * 1000) return true;
     if (!this.passkeyService) return false;
-    const result = await this.passkeyService.verifyPasskey();
+    const result = await this._performPasskeyCeremony();
     if (result && result.success) {
       this._vaultUnlockedAt = Date.now();
       return true;
     }
     this.showTransientNotice('Passkey verification needed to reveal vault secrets.');
     return false;
+  }
+
+  /**
+   * Small promise-based dialog for the passkey fallback ladder (PIN entry,
+   * method choice). Self-contained DOM overlay - usable from both the full
+   * and mini shells, independent of the render cycle. Overridable in tests.
+   * Resolves { action, values } where values holds any input contents.
+   */
+  _passkeyDialog({ title, description, inputs = [], buttons = [] }) {
+    return new Promise((resolve) => {
+      if (typeof document === 'undefined' || !document.body) { resolve({ action: 'cancel', values: {} }); return; }
+      const overlay = document.createElement('div');
+      overlay.className = 'fb-passkey-dialog-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,10,16,0.62);display:flex;align-items:center;justify-content:center;';
+      const card = document.createElement('div');
+      card.style.cssText = 'background:var(--fb-bg-elevated,#171a22);color:var(--fb-text-primary,#f3f4f6);border-radius:16px;padding:22px;max-width:380px;width:92%;box-shadow:0 18px 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;gap:12px;';
+      const h = document.createElement('strong');
+      h.textContent = title;
+      h.style.cssText = 'font-size:1.05rem;';
+      card.appendChild(h);
+      if (description) {
+        const p = document.createElement('p');
+        p.textContent = description;
+        p.style.cssText = 'margin:0;font-size:0.84rem;color:var(--fb-text-secondary,#9ca3af);line-height:1.5;';
+        card.appendChild(p);
+      }
+      const fields = {};
+      for (const input of inputs) {
+        const el = document.createElement('input');
+        el.type = 'password';
+        el.inputMode = 'numeric';
+        el.maxLength = 6;
+        el.autocomplete = 'off';
+        el.placeholder = input.placeholder || '6-digit PIN';
+        el.style.cssText = 'font-size:1.3rem;letter-spacing:0.5em;text-align:center;padding:10px;border-radius:10px;border:1px solid var(--fb-border,#2a2f3b);background:var(--fb-bg,#101218);color:inherit;';
+        fields[input.id] = el;
+        card.appendChild(el);
+      }
+      const done = (action) => {
+        const values = {};
+        for (const [id, el] of Object.entries(fields)) values[id] = el.value || '';
+        try { overlay.remove(); } catch { /* already gone */ }
+        resolve({ action, values });
+      };
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+      for (const btn of buttons) {
+        const b = document.createElement('button');
+        b.textContent = btn.label;
+        b.style.cssText = btn.primary
+          ? 'padding:11px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-accent,#6d5df2);color:#fff;'
+          : 'padding:11px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-bg,#232734);color:inherit;';
+        b.addEventListener('click', () => done(btn.action));
+        row.appendChild(b);
+      }
+      card.appendChild(row);
+      card.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(buttons.find((b) => b.primary)?.action || 'cancel'); });
+      overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) done('cancel'); });
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      const firstField = Object.values(fields)[0];
+      if (firstField && typeof firstField.focus === 'function') firstField.focus();
+    });
+  }
+
+  /**
+   * Which protection method should a NEW passkey use? Devices with a
+   * usable OS keychain choose between system lock and a 6-digit PIN;
+   * devices without one (no biometrics, no keyring, no security key)
+   * go straight to the PIN - exactly the fallback the card promises.
+   * Returns { method: 'device'|'pin', pin? } or null when cancelled.
+   */
+  async _choosePasskeyMethod() {
+    const status = this.state.passkeyDeviceStatus;
+    const deviceLockAvailable = status?.methods ? Boolean(status.methods.deviceLock) : Boolean(status?.available ?? true);
+    const touchId = Boolean(status?.methods?.touchId);
+    if (deviceLockAvailable) {
+      const choice = await this._passkeyDialog({
+        title: 'Choose how to protect your vault',
+        description: touchId
+          ? 'System lock uses Touch ID and your Mac\u2019s Keychain. The 6-digit PIN works on any device - 5 wrong tries locks it for a minute.'
+          : 'System lock ties the passkey to your PC login (unlocking your computer is the authentication). The 6-digit PIN works on any device - 5 wrong tries locks it for a minute.',
+        buttons: [
+          { action: 'device', label: touchId ? 'Use Touch ID + system lock (recommended)' : 'Use system lock (recommended)', primary: true },
+          { action: 'pin', label: 'Create a 6-digit PIN instead' },
+          { action: 'cancel', label: 'Cancel' }
+        ]
+      });
+      if (choice.action === 'device') return { method: 'device' };
+      if (choice.action !== 'pin') return null;
+    } else {
+      this.showTransientNotice('No fingerprint, Face ID or OS keychain found on this device - create a 6-digit PIN instead.');
+    }
+    const pin = await this._promptNewPin();
+    return pin ? { method: 'pin', pin } : null;
+  }
+
+  /** Ask for a new 6-digit PIN twice (typo protection). Returns pin or null. */
+  async _promptNewPin() {
+    const first = await this._passkeyDialog({
+      title: 'Create your 6-digit PIN',
+      description: 'This PIN protects your Yayra vault on this device. It is stored only as a salted scrypt hash - never the digits themselves.',
+      inputs: [{ id: 'pin', placeholder: '6-digit PIN' }],
+      buttons: [{ action: 'confirm', label: 'Continue', primary: true }, { action: 'cancel', label: 'Cancel' }]
+    });
+    if (first.action !== 'confirm') return null;
+    if (!/^\d{6}$/.test(first.values.pin || '')) {
+      this.showTransientNotice('The PIN must be exactly 6 digits.');
+      return null;
+    }
+    const second = await this._passkeyDialog({
+      title: 'Confirm your PIN',
+      description: 'Type the same 6 digits again.',
+      inputs: [{ id: 'pin', placeholder: 'Repeat PIN' }],
+      buttons: [{ action: 'confirm', label: 'Create PIN', primary: true }, { action: 'cancel', label: 'Cancel' }]
+    });
+    if (second.action !== 'confirm') return null;
+    if (second.values.pin !== first.values.pin) {
+      this.showTransientNotice('The PINs did not match - try again.');
+      return null;
+    }
+    return first.values.pin;
+  }
+
+  /**
+   * One verification ceremony, method-aware:
+   *  - 'pin' records show the PIN dialog (with a phone-QR escape hatch);
+   *  - everything else runs the silent device/Touch ID ceremony.
+   * Returns the service's { success, reason } result.
+   */
+  async _performPasskeyCeremony() {
+    const stored = this.state.passkeyInfo;
+    if (stored?.method === 'pin') {
+      const entry = await this._passkeyDialog({
+        title: 'Enter your 6-digit PIN',
+        description: 'Unlock the Yayra vault on this device.',
+        inputs: [{ id: 'pin', placeholder: '6-digit PIN' }],
+        buttons: [
+          { action: 'confirm', label: 'Unlock', primary: true },
+          ...(this.passkeyService?.supportsPhoneApproval ? [{ action: 'phone', label: 'Approve from my phone (QR)' }] : []),
+          { action: 'cancel', label: 'Cancel' }
+        ]
+      });
+      if (entry.action === 'phone') {
+        const ok = await this.verifyWithPhoneQr();
+        return ok ? { success: true } : { success: false, reason: 'verification-cancelled' };
+      }
+      if (entry.action !== 'confirm') return { success: false, reason: 'verification-cancelled' };
+      return this.passkeyService.verifyPasskey({ pin: entry.values.pin });
+    }
+    return this.passkeyService.verifyPasskey();
+  }
+
+  /**
+   * Phone QR approval: shows a one-time QR served by the PC itself (LAN,
+   * 2-minute expiry - electron/phoneApproval.cjs); approving on the phone
+   * counts as the vault verification ceremony. Returns true on approval.
+   */
+  async verifyWithPhoneQr() {
+    if (!this.passkeyService?.supportsPhoneApproval) {
+      this.showTransientNotice('Phone approval is only available in the Yayra desktop app.');
+      return false;
+    }
+    const start = await this.passkeyService.startPhoneApproval();
+    if (!start || !start.ok) {
+      this.showTransientNotice(`Couldn't start phone approval: ${describePasskeyReason(start?.reason)}`);
+      return false;
+    }
+    return new Promise((resolve) => {
+      if (typeof document === 'undefined' || !document.body) { resolve(false); return; }
+      const overlay = document.createElement('div');
+      overlay.className = 'fb-passkey-dialog-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,10,16,0.62);display:flex;align-items:center;justify-content:center;';
+      let svg = '';
+      try {
+        const qr = qrcode(0, 'M');
+        qr.addData(start.url, 'Byte');
+        qr.make();
+        svg = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+      } catch {
+        svg = '';
+      }
+      const card = document.createElement('div');
+      card.style.cssText = 'background:var(--fb-bg-elevated,#171a22);color:var(--fb-text-primary,#f3f4f6);border-radius:16px;padding:22px;max-width:380px;width:92%;box-shadow:0 18px 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;gap:12px;text-align:center;';
+      card.innerHTML = `
+        <strong style="font-size:1.05rem;">Scan with your phone</strong>
+        <div style="background:#fff;border-radius:12px;padding:10px;align-self:center;width:220px;height:220px;display:flex;align-items:center;justify-content:center;">
+          <div style="width:200px;height:200px;">${svg || ''}</div>
+        </div>
+        <p style="margin:0;font-size:0.8rem;color:var(--fb-text-secondary,#9ca3af);line-height:1.5;">
+          Your phone must be on the same Wi-Fi/network as this PC. The code is one-time and expires in 2 minutes.
+          ${svg ? '' : `No QR renderer - open this address on the phone instead:`}
+          <br /><code style="font-size:0.75rem;word-break:break-all;">${start.url}</code>
+        </p>
+        <button class="fb-phone-qr-cancel" style="padding:11px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-bg,#232734);color:inherit;">Cancel</button>`;
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      let timer = null;
+      const finish = async (approved, message) => {
+        if (timer) clearInterval(timer);
+        try { overlay.remove(); } catch { /* already gone */ }
+        if (message) this.showTransientNotice(message);
+        if (approved) {
+          await this.passkeyService.markVerifiedViaPhone();
+          this._vaultUnlockedAt = Date.now();
+          this.state.passkeyInfo = await this.passkeyService.getRegisteredPasskey();
+        }
+        resolve(approved);
+      };
+      card.querySelector('.fb-phone-qr-cancel')?.addEventListener('click', async () => {
+        await this.passkeyService.cancelPhoneApproval();
+        finish(false, null);
+      });
+      timer = setInterval(async () => {
+        const { state } = await this.passkeyService.phoneApprovalStatus();
+        if (state === 'approved') finish(true, 'Approved from your phone - vault unlocked.');
+        else if (state === 'denied') finish(false, 'The request was denied on the phone.');
+        else if (state === 'expired' || state === 'idle' || state === 'unavailable') finish(false, 'The phone approval expired - try again.');
+      }, 1500);
+    });
   }
 
   async registerAccountPasskey() {
@@ -2416,11 +2643,22 @@ export class BrowserShell {
     }
     const profile = this.state.googleAccount?.signedIn ? this.state.googleAccount.profile : null;
     const label = (profile && (profile.email || profile.name)) || 'Yayra user';
-    const result = await this.passkeyService.registerPasskey({ accountLabel: label });
+    // Desktop: walk the fallback ladder (system lock -> 6-digit PIN).
+    // Web/PWA keeps real WebAuthn, where the browser itself offers
+    // biometrics/PIN/security-key - no extra chooser needed.
+    let registerArgs = { accountLabel: label };
+    if (this.passkeyService.usesNativeBridge) {
+      const choice = await this._choosePasskeyMethod();
+      if (!choice) return;
+      registerArgs = { accountLabel: label, ...choice };
+    }
+    const result = await this.passkeyService.registerPasskey(registerArgs);
     if (result.success) {
       this.state.passkeyInfo = result.passkey;
       this._vaultUnlockedAt = Date.now();
-      this.showTransientNotice('Passkey created - your Yayra account is now protected by this device.');
+      this.showTransientNotice(result.passkey?.method === 'pin'
+        ? 'Passkey created - your vault is protected by your 6-digit PIN on this device.'
+        : 'Passkey created - your Yayra account is now protected by this device.');
     } else {
       this.showTransientNotice(`Couldn't create passkey: ${describePasskeyReason(result.reason)}`);
     }
@@ -2429,7 +2667,7 @@ export class BrowserShell {
 
   async verifyAccountPasskey() {
     if (!this.passkeyService) return false;
-    const result = await this.passkeyService.verifyPasskey();
+    const result = await this._performPasskeyCeremony();
     if (result.success) {
       this._vaultUnlockedAt = Date.now();
       this.showTransientNotice('Passkey verified.');
@@ -3810,11 +4048,13 @@ export class BrowserShell {
               ? `Passkey active for <strong>${passkey.accountLabel || 'this device'}</strong> since ${new Date(passkey.createdAt).toLocaleDateString()}. ${passkey.method
                   ? (passkey.method === 'touch-id'
                     ? 'Touch ID and your Mac\u2019s Keychain protect this vault.'
-                    : 'Your OS keychain (this device, this OS user) protects this vault.')
+                    : passkey.method === 'pin'
+                      ? 'Your 6-digit PIN protects this vault (stored only as a salted scrypt hash; 5 wrong tries locks PIN entry for a minute).'
+                      : 'Your OS keychain (this device, this OS user) protects this vault.')
                   : 'Your device\u2019s biometrics/PIN protect this vault.'}`
               : passkeySupported
                 ? (this.passkeysBridge
-                  ? 'Protect your Yayra account and vault with a device passkey bound to this computer\u2019s OS keychain (with Touch ID on supporting Macs). Only your OS user session can unlock it.'
+                  ? 'Protect your Yayra account and vault with a device passkey. No fingerprint, Face ID or security key on this device? Fall back to a 6-digit PIN, your PC\u2019s system lock, or approve from your phone by scanning a QR code.'
                   : 'Protect your Yayra account and vault with your device\u2019s biometrics or PIN. Works like Windows Hello / Touch ID in Chrome.')
                 : 'Passkeys need a secure (HTTPS) context and a device authenticator; this build/runtime does not expose one.'}
             ${this.state.passkeyDeviceStatus?.weakEncryption
@@ -3824,6 +4064,7 @@ export class BrowserShell {
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
             ${passkey
               ? `<button class="fb-btn fb-btn-secondary fb-vault-passkey-verify">Verify now</button>
+                 ${this.passkeyService?.supportsPhoneApproval ? '<button class="fb-btn fb-btn-secondary fb-vault-passkey-phone">Approve from phone (QR)</button>' : ''}
                  <button class="fb-btn fb-btn-secondary fb-vault-passkey-remove">Remove passkey</button>`
               : `<button class="fb-btn fb-btn-primary fb-vault-passkey-create" ${passkeySupported ? '' : 'disabled'}>Create passkey</button>`}
           </div>
@@ -3923,6 +4164,7 @@ export class BrowserShell {
 
     page.querySelector('.fb-vault-passkey-create')?.addEventListener('click', () => this.registerAccountPasskey());
     page.querySelector('.fb-vault-passkey-verify')?.addEventListener('click', () => this.verifyAccountPasskey());
+    page.querySelector('.fb-vault-passkey-phone')?.addEventListener('click', () => this.verifyWithPhoneQr());
     page.querySelector('.fb-vault-passkey-remove')?.addEventListener('click', () => this.removeAccountPasskey());
 
     page.querySelectorAll('.fb-vault-never-remove').forEach((btn) => {
