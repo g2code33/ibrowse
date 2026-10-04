@@ -563,6 +563,35 @@ html {
   color: var(--fb-accent-primary);
 }
 
+/* Real site logo in the tab: the globe fallback sits UNDER the logo
+   image and is hidden the moment the logo loads (onload), or kept if
+   the logo fails (onerror removes the img). */
+.fb-tab-logo-stack {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.fb-tab-logo-stack .fb-tab-logo-fallback {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fb-tab-site-logo {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: contain;
+}
+
 .fb-tab-title {
   flex: 1;
   min-width: 0;
@@ -4982,6 +5011,39 @@ html {
   flex: 0 0 20px;
   color: var(--fb-text-muted);
   transform: rotate(-45deg);
+}
+
+/* Personal autofill rows: links/words the user has used before, shown
+   ABOVE Google suggestions with the site's logo, title and address. */
+.fb-autofill-suggestion .fb-search-suggestion-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.fb-autofill-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.95rem;
+}
+
+.fb-autofill-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.78rem;
+  color: var(--fb-text-muted);
+}
+
+.fb-autofill-favicon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.fb-autofill-suggestion .fb-search-suggestion-use {
+  transform: none;
 }
 
 .fb-search-backdrop {

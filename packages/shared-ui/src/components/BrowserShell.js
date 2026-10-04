@@ -8592,10 +8592,62 @@ export class BrowserShell {
     });
   }
 
+  /**
+   * Words/phrases the user has ACTUALLY searched before, recovered from
+   * the search-result URLs in their own history (google.com/search?q=...,
+   * DuckDuckGo ?q=, Bing ?q=, Yahoo ?p=...). Fuels "I've typed this
+   * before" autofill without needing a separate search log.
+   */
+  getRememberedSearchPhrases() {
+    const phrases = [];
+    const items = (this.state.historyItems || []).slice(0, 300);
+    for (const item of items) {
+      try {
+        const parsed = new URL(item.url);
+        const phrase = parsed.searchParams.get('q') || parsed.searchParams.get('query') || parsed.searchParams.get('p');
+        if (phrase && phrase.trim()) phrases.push(phrase.trim());
+      } catch { /* not a URL - skip */ }
+    }
+    return [...new Set(phrases)];
+  }
+
+  /**
+   * Chrome-style personal autofill: everything the user has USED before
+   * (history + bookmarks), matched anywhere in the address or title.
+   * Returns rich {url, title, kind, score} entries - score 0 means the
+   * typed text is the START of the bare address (inline-completable).
+   */
+  getAutofillMatches(query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return [];
+    const strip = (u) => String(u || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+    const typedBare = strip(q);
+    const seen = new Set();
+    const out = [];
+    const consider = (item, kind) => {
+      const url = item?.url || '';
+      if (!/^https?:\/\//i.test(url) || seen.has(url)) return;
+      const bare = strip(url).toLowerCase();
+      const title = String(item.title || '').toLowerCase();
+      let score = -1;
+      if (typedBare && bare.startsWith(typedBare)) score = 0;
+      else if (title.startsWith(q)) score = 1;
+      else if (bare.includes(q) || title.includes(q)) score = 2;
+      if (score < 0) return;
+      seen.add(url);
+      out.push({ url, title: item.title || strip(url), kind, score });
+    };
+    (this.state.historyItems || []).forEach((h) => consider(h, 'history'));
+    (this.state.bookmarksItems || []).forEach((b) => consider(b, 'bookmark'));
+    out.sort((a, b) => a.score - b.score);
+    return out.slice(0, 4);
+  }
+
   getLocalSearchSuggestions(query) {
     const normalized = String(query || '').trim().toLowerCase();
     if (!normalized) return [];
     const remembered = [
+      ...this.getRememberedSearchPhrases(),
       ...(this.state.historyItems || []).map((item) => item.title || item.url),
       ...(this.state.bookmarksItems || []).map((item) => item.title || item.url),
       ...(this.state.tabs || []).map((tab) => tab.title || tab.url)
@@ -8704,6 +8756,30 @@ export class BrowserShell {
         });
         list.appendChild(aiItem);
       }
+      // Personal autofill rows FIRST: links the user has actually used
+      // before (history + bookmarks), with the site's logo and address.
+      const autofillMatches = this.getAutofillMatches(query);
+      autofillMatches.forEach((match, index) => {
+        let host = '';
+        try { host = new URL(match.url).hostname; } catch { host = ''; }
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'fb-search-suggestion fb-autofill-suggestion';
+        item.id = `fb-autofill-suggestion-${Date.now()}-${index}`;
+        item.dataset.value = match.url;
+        item.setAttribute('role', 'option');
+        item.innerHTML = `<span class="fb-search-suggestion-icon fb-autofill-suggestion-icon">`
+          + (host ? `<img class="fb-autofill-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.remove()" />` : Icons.history)
+          + `</span><span class="fb-search-suggestion-text"><span class="fb-autofill-title"></span><span class="fb-autofill-url"></span></span>`
+          + `<span class="fb-search-suggestion-use">${match.kind === 'bookmark' ? Icons.bookmark : Icons.history}</span>`;
+        item.querySelector('.fb-autofill-title').textContent = match.title;
+        item.querySelector('.fb-autofill-url').textContent = this.getDisplayUrl(match.url);
+        item.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          choose(match.url);
+        });
+        list.appendChild(item);
+      });
       suggestions.forEach((suggestion, index) => {
         const item = document.createElement('button');
         item.type = 'button';
@@ -8726,8 +8802,33 @@ export class BrowserShell {
       this.setPageObscured(!list.hidden);
     };
 
-    input.addEventListener('input', render);
+    // Inline type-ahead autofill: while the user TYPES (not deletes) the
+    // start of an address they have used before, complete the rest right
+    // in the bar with the completed part selected - exactly Chrome's
+    // behavior. Enter navigates to the completed address; any further
+    // keystroke simply replaces the selected remainder.
+    let lastTypedLength = 0;
+    const inlineAutofill = () => {
+      const typed = input.value;
+      const grew = typed.length > lastTypedLength;
+      lastTypedLength = typed.length;
+      if (!grew) return;
+      if (typeof input.setSelectionRange !== 'function') return;
+      if (!typed.trim() || typed.includes(' ') || typed.includes('://')) return;
+      if (input.selectionStart !== typed.length || input.selectionEnd !== typed.length) return;
+      const best = (this.getAutofillMatches(typed) || []).find((m) => m.score === 0);
+      if (!best) return;
+      const bare = String(best.url).replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/$/, '');
+      if (bare.length <= typed.length || !bare.toLowerCase().startsWith(typed.toLowerCase())) return;
+      input.value = typed + bare.slice(typed.length);
+      input.setSelectionRange(typed.length, input.value.length);
+    };
+    input.addEventListener('input', () => {
+      inlineAutofill();
+      render();
+    });
     input.addEventListener('focus', () => {
+      lastTypedLength = input.value.length;
       if (input.value.trim()) render();
     });
     input.addEventListener('keydown', (event) => {
@@ -10226,6 +10327,23 @@ export class BrowserShell {
     if (url.startsWith('yayra://permissions')) return Icons.lock;
     if (url.startsWith('yayra://about')) return Icons.logoOrb;
     if (url.startsWith('yayra://newtab') || !url) return tab.isPrivate ? Icons.incognito : Icons.officialOrb;
+    // Real site logo for actual web pages: prefer the favicon the page
+    // itself reported (favicon-updated event), fall back to the icon
+    // service by host. The globe only appears underneath until the logo
+    // image loads (or if it fails to load).
+    if (/^https?:\/\//i.test(url)) {
+      let host = '';
+      try { host = new URL(url).hostname; } catch { host = ''; }
+      const reported = (typeof tab.favicon === 'string' && /^(https?:|data:image\/)/i.test(tab.favicon)) ? tab.favicon : '';
+      const src = reported || (host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : '');
+      if (src) {
+        const safeSrc = src.replace(/"/g, '&quot;');
+        return `<span class="fb-tab-logo-stack"><span class="fb-tab-logo-fallback">${Icons.globe}</span>`
+          + `<img class="fb-tab-site-logo" src="${safeSrc}" alt="" loading="lazy" `
+          + `onload="var f=this.previousElementSibling;if(f)f.style.display='none'" `
+          + `onerror="this.remove()" /></span>`;
+      }
+    }
     return Icons.globe;
   }
 
