@@ -53,7 +53,7 @@
 
 // Square size (px) the bubble window expands to while the radial menu of
 // circular action buttons is open (double-tap the bubble to toggle it).
-const RADIAL_SIZE = 300;
+const RADIAL_SIZE = 340;
 
 function createOverlayBridge({
   BrowserWindow,
@@ -86,6 +86,13 @@ function createOverlayBridge({
   // data URL into the bubble HTML so the bubble is ONLY the logo - no
   // circular backdrop around it.
   logoPath = null,
+  // Real screenshot capture for the radial/right-click "Capture screenshot"
+  // action: Electron's desktopCapturer + shell (reveal in file manager) +
+  // a directory resolver (usually app.getPath('downloads')). All optional -
+  // when absent the action reports itself unavailable instead of faking.
+  desktopCapturerImpl = null,
+  shellImpl = null,
+  screenshotDir = null,
   logger = console
 }) {
   let overlayWin = null;
@@ -95,9 +102,12 @@ function createOverlayBridge({
   // other application - see assertTopmost() for why this is needed.
   let overlayTopmostTimer = null;
   let miniTopmostTimer = null;
-  // Manual drag loop (the bubble has NO native drag region - drag regions
-  // swallow left-button events, which broke clicking entirely).
-  let dragTimer = null;
+  // Manual drag state (the bubble has NO native drag region - drag regions
+  // swallow left-button events, which broke clicking entirely). The window
+  // follows pointermove screen coordinates STREAMED from the renderer; the
+  // main process never polls the cursor (see beginBubbleDrag for why).
+  let dragActive = false;
+  let dragOffset = { x: 0, y: 0 };
   // AssistiveTouch-style radial menu state: double-tap expands the bubble
   // window into a ring of circular action buttons (Yayra AI, mini, full
   // browser, lock, hide, quit) and remembers the bounds to shrink back to.
@@ -142,7 +152,9 @@ function createOverlayBridge({
       win.on('show', () => assertTopmost(win));
     }
     if (typeof setInterval !== 'function') return null;
-    const timer = setInterval(() => assertTopmost(win), 4000);
+    // 1.5s heartbeat: fast enough that newly-opened/focused apps never
+    // keep the bubble buried for a noticeable moment, still a no-op cost.
+    const timer = setInterval(() => assertTopmost(win), 1500);
     if (timer && typeof timer.unref === 'function') timer.unref();
     return timer;
   }
@@ -240,20 +252,24 @@ function createOverlayBridge({
     // click/dblclick listeners on a draggable bubble silently never fire
     // (right-click still worked because contextmenu passes through).
     // That was exactly the "left click / tap / double click do nothing"
-    // bug. Dragging is therefore implemented manually: pointerdown tells
-    // the main process to follow the cursor (screen.getCursorScreenPoint
-    // polling), and real pointer events stay available for taps:
+    // bug. Dragging is therefore implemented manually: once the pointer
+    // travels past the tap slop the renderer streams its own pointermove
+    // screen coordinates to the main process (never cursor polling - see
+    // beginBubbleDrag), and real pointer events stay available for taps:
     //   1 tap   -> toggle the floating mini browser
-    //   2 taps  -> open the full browser window
+    //   2 taps  -> open the radial menu of circular action buttons
     //   3 taps  -> lock the bubble where it is / unlock it again
     const bubbleContent = logo
       ? `<img id="bubble" src="${logo}" alt="" draggable="false" />`
       : `<div id="bubble"><span id="monogram">Y</span></div>`;
-    // Radial ring geometry: 6 circular buttons evenly spaced around the
-    // center of the RADIAL_SIZE square, AssistiveTouch-style.
+    // Radial ring geometry: 12 circular buttons evenly spaced around the
+    // center of the RADIAL_SIZE square, AssistiveTouch-style. The ring
+    // restores every assistant from the classic v1.0.2 in-app wheel
+    // (ChatGPT / Gemini / Claude / Perplexity / screenshot / shields)
+    // alongside the newer Yayra actions.
     const C = RADIAL_SIZE / 2;
-    const RING_R = 95;
-    const BTN = 54;
+    const RING_R = 120;
+    const BTN = 50;
     const ringPos = (index, total) => {
       const angle = (index / total) * 2 * Math.PI - Math.PI / 2; // start at top
       const x = Math.round(C + RING_R * Math.cos(angle) - BTN / 2);
@@ -268,12 +284,26 @@ function createOverlayBridge({
       lockOpen: '<svg class="ic-unlocked" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>',
       hide: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>',
       quit: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" x2="12" y1="2" y2="12"/></svg>',
-      close: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+      close: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+      // Brand marks mirror packages/shared-ui/src/icons/icons.js so the
+      // native ring matches the classic in-app assistive wheel.
+      chatgpt: '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M20.5 10.3a4.5 4.5 0 0 0-.4-3.8 4.6 4.6 0 0 0-3.6-2.2 4.5 4.5 0 0 0-3.6-1.8 4.6 4.6 0 0 0-4.2 2.8 4.5 4.5 0 0 0-3.2 1.5 4.6 4.6 0 0 0-.8 3.5 4.5 4.5 0 0 0-1.8 3.6 4.6 4.6 0 0 0 2.2 3.6 4.5 4.5 0 0 0 1.8 3.6 4.6 4.6 0 0 0 4.2 2.2 4.5 4.5 0 0 0 3.6-1.8 4.6 4.6 0 0 0 4.2-2.8 4.5 4.5 0 0 0 3.2-1.5 4.6 4.6 0 0 0 .8-3.5 4.5 4.5 0 0 0 1.8-3.6 4.6 4.6 0 0 0-2.4-3.6zm-8.5 10.2a3.1 3.1 0 0 1-2.1-.8l.1-.1 3.5-2a.8.8 0 0 0 .4-.7v-4.9l1.5.9v4.6a3.1 3.1 0 0 1-3.4 3zm-6.7-4.1a3.1 3.1 0 0 1-.3-2.3l.1.1 3.5 2a.8.8 0 0 0 .8 0l4.2-2.5v1.8l-4 2.3a3.1 3.1 0 0 1-4.3-1.4zm-.8-7.7a3.1 3.1 0 0 1 1.8-1.5v4.2a.8.8 0 0 0 .4.7l4.2 2.5-1.5.9-4-2.3a3.1 3.1 0 0 1-.9-4.5zm10.7 2.4l-4.2-2.5 1.5-.9 4 2.3a3.1 3.1 0 0 1 .9 4.5 3.1 3.1 0 0 1-1.8 1.5v-4.2a.8.8 0 0 0-.4-.7zm3.2 5.3a3.1 3.1 0 0 1-.3 2.3l-.1-.1-3.5-2a.8.8 0 0 0-.8 0l-4.2 2.5v-1.8l4-2.3a3.1 3.1 0 0 1 4.9 1.4zm-7.4-2.4l-1.9-1.1 1.9-1.1 1.9 1.1-1.9 1.1z"/></svg>',
+      gemini: '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2C12 7.52 7.52 12 2 12c5.48 0 10 4.48 10 10 0-5.52 4.48-10 10-10-5.52 0-10-4.48-10-10z"/></svg>',
+      claude: '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2.5l2.4 6.8 7.1.6-5.4 4.7 1.6 7-6.2-3.8-6.2 3.8 1.6-7-5.4-4.7 7.1-.6L12 2.5z"/></svg>',
+      perplexity: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M8 8h8M8 16h8M6 8l6 8 6-8"/></svg>',
+      screenshot: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>',
+      shields: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>'
     };
     const ringButtons = [
       { action: 'ai', label: 'Ask Yayra AI', icon: icons.ai, cls: 'radial-btn-ai' },
+      { action: 'chatgpt', label: 'Ask ChatGPT', icon: icons.chatgpt, cls: '' },
+      { action: 'gemini', label: 'Rephrase with Gemini', icon: icons.gemini, cls: 'radial-btn-gemini' },
+      { action: 'claude', label: 'Claude Assistant', icon: icons.claude, cls: '' },
+      { action: 'perplexity', label: 'Perplexity Search', icon: icons.perplexity, cls: '' },
+      { action: 'screenshot', label: 'Capture screenshot', icon: icons.screenshot, cls: '' },
       { action: 'mini', label: 'Open yayra mini', icon: icons.mini, cls: '' },
       { action: 'full', label: 'Open full browser', icon: icons.full, cls: '' },
+      { action: 'shields', label: 'Security & Shields', icon: icons.shields, cls: '' },
       { action: 'lock', label: 'Lock / unlock position', icon: icons.lockClosed + icons.lockOpen, cls: 'radial-btn-lock' },
       { action: 'hide', label: 'Hide bubble', icon: icons.hide, cls: '' },
       { action: 'quit', label: 'Quit Yayra', icon: icons.quit, cls: '' }
@@ -326,6 +356,7 @@ function createOverlayBridge({
   .radial-btn:hover { transform:scale(1.1); }
   .radial-btn:active { transform:scale(0.92); }
   .radial-btn-ai { background:#15181f; color:#c4b5fd; }
+  .radial-btn-gemini { background:#1b1d2a; color:#8ab4f8; }
   #radial-close {
     position:absolute;
     left:${C - 29}px; top:${C - 29}px;
@@ -375,13 +406,15 @@ function createOverlayBridge({
     }
 
     let downAt = null;   // screen coords at pointerdown
-    let moved = false;
+    let grabOffset = null; // cursor offset inside the window at pointerdown
+    let dragging = false;  // only true AFTER movement exceeds the tap slop
     let tapCount = 0;
     let tapTimer = null;
 
     function endDrag() {
       bubbleEl.classList.remove('dragging');
-      if (typeof api.dragEnd === 'function') api.dragEnd();
+      if (dragging && typeof api.dragEnd === 'function') api.dragEnd();
+      dragging = false;
     }
     function dispatchTaps(count) {
       tapCount = 0;
@@ -390,25 +423,33 @@ function createOverlayBridge({
       else if (typeof api.restore === 'function') api.restore();
     }
 
+    // A press NEVER moves the window. Dragging engages only once the
+    // pointer travels past the tap slop, then the renderer streams its own
+    // pointermove screen coordinates to the main process - this keeps taps
+    // and drags correct on every display scale and monitor layout.
     bubbleEl.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       e.preventDefault();
       try { bubbleEl.setPointerCapture(e.pointerId); } catch {}
       downAt = { x: e.screenX, y: e.screenY };
-      moved = false;
-      // Main process follows the cursor; refuses to move while locked.
-      if (!locked && typeof api.dragStart === 'function') {
-        api.dragStart({ x: e.clientX, y: e.clientY });
-        bubbleEl.classList.add('dragging');
-      }
+      grabOffset = { x: e.clientX, y: e.clientY };
+      dragging = false;
     });
     bubbleEl.addEventListener('pointermove', (e) => {
       if (!downAt) return;
-      if (Math.abs(e.screenX - downAt.x) > TAP_SLOP_PX || Math.abs(e.screenY - downAt.y) > TAP_SLOP_PX) moved = true;
+      if (!dragging) {
+        const past = Math.abs(e.screenX - downAt.x) > TAP_SLOP_PX
+          || Math.abs(e.screenY - downAt.y) > TAP_SLOP_PX;
+        if (!past || locked) return;
+        dragging = true;
+        bubbleEl.classList.add('dragging');
+        if (typeof api.dragStart === 'function') api.dragStart(grabOffset);
+      }
+      if (typeof api.dragMove === 'function') api.dragMove({ x: e.screenX, y: e.screenY });
     });
     bubbleEl.addEventListener('pointerup', (e) => {
       if (!downAt) return;
-      const wasDrag = moved
+      const wasDrag = dragging
         || Math.abs(e.screenX - downAt.x) > TAP_SLOP_PX
         || Math.abs(e.screenY - downAt.y) > TAP_SLOP_PX;
       downAt = null;
@@ -650,6 +691,9 @@ function createOverlayBridge({
       } else {
         miniWin.show?.();
         miniWin.focus?.();
+        // Guarantee the panel actually surfaces above whatever app the
+        // bubble was clicked over (single-click is the primary gesture).
+        assertTopmost(miniWin);
       }
       return miniWin;
     }
@@ -662,41 +706,61 @@ function createOverlayBridge({
    * The bubble window deliberately has no -webkit-app-region drag zone
    * (native drag regions eat every left-button event, so click/double-
    * click never reached the renderer - the original "using it is not
-   * working" bug). Instead, pointerdown in the bubble asks the main
-   * process to follow the OS cursor until pointerup. While the position
-   * is LOCKED (toggled by triple-click), drag requests are refused and
-   * the bubble stays exactly where it is.
+   * working" bug). Instead, once the pointer moves past the tap slop the
+   * renderer streams pointermove screen coordinates and the main process
+   * repositions the window to match. While the position is LOCKED
+   * (toggled by triple-click), drag requests are refused and the bubble
+   * stays exactly where it is.
    * ----------------------------------------------------------- */
 
+  // v1.0.4 regression fix: the first manual-drag implementation polled
+  // screen.getCursorScreenPoint() from the MAIN process and started
+  // repositioning the window on EVERY pointerdown. On scaled/multi-monitor
+  // displays and several Linux backends the cursor-poll coordinate space
+  // does not match window coordinates, so the bubble teleported out from
+  // under the pointer the moment it was pressed - which simultaneously
+  // broke single-click (the jump read as a drag), broke dragging (the
+  // poll loop fought the pointer), and on some WMs the constant
+  // setPosition spam dropped the always-on-top hint. The drag is now
+  // driven entirely by the RENDERER's own pointermove screen coordinates
+  // (the same event stream that demonstrably works - taps use it), and
+  // the window only starts moving after real movement, never on a press.
   function beginBubbleDrag(offset) {
     if (!overlayWin || overlayWin.isDestroyed()) return false;
     if (radialOpen) return false; // the expanded menu never drags
     if (overlayStore.load().positionLocked) return false; // triple-click lock
-    const dx = Math.round(Number(offset?.x)) || 0;
-    const dy = Math.round(Number(offset?.y)) || 0;
-    endBubbleDrag({ persist: false });
-    if (typeof setInterval !== 'function' || typeof screen.getCursorScreenPoint !== 'function') return false;
-    dragTimer = setInterval(() => {
-      try {
-        if (!overlayWin || overlayWin.isDestroyed()) { endBubbleDrag({ persist: false }); return; }
-        const pt = screen.getCursorScreenPoint();
-        overlayWin.setPosition(pt.x - dx, pt.y - dy);
-      } catch {
-        endBubbleDrag({ persist: false });
-      }
-    }, 16);
-    if (dragTimer && typeof dragTimer.unref === 'function') dragTimer.unref();
+    dragOffset = {
+      x: Math.round(Number(offset?.x)) || 0,
+      y: Math.round(Number(offset?.y)) || 0
+    };
+    dragActive = true;
     return true;
   }
 
+  function moveBubbleDrag(point) {
+    if (!dragActive || !overlayWin || overlayWin.isDestroyed()) return false;
+    const sx = Math.round(Number(point?.x));
+    const sy = Math.round(Number(point?.y));
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return false;
+    try {
+      overlayWin.setPosition(sx - dragOffset.x, sy - dragOffset.y);
+      return true;
+    } catch {
+      dragActive = false;
+      return false;
+    }
+  }
+
   function endBubbleDrag({ persist = true } = {}) {
-    if (dragTimer) clearInterval(dragTimer);
-    dragTimer = null;
+    dragActive = false;
     if (!persist) return;
     try {
       if (overlayWin && !overlayWin.isDestroyed()) {
         const [x, y] = overlayWin.getPosition();
         overlayStore.save({ position: { x, y } });
+        // Some WMs demote the z-order after programmatic moves - make the
+        // "floats over every app" promise hold the instant the drag ends.
+        assertTopmost(overlayWin);
       }
     } catch {
       // best-effort persistence only
@@ -735,6 +799,7 @@ function createOverlayBridge({
     }
     radialOpen = true;
     overlayWin.setBounds({ x: rx, y: ry, width: RADIAL_SIZE, height: RADIAL_SIZE });
+    assertTopmost(overlayWin); // setBounds can demote z-order on some WMs
     try {
       overlayWin.webContents?.send?.('yayra:overlay-radial', {
         open: true,
@@ -753,6 +818,7 @@ function createOverlayBridge({
       if (overlayWin && !overlayWin.isDestroyed()) {
         if (radialRestoreBounds && typeof overlayWin.setBounds === 'function') {
           overlayWin.setBounds(radialRestoreBounds);
+          assertTopmost(overlayWin); // setBounds can demote z-order
         }
         overlayWin.webContents?.send?.('yayra:overlay-radial', { open: false });
       }
@@ -767,12 +833,78 @@ function createOverlayBridge({
     return radialOpen;
   }
 
+  // External assistants from the classic v1.0.2 in-app wheel, now opened
+  // system-wide in the floating mini browser over whatever app is active.
+  const ASSISTANT_PAGES = {
+    chatgpt: 'https://chatgpt.com',
+    gemini: 'https://gemini.google.com',
+    claude: 'https://claude.ai',
+    perplexity: 'https://perplexity.ai'
+  };
+
+  /**
+   * REAL screen capture (the v1.0.2 in-app wheel only showed a fake
+   * "saved!" alert): grabs the primary display at native resolution via
+   * desktopCapturer, writes a timestamped PNG into the user's Downloads
+   * folder, and reveals it in the file manager. The bubble window hides
+   * for the grab so the screenshot never contains the bubble itself.
+   */
+  async function captureScreenshot() {
+    if (!desktopCapturerImpl || typeof desktopCapturerImpl.getSources !== 'function'
+      || !fsImpl || typeof screenshotDir !== 'function') {
+      logger?.warn?.('[yayra:overlay] screenshot unavailable: capturer/fs/dir not wired');
+      return { ok: false, reason: 'unavailable' };
+    }
+    const hadOverlay = overlayWin && !overlayWin.isDestroyed();
+    try {
+      if (hadOverlay) overlayWin.hide();
+      // Give the compositor a beat to actually unmap the bubble window.
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      const display = screen.getPrimaryDisplay();
+      const scale = display.scaleFactor || 1;
+      const sources = await desktopCapturerImpl.getSources({
+        types: ['screen'],
+        thumbnailSize: {
+          width: Math.round(display.size.width * scale),
+          height: Math.round(display.size.height * scale)
+        }
+      });
+      const source = sources.find((s) => String(s.display_id) === String(display.id)) || sources[0];
+      if (!source || !source.thumbnail || source.thumbnail.isEmpty?.()) {
+        return { ok: false, reason: 'no-source' };
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const file = path.join(screenshotDir(), `yayra-screenshot-${stamp}.png`);
+      fsImpl.writeFileSync(file, source.thumbnail.toPNG());
+      try { shellImpl?.showItemInFolder?.(file); } catch { /* reveal is best-effort */ }
+      logger?.log?.(`[yayra:overlay] screenshot saved: ${file}`);
+      return { ok: true, file };
+    } catch (err) {
+      logger?.warn?.(`[yayra:overlay] screenshot failed: ${err?.message || err}`);
+      return { ok: false, reason: String(err?.message || err) };
+    } finally {
+      if (hadOverlay && overlayWin && !overlayWin.isDestroyed()) {
+        try { overlayWin.show(); assertTopmost(overlayWin); } catch { /* window raced destruction */ }
+      }
+    }
+  }
+
   /** A circular button in the radial menu was pressed. */
   function handleRadialAction(action) {
+    if (ASSISTANT_PAGES[action]) {
+      closeRadialMenu();
+      return openMiniPanelAt(ASSISTANT_PAGES[action]);
+    }
     switch (action) {
       case 'ai':
         closeRadialMenu();
         return openMiniPanelAt('yayra://ai');
+      case 'screenshot':
+        closeRadialMenu();
+        return captureScreenshot();
+      case 'shields':
+        closeRadialMenu();
+        return openMiniPanelAt('yayra://extensions');
       case 'mini':
         closeRadialMenu();
         return toggleMiniPanel();
@@ -857,6 +989,18 @@ function createOverlayBridge({
     const locked = Boolean(overlayStore.load().positionLocked);
     const template = [
       { label: 'Ask Yayra AI', click: () => openMiniPanelAt('yayra://ai') },
+      {
+        label: 'AI assistants',
+        submenu: [
+          { label: 'Ask ChatGPT', click: () => openMiniPanelAt(ASSISTANT_PAGES.chatgpt) },
+          { label: 'Rephrase with Gemini', click: () => openMiniPanelAt(ASSISTANT_PAGES.gemini) },
+          { label: 'Claude Assistant', click: () => openMiniPanelAt(ASSISTANT_PAGES.claude) },
+          { label: 'Perplexity Search', click: () => openMiniPanelAt(ASSISTANT_PAGES.perplexity) }
+        ]
+      },
+      { type: 'separator' },
+      { label: 'Capture screenshot', click: () => { captureScreenshot(); } },
+      { label: 'Security & Shields', click: () => openMiniPanelAt('yayra://extensions') },
       { type: 'separator' },
       { label: 'Open yayra mini', click: () => toggleMiniPanel() },
       { label: 'Open full browser', click: () => restoreMainWindow() },
@@ -896,6 +1040,7 @@ function createOverlayBridge({
         if (typeof overlayWin.setBounds === 'function') {
           const [x, y] = overlayWin.getPosition();
           overlayWin.setBounds({ x, y, width: px, height: px });
+          assertTopmost(overlayWin); // setBounds can demote z-order
         } else {
           destroyOverlayWindow();
           ensureOverlayWindow();
@@ -965,6 +1110,7 @@ function createOverlayBridge({
   // Manual drag loop (replaces the native drag region that swallowed all
   // left-button events): follow the OS cursor until pointerup.
   ipcMain.on('yayra:overlay-drag-start', (_e, offset) => beginBubbleDrag(offset));
+  ipcMain.on('yayra:overlay-drag-move', (_e, point) => moveBubbleDrag(point));
   ipcMain.on('yayra:overlay-drag-end', () => endBubbleDrag());
   // A circular button in the double-tap radial menu was pressed
   // (ai / mini / full / lock / hide / quit / close).
@@ -1011,7 +1157,9 @@ function createOverlayBridge({
     togglePositionLock,
     handleBubbleTap,
     beginBubbleDrag,
+    moveBubbleDrag,
     endBubbleDrag,
+    captureScreenshot,
     openRadialMenu,
     closeRadialMenu,
     isRadialOpen,

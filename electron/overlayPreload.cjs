@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('yayraOverlay', {
   // Manual drag (the bubble has no native drag region - drag regions
   // swallow left-button events, which was the "clicking does nothing" bug).
   dragStart: (offset) => ipcRenderer.send('yayra:overlay-drag-start', offset),
+  dragMove: (point) => ipcRenderer.send('yayra:overlay-drag-move', point),
   dragEnd: () => ipcRenderer.send('yayra:overlay-drag-end'),
   // Double-tap radial menu: a circular button was pressed
   // (ai / mini / full / lock / hide / quit / close).

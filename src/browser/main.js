@@ -105,13 +105,15 @@ if (root) {
   try {
     windowProfileId = new URLSearchParams(window.location.search).get('profile') || null;
   } catch { /* no usable location (tests) */ }
-  // Deep-link boot param: the bubble's radial menu / right-click "Ask
-  // Yayra AI" opens the mini shell straight on an internal page
-  // (?page=yayra://ai) - see electron/overlayWindow.cjs openMiniPanelAt.
+  // Deep-link boot param: the bubble's radial menu / right-click actions
+  // open the mini shell straight on an internal page (?page=yayra://ai)
+  // or an external assistant (?page=https://chatgpt.com - the restored
+  // v1.0.2 wheel entries) - see electron/overlayWindow.cjs openMiniPanelAt.
+  // Only yayra:// and https:// are accepted; anything else is ignored.
   let bootPage = null;
   try {
     const rawPage = new URLSearchParams(window.location.search).get('page');
-    if (rawPage && rawPage.startsWith('yayra://')) bootPage = rawPage;
+    if (rawPage && (rawPage.startsWith('yayra://') || rawPage.startsWith('https://'))) bootPage = rawPage;
   } catch { /* no usable location (tests) */ }
   const browserShell = new BrowserShell({
     container: root,

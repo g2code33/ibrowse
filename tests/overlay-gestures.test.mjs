@@ -6,8 +6,11 @@
  * natively - the renderer NEVER receives left-button mouse events inside
  * them, so click/tap/double-click silently did nothing (right-click
  * still worked because contextmenu passes through). The fix removes the
- * native drag region entirely: dragging is a manual cursor-follow loop
- * in the main process, and real pointer events drive tap gestures:
+ * native drag region entirely: dragging is manual - the renderer streams
+ * pointermove screen coordinates to the main process once the pointer
+ * leaves the tap slop (NEVER cursor polling, and NEVER movement on a
+ * mere pointerdown - that was the v1.0.4 regression) - and real pointer
+ * events drive tap gestures:
  *   1 tap  -> toggle the floating mini browser
  *   2 taps -> toggle the AssistiveTouch-style RADIAL MENU of circular
  *             action buttons (Yayra AI / mini / full / lock / hide / quit)
@@ -79,19 +82,44 @@ function makeFakeBrowserWindowClass() {
   return { FakeBrowserWindow, instances };
 }
 
-function makeHarness({ cursor = { x: 500, y: 300 } } = {}) {
+function makeHarness({ cursor = { x: 500, y: 300 }, withMenu = false, screenshot = false } = {}) {
   const dir = makeTempDir();
   const overlayStore = createOverlayStore({ fs, userDataDir: dir });
   const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
   const ipcMain = fakeIpcMain();
   const screenState = { cursor };
   const mainWindowCalls = [];
+  // Right-click menu capture (openBubbleMenu test).
+  const menus = [];
+  const Menu = withMenu
+    ? { buildFromTemplate: (template) => { menus.push(template); return { popup: () => {} }; } }
+    : null;
+  // Real-screenshot fakes: a capturer that returns one screen source and
+  // a shell that records the reveal call. Files land in the temp dir.
+  const revealed = [];
+  const screenshotDeps = screenshot
+    ? {
+      desktopCapturerImpl: {
+        getSources: async () => [{
+          display_id: '7',
+          thumbnail: { isEmpty: () => false, toPNG: () => Buffer.from('fake-png-bytes') }
+        }]
+      },
+      shellImpl: { showItemInFolder: (file) => revealed.push(file) },
+      screenshotDir: () => dir
+    }
+    : {};
   const bridge = createOverlayBridge({
     BrowserWindow: FakeBrowserWindow,
     app: { setLoginItemSettings: () => {}, getPath: () => dir },
     ipcMain,
     screen: {
-      getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }),
+      getPrimaryDisplay: () => ({
+        workAreaSize: { width: 1920, height: 1080 },
+        size: { width: 1920, height: 1080 },
+        scaleFactor: 1,
+        id: 7
+      }),
       getCursorScreenPoint: () => ({ ...screenState.cursor })
     },
     path,
@@ -101,11 +129,12 @@ function makeHarness({ cursor = { x: 500, y: 300 } } = {}) {
     getMainWindow: () => { mainWindowCalls.push('get'); return null; },
     createMainWindow: () => { mainWindowCalls.push('create'); return {}; },
     platform: 'win32',
-    fsImpl: { readFileSync: () => Buffer.from('png') },
-    logoPath: '/fake/logo.png',
-    Menu: null
+    fsImpl: screenshot ? fs : { readFileSync: () => Buffer.from('png') },
+    logoPath: screenshot ? null : '/fake/logo.png',
+    Menu,
+    ...screenshotDeps
   });
-  return { bridge, overlayStore, instances, ipcMain, screenState, mainWindowCalls, dir };
+  return { bridge, overlayStore, instances, ipcMain, screenState, mainWindowCalls, dir, menus, revealed };
 }
 
 /* --------------------------- bubble HTML contract --------------------------- */
@@ -118,7 +147,7 @@ test('bubble HTML: NO native drag region (it swallowed left clicks) + pointer ge
   assert.ok(!html.includes('-webkit-app-region'), 'native drag region must stay gone - it ate every left-button event');
   assert.ok(html.includes('pointerdown') && html.includes('pointerup'), 'manual pointer handling drives taps AND dragging');
   assert.ok(html.includes("api.tap"), 'settled tap counts are sent to the main process');
-  assert.ok(html.includes('dragStart') && html.includes('dragEnd'), 'manual drag bridges present');
+  assert.ok(html.includes('dragStart') && html.includes('dragMove') && html.includes('dragEnd'), 'manual drag bridges present');
   assert.ok(html.includes('contextmenu'), 'right-click menu still wired');
   // Still only the logo - the no-circle contract holds for the BUBBLE
   // (the radial menu's circular buttons are a separate hidden layer).
@@ -142,7 +171,7 @@ test('gestures: 1 tap toggles the mini browser, 2 taps opens the RADIAL circular
   const before = [...bubble.getPosition()];
   bridge.handleBubbleTap(2);
   assert.equal(bridge.isRadialOpen(), true, 'double tap opens the radial menu');
-  assert.equal(bubble.bounds.width, 300, 'window expanded to host the ring of buttons');
+  assert.equal(bubble.bounds.width, 340, 'window expanded to host the ring of buttons');
   assert.deepEqual(bubble.sent.at(-1).channel, 'yayra:overlay-radial', 'renderer told to show the ring');
   assert.equal(bubble.sent.at(-1).payload.open, true);
 
@@ -261,6 +290,7 @@ test('gestures: IPC channels are registered for tap, drag and the settings lock 
   bridge.ensureOverlayWindow();
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-bubble-tap'));
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-drag-start'));
+  assert.ok(ipcMain.onHandlers.has('yayra:overlay-drag-move'));
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-drag-end'));
   assert.ok(ipcMain.onHandlers.has('yayra:overlay-radial-action'));
   assert.ok(ipcMain.handlers.has('yayra:overlay-set-position-locked'));
@@ -277,30 +307,46 @@ test('gestures: IPC channels are registered for tap, drag and the settings lock 
 
 /* ------------------------------ manual drag ------------------------------ */
 
-test('drag: the bubble follows the OS cursor minus the grab offset, and persists where it lands', async () => {
-  const { bridge, instances, screenState, overlayStore } = makeHarness({ cursor: { x: 500, y: 300 } });
+test('drag: the window follows RENDERER-streamed pointer coordinates minus the grab offset, and persists where it lands', () => {
+  // Regression contract for the v1.0.4 bug: the main process must NEVER
+  // poll the cursor or move the window on a mere pointerdown - it only
+  // repositions in response to streamed pointermove screen coordinates.
+  const { bridge, instances, overlayStore } = makeHarness();
   bridge.ensureOverlayWindow();
   const bubble = instances[0];
+  const before = [...bubble.getPosition()];
 
   const started = bridge.beginBubbleDrag({ x: 10, y: 12 });
   assert.equal(started, true);
-  await new Promise((r) => setTimeout(r, 40));
-  assert.deepEqual(bubble.getPosition(), [490, 288], 'window = cursor - grab offset');
+  assert.deepEqual(bubble.getPosition(), before, 'pointerdown alone must NOT move the window');
 
-  screenState.cursor = { x: 800, y: 650 };
-  await new Promise((r) => setTimeout(r, 40));
-  assert.deepEqual(bubble.getPosition(), [790, 638], 'keeps following the cursor');
+  bridge.moveBubbleDrag({ x: 500, y: 300 });
+  assert.deepEqual(bubble.getPosition(), [490, 288], 'window = streamed pointer - grab offset');
+
+  bridge.moveBubbleDrag({ x: 800, y: 650 });
+  assert.deepEqual(bubble.getPosition(), [790, 638], 'keeps following the streamed pointer');
 
   bridge.endBubbleDrag();
   assert.deepEqual(overlayStore.load().position, { x: 790, y: 638 }, 'dropped position persisted');
 
-  screenState.cursor = { x: 100, y: 100 };
-  await new Promise((r) => setTimeout(r, 40));
-  assert.deepEqual(bubble.getPosition(), [790, 638], 'loop fully stopped after pointerup');
+  assert.equal(bridge.moveBubbleDrag({ x: 100, y: 100 }), false, 'moves after pointerup are ignored');
+  assert.deepEqual(bubble.getPosition(), [790, 638], 'drag fully stopped after pointerup');
 });
 
-test('drag: REFUSED while the position is locked - the bubble stays exactly where it is', async () => {
-  const { bridge, instances, screenState } = makeHarness({ cursor: { x: 500, y: 300 } });
+test('drag: garbage streamed coordinates are ignored mid-drag', () => {
+  const { bridge, instances } = makeHarness();
+  bridge.ensureOverlayWindow();
+  const bubble = instances[0];
+  bridge.beginBubbleDrag({ x: 0, y: 0 });
+  bridge.moveBubbleDrag({ x: 50, y: 60 });
+  assert.equal(bridge.moveBubbleDrag({ x: 'NaN', y: null }), false);
+  assert.equal(bridge.moveBubbleDrag(null), false);
+  assert.deepEqual(bubble.getPosition(), [50, 60], 'position untouched by malformed payloads');
+  bridge.endBubbleDrag({ persist: false });
+});
+
+test('drag: REFUSED while the position is locked - the bubble stays exactly where it is', () => {
+  const { bridge, instances } = makeHarness();
   bridge.ensureOverlayWindow();
   const bubble = instances[0];
   const before = [...bubble.getPosition()];
@@ -308,8 +354,7 @@ test('drag: REFUSED while the position is locked - the bubble stays exactly wher
   bridge.handleBubbleTap(3); // lock
   const started = bridge.beginBubbleDrag({ x: 0, y: 0 });
   assert.equal(started, false, 'drag request rejected while locked');
-  screenState.cursor = { x: 900, y: 900 };
-  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(bridge.moveBubbleDrag({ x: 900, y: 900 }), false, 'streamed moves ignored too');
   assert.deepEqual(bubble.getPosition(), before, 'bubble did not move an inch');
 
   bridge.handleBubbleTap(3); // unlock
@@ -317,12 +362,83 @@ test('drag: REFUSED while the position is locked - the bubble stays exactly wher
   bridge.endBubbleDrag({ persist: false });
 });
 
-test('drag: destroying the overlay stops any in-flight drag loop safely', async () => {
-  const { bridge, screenState } = makeHarness();
+test('drag: destroying the overlay stops any in-flight drag safely', () => {
+  const { bridge } = makeHarness();
   bridge.ensureOverlayWindow();
   bridge.beginBubbleDrag({ x: 0, y: 0 });
   bridge.destroyOverlayWindow();
-  screenState.cursor = { x: 1, y: 1 };
-  await new Promise((r) => setTimeout(r, 40)); // would throw if the loop still ran on a destroyed window
+  // Would throw if a move still touched the destroyed window.
+  assert.equal(bridge.moveBubbleDrag({ x: 1, y: 1 }), false);
   assert.equal(bridge.getOverlayWindow(), null);
+});
+
+/* ------------------- restored v1.0.2 wheel features (P26) ------------------- */
+
+test('radial: the ring restores every classic v1.0.2 assistant + screenshot + shields alongside the newer actions', () => {
+  const { bridge, instances } = makeHarness();
+  bridge.ensureOverlayWindow();
+  const html = decodeURIComponent(instances[0].loadedUrl.replace('data:text/html;charset=utf-8,', ''));
+  for (const action of ['ai', 'chatgpt', 'gemini', 'claude', 'perplexity', 'screenshot', 'mini', 'full', 'shields', 'lock', 'hide', 'quit']) {
+    assert.ok(html.includes(`data-action="${action}"`), `ring button present: ${action}`);
+  }
+  // The labels users knew from the old in-app wheel.
+  assert.ok(html.includes('Ask ChatGPT'), 'classic ChatGPT label restored');
+  assert.ok(html.includes('Rephrase with Gemini'), 'classic Gemini label restored');
+  assert.ok(html.includes('Claude Assistant') && html.includes('Perplexity Search'));
+});
+
+test('radial: assistant buttons open yayra mini on the right external page; shields opens yayra://extensions', () => {
+  const cases = [
+    ['chatgpt', 'https://chatgpt.com'],
+    ['gemini', 'https://gemini.google.com'],
+    ['claude', 'https://claude.ai'],
+    ['perplexity', 'https://perplexity.ai'],
+    ['shields', 'yayra://extensions']
+  ];
+  for (const [action, page] of cases) {
+    const { bridge } = makeHarness();
+    bridge.ensureOverlayWindow();
+    bridge.handleBubbleTap(2);
+    bridge.handleRadialAction(action);
+    assert.equal(bridge.isRadialOpen(), false, `${action}: radial closed`);
+    const mini = bridge.getMiniWindow();
+    assert.ok(mini, `${action}: mini window opened`);
+    assert.ok(mini.loadedUrl.includes(`page=${encodeURIComponent(page)}`), `${action}: deep-linked to ${page}`);
+  }
+});
+
+test('screenshot: REALLY captures the primary display to a PNG in the downloads dir and reveals it (no fake alert)', async () => {
+  const { bridge, instances, dir, revealed } = makeHarness({ screenshot: true });
+  bridge.ensureOverlayWindow();
+  const bubble = instances[0];
+
+  const result = await bridge.captureScreenshot();
+  assert.equal(result.ok, true, 'capture succeeded');
+  assert.ok(result.file.startsWith(dir) && result.file.endsWith('.png'), 'PNG saved into the screenshot dir');
+  assert.deepEqual(fs.readFileSync(result.file), Buffer.from('fake-png-bytes'), 'REAL image bytes written to disk');
+  assert.deepEqual(revealed, [result.file], 'file revealed in the file manager');
+  assert.equal(bubble.hidden, false, 'bubble shown again after the grab');
+});
+
+test('screenshot: reports itself unavailable when the capturer is not wired - never fakes success', async () => {
+  const { bridge } = makeHarness();
+  bridge.ensureOverlayWindow();
+  const result = await bridge.captureScreenshot();
+  assert.deepEqual(result, { ok: false, reason: 'unavailable' });
+});
+
+test('right-click menu: classic items restored - AI assistants submenu, Capture screenshot, Security & Shields', () => {
+  const { bridge, menus } = makeHarness({ withMenu: true });
+  bridge.ensureOverlayWindow();
+  bridge.openBubbleMenu();
+  assert.equal(menus.length, 1, 'menu popped');
+  const labels = menus[0].map((item) => item.label).filter(Boolean);
+  assert.ok(labels.includes('Ask Yayra AI'));
+  assert.ok(labels.includes('AI assistants'));
+  assert.ok(labels.includes('Capture screenshot'));
+  assert.ok(labels.includes('Security & Shields'));
+  assert.ok(labels.includes('Open yayra mini') && labels.includes('Open full browser'));
+  assert.ok(labels.includes('Quit Yayra'));
+  const sub = menus[0].find((item) => item.label === 'AI assistants').submenu.map((s) => s.label);
+  assert.deepEqual(sub, ['Ask ChatGPT', 'Rephrase with Gemini', 'Claude Assistant', 'Perplexity Search']);
 });

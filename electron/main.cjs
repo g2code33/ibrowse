@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -111,7 +111,14 @@ app.whenReady().then(async () => {
       // after the main window was closed recreates it from scratch.
       createMainWindow: () => createWindow(),
       // Bubble shows ONLY the Yayra logo (inlined as a data URL).
-      logoPath: resolveBubbleLogoPath()
+      logoPath: resolveBubbleLogoPath(),
+      // Real "Capture screenshot" support for the radial / right-click
+      // menus: full-resolution primary-display PNG into ~/Downloads.
+      desktopCapturerImpl: desktopCapturer,
+      shellImpl: shell,
+      screenshotDir: () => {
+        try { return app.getPath('downloads'); } catch { return app.getPath('userData'); }
+      }
     });
     overlayBridge.initializeOnStartup();
 
