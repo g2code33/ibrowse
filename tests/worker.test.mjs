@@ -95,6 +95,103 @@ test('update worker serves a cached response on a repeat request instead of re-h
   }
 });
 
+// --- /auth/google/exchange (Web/PWA sign-in, server-side half) -----------
+// The browser half (src/services/googleAuthWeb.js) never sees a client
+// secret or a token; these tests prove the Worker holds up its side of that
+// contract: secret attached server-side only, profile-only response, and
+// honest errors when unconfigured or when Google rejects the code.
+
+const EXCHANGE_URL = 'https://yayra-updates-api.g2code335.workers.dev/auth/google/exchange';
+const AUTH_ENV = { GOOGLE_WEB_CLIENT_ID: 'web-id.apps.googleusercontent.com', GOOGLE_WEB_CLIENT_SECRET: 'server-side-secret' };
+
+function exchangeRequest(body, method = 'POST') {
+  return new Request(EXCHANGE_URL, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: method === 'POST' ? JSON.stringify(body) : undefined
+  });
+}
+
+test('auth exchange returns 501 not_configured when the Google client bindings are missing', async () => {
+  const response = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'https://yayra.pages.dev/auth/callback' }), {});
+  assert.equal(response.status, 501);
+  assert.equal((await response.json()).error, 'not_configured');
+});
+
+test('auth exchange only accepts POST and rejects malformed bodies before touching Google', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('must not reach upstream'); };
+  try {
+    const get = await worker.fetch(new Request(EXCHANGE_URL), AUTH_ENV);
+    assert.equal(get.status, 405);
+
+    const badJson = await worker.fetch(new Request(EXCHANGE_URL, { method: 'POST', body: 'not json' }), AUTH_ENV);
+    assert.equal(badJson.status, 400);
+    assert.equal((await badJson.json()).error, 'invalid_json');
+
+    const missing = await worker.fetch(exchangeRequest({ code: 'c' }), AUTH_ENV);
+    assert.equal(missing.status, 400);
+    assert.equal((await missing.json()).error, 'missing_fields');
+
+    const badUri = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'http://evil.example/cb' }), AUTH_ENV);
+    assert.equal(badUri.status, 400);
+    assert.equal((await badUri.json()).error, 'invalid_redirect_uri');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('auth exchange attaches the client secret server-side, forwards PKCE verifier, and returns ONLY the profile', async () => {
+  const originalFetch = globalThis.fetch;
+  const upstream = [];
+  globalThis.fetch = async (target, options) => {
+    upstream.push({ target: String(target), options });
+    if (String(target).includes('oauth2.googleapis.com/token')) {
+      return new Response(JSON.stringify({ access_token: 'ya29.secret', id_token: 'jwt.secret', refresh_token: 'should-not-exist' }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ sub: '42', name: 'Ama Mensah', email: 'ama@example.com', picture: 'https://lh3.googleusercontent.com/a/p', email_verified: true }), { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(exchangeRequest({ code: 'one-shot-code', codeVerifier: 'pkce-verifier', redirectUri: 'https://yayra.pages.dev/auth/callback' }), AUTH_ENV);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('access-control-allow-origin'), '*');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+
+    const tokenCall = upstream.find((u) => u.target.includes('/token'));
+    const params = new URLSearchParams(tokenCall.options.body);
+    assert.equal(params.get('code'), 'one-shot-code');
+    assert.equal(params.get('code_verifier'), 'pkce-verifier');
+    assert.equal(params.get('client_secret'), 'server-side-secret');
+    assert.equal(params.get('grant_type'), 'authorization_code');
+
+    const userinfoCall = upstream.find((u) => u.target.includes('userinfo'));
+    assert.equal(userinfoCall.options.headers.Authorization, 'Bearer ya29.secret');
+
+    const body = await response.json();
+    assert.deepEqual(body, { profile: { sub: '42', name: 'Ama Mensah', email: 'ama@example.com', picture: 'https://lh3.googleusercontent.com/a/p' } });
+    const raw = JSON.stringify(body);
+    for (const needle of ['access_token', 'id_token', 'refresh_token', 'ya29.secret', 'jwt.secret']) {
+      assert.equal(raw.includes(needle), false, `response must never contain ${needle}`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('auth exchange passes Google OAuth error codes through without echoing request contents', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Code was already redeemed.' }), { status: 400 });
+  try {
+    const response = await worker.fetch(exchangeRequest({ code: 'reused-code', codeVerifier: 'v', redirectUri: 'http://localhost:4173/auth/callback' }), AUTH_ENV);
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assert.equal(body.error, 'invalid_grant');
+    assert.equal(JSON.stringify(body).includes('reused-code'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function makeFakeEdgeCache() {
   const store = new Map();
   return {

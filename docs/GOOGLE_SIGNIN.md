@@ -121,15 +121,133 @@ inside the token exchange.
   happens, it usually means outbound HTTPS to `oauth2.googleapis.com` /
   `www.googleapis.com` is blocked entirely by that machine's firewall/proxy.
 
+---
+
+# Web / PWA (`yayra.pages.dev`) — setup & architecture
+
+Same feature, same protocol (Authorization Code + PKCE), different
+transport: a browser can't run a loopback redirect server, so Google
+redirects back to a real HTTPS page, `/auth/callback`, served by the same
+static deployment.
+
+## Design decisions (and why)
+
+- **Full-page redirect, not popup+postMessage.** Installed PWAs run in
+  `display: standalone` where `window.opener`/popup relationships are
+  unreliable, and popup blockers plus Safari/Brave tracking protections
+  break popup flows routinely; a redirect behaves identically in a tab and
+  an installed PWA, and avoids postMessage's origin-validation attack
+  surface entirely. The in-flight state (PKCE verifier, CSRF `state`,
+  return path) survives the round trip in `sessionStorage`.
+- **The token exchange happens in the Cloudflare Worker, not the browser.**
+  Google's token endpoint requires a `client_secret` for "Web application"
+  OAuth clients **even with PKCE** (same Google quirk as the Desktop-app
+  client type above), and a secret in browser-delivered JS is public by
+  definition. So the callback page sends only `{code, codeVerifier,
+  redirectUri}` to the update worker's `/auth/google/exchange` endpoint;
+  the Worker holds the secret (as a `wrangler secret`), does the exchange
+  AND the userinfo fetch server-side, and returns **only the profile**.
+- **Raw tokens never enter the browser at all.** Electron can encrypt
+  tokens at rest with the OS keychain (`safeStorage`); a browser has no
+  equivalent — anything it stores is readable by same-origin script. This
+  design sidesteps that trade-off: no refresh token is ever requested
+  (`access_type=online` semantics), the access token lives and dies inside
+  one Worker invocation, and the only thing persisted client-side
+  (localStorage) is the display profile the UI shows anyway. Consequence:
+  the web session is profile-only — which is all Yayra needs. The full
+  rationale is written into `src/services/googleAuthWeb.js`.
+
+Relevant source files:
+- `src/services/googleAuthWeb.js` — browser half (PKCE, redirect, state
+  round trip, bridge adapter). Tested in `tests/google-auth-web.test.mjs`.
+- `worker/update-worker.mjs` (`exchangeGoogleAuthCode`) — server half.
+  Tested in `tests/worker.test.mjs`.
+- `src/browser/authCallback.js` + `public/auth/callback/index.html` — the
+  callback page.
+- `src/config/googleAuthWeb.js` — build-injected config resolution.
+- `src/browser/main.js` — installs the bridge as `window.yayra.auth` (the
+  same surface `BrowserShell` already drives on desktop) when configured.
+
+## Creating the "Web application" OAuth Client ID (console steps)
+
+1. Same Google Cloud project and consent screen as the Desktop steps above.
+2. **APIs & Services → Credentials → Create Credentials → OAuth client ID**.
+3. For **Application type, choose "Web application"**. Name it e.g. "Yayra
+   Web".
+4. Under **Authorized JavaScript origins** add:
+   - `https://yayra.pages.dev`
+   - `http://localhost:4173` (the dev server, for local testing)
+5. Under **Authorized redirect URIs** add:
+   - `https://yayra.pages.dev/auth/callback`
+   - `http://localhost:4173/auth/callback`
+6. Copy the **Client ID** and the **Client Secret**. The secret is
+   genuinely confidential for this client type — it must ONLY ever be
+   configured on the Worker (next section), never in any web-delivered
+   file or committed anywhere.
+
+## Configuring the deployment
+
+Worker (holds the secret):
+```bash
+npx wrangler secret put GOOGLE_WEB_CLIENT_ID  --config wrangler.worker.toml
+npx wrangler secret put GOOGLE_WEB_CLIENT_SECRET --config wrangler.worker.toml
+```
+
+Web build (public values only — injected into `<meta>` tags by
+`scripts/build-web.mjs`): either export before `npm run build:web`
+```bash
+export YAYRA_GOOGLE_WEB_CLIENT_ID="123456789-web...apps.googleusercontent.com"
+# optional - defaults to the production worker URL:
+export YAYRA_GOOGLE_AUTH_EXCHANGE_URL="https://yayra-updates-api.g2code335.workers.dev/auth/google/exchange"
+```
+or create a gitignored `google-auth.web.config.json` at the repo root:
+```json
+{ "clientId": "123456789-web...apps.googleusercontent.com" }
+```
+When neither is set, the build injects empty values and Settings → Account
+shows the honest "not available on this build" message.
+
+---
+
+# Android / iOS (Capacitor)
+
+**Not yet implemented** — next phase of this work (see
+`docs/PRODUCTION_READINESS_PLAN.md`, Phase A2): Authorization Code + PKCE
+in the system browser (`@capacitor/browser`) with a custom-scheme
+(`com.yayra.app:/oauth2redirect`) deep-link callback via `@capacitor/app`,
+"Android"/"iOS" type client IDs (no secret), and the required
+manifest/URL-scheme changes documented here when it lands.
+
+---
+
 ## Status by platform
 
 | Platform | Status |
 | --- | --- |
-| Electron desktop (Linux/Windows) | **Implemented** in this change; the live round trip against real Google servers has **not** been run by this agent (no GUI browser or registered Client ID in this sandbox) and must be verified by you on your own machine with your own Client ID. |
-| Web / PWA (`yayra.pages.dev`) | **Not yet implemented.** Would use the same Authorization Code + PKCE flow with a popup/redirect to `https://yayra.pages.dev/auth/callback` instead of a loopback server — separate follow-up work. |
-| Android / iOS (Capacitor) | **Not yet implemented, deferred.** Needs a dedicated Capacitor OAuth plugin (not currently a project dependency) and real-device/emulator testing this sandbox cannot perform. |
+| Electron desktop (Linux/Windows) | **Implemented**; the live round trip against real Google servers has **not** been run by this agent (no GUI browser or registered Client ID in this sandbox) and must be verified by you on your own machine with your own Client ID. |
+| Web / PWA (`yayra.pages.dev`) | **Implemented** (full-page redirect + Worker-side exchange, see above). Fully unit-tested with mocks (`tests/google-auth-web.test.mjs`, `tests/worker.test.mjs`); the live round trip needs a human with a real "Web application" Client ID, the Worker secrets deployed, and a real browser — see verification steps below. |
+| Android / iOS (Capacitor) | **Not yet implemented.** Planned as Phase A2 (see above); needs real-device/emulator verification this sandbox cannot perform. |
 
 ## How to verify it actually works (you must do this)
+
+### Web / PWA
+
+1. Create the "Web application" Client ID per the steps above; put the
+   secret on the Worker (`wrangler secret put ...`) and redeploy it
+   (`npm run deploy:cloudflare:worker`).
+2. Local first pass: `export YAYRA_GOOGLE_WEB_CLIENT_ID=...` then
+   `npm run dev`, open `http://localhost:4173`, Settings → Account →
+   "Sign in with Google". The page should redirect to Google's consent
+   screen, back to `/auth/callback`, then to where you started — now
+   showing your name/email/avatar.
+3. Production pass: build with the same env var, deploy to Pages, repeat
+   from `https://yayra.pages.dev` in a normal tab AND as an installed PWA.
+4. Negative paths worth 60 seconds: cancel on the consent screen (should
+   land on a clear "cancelled" message, not a blank page); press Back
+   after signing in (should NOT re-run the callback); sign out and reload
+   (stays signed out).
+
+### Electron desktop
 
 1. Create your Client ID per the steps above and set it via the environment
    variable (fastest for a first test).

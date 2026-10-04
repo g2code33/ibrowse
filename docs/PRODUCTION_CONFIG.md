@@ -13,7 +13,10 @@ environment, gitignored local config files, or GitHub Actions secrets.
 | `YAYRA_GOOGLE_CLIENT_ID` | env var (dev) | `electron/googleAuthConfig.cjs` | "Desktop app" OAuth client ID. See `docs/GOOGLE_SIGNIN.md`. |
 | `YAYRA_GOOGLE_CLIENT_SECRET` | env var (dev) | `electron/googleAuthConfig.cjs` | Google requires it for Desktop clients even with PKCE; treated as non-confidential per Google's own definition. |
 | `electron/google-auth.config.json` | local file (packaged builds) | `electron/googleAuthConfig.cjs` | `{ "clientId": ..., "clientSecret": ... }`. **Gitignored.** |
-| Web client ID config | local file (Web/PWA builds) | Web sign-in (Phase A1) | "Web application" OAuth client, **no secret** (public PKCE client). Gitignored via `**/google-auth*.config.json`. |
+| `YAYRA_GOOGLE_WEB_CLIENT_ID` | env var (build time) | `scripts/build-web.mjs` → `<meta>` → `src/config/googleAuthWeb.js` | "Web application" OAuth client ID (public by design). |
+| `YAYRA_GOOGLE_AUTH_EXCHANGE_URL` | env var (build time, optional) | same | Overrides the Worker exchange endpoint; defaults to the production worker. |
+| `google-auth.web.config.json` | local file at repo root (alternative to the env vars) | `scripts/build-web.mjs` | `{ "clientId": ..., "exchangeUrl"?: ... }`. **Gitignored.** |
+| `GOOGLE_WEB_CLIENT_ID` / `GOOGLE_WEB_CLIENT_SECRET` | **Worker secrets** (`wrangler secret put`) | `worker/update-worker.mjs` (`/auth/google/exchange`) | The web client's secret lives ONLY here — Google requires it for Web-application clients even with PKCE; it must never appear in web-delivered files. |
 | Android / iOS client IDs | local file (mobile builds) | Capacitor sign-in (Phase A2) | "Android" / "iOS" OAuth clients, no secret; verified by package name + SHA-1 / bundle ID. Gitignored via the same pattern. |
 
 ## 2. Update worker (Cloudflare Worker: `yayra-updates-api`)

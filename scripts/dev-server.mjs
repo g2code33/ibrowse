@@ -75,6 +75,32 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // The Google sign-in callback page lives under public/ (served from the
+  // deployment root in production builds). Map it here too so the Web/PWA
+  // OAuth flow is testable against the dev server with a localhost redirect
+  // URI (see docs/GOOGLE_SIGNIN.md). Build placeholders are filled from the
+  // same env vars scripts/build-web.mjs uses; unset means "not configured"
+  // and the page reports that honestly.
+  if (reqPath === '/auth/callback' || reqPath === '/auth/callback/' || reqPath === '/auth/callback/index.html') {
+    const callbackFile = path.join(rootDir, 'public', 'auth', 'callback', 'index.html');
+    fs.readFile(callbackFile, 'utf8', (err, html) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+      const page = html
+        .replaceAll('__BUILD_VERSION__', 'dev')
+        // Empty CSP meta = no directives = unrestricted, fine for local dev.
+        .replaceAll('__CSP__', '')
+        .replaceAll('__GOOGLE_WEB_CLIENT_ID__', (process.env.YAYRA_GOOGLE_WEB_CLIENT_ID || '').trim())
+        .replaceAll('__GOOGLE_AUTH_EXCHANGE_URL__', (process.env.YAYRA_GOOGLE_AUTH_EXCHANGE_URL || '').trim());
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, max-age=0' });
+      res.end(page);
+    });
+    return;
+  }
+
   // Static file serving from workspace
   let filePath = path.join(rootDir, reqPath);
   if (!filePath.startsWith(rootDir)) {
@@ -116,6 +142,8 @@ function serveBrowserApp(res) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#172554">
+  <meta name="yayra-google-web-client-id" content="${(process.env.YAYRA_GOOGLE_WEB_CLIENT_ID || '').trim()}">
+  <meta name="yayra-google-auth-exchange-url" content="${(process.env.YAYRA_GOOGLE_AUTH_EXCHANGE_URL || '').trim()}">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="1024x1024" href="/assets/brand/logomain1-transparent.png">
   <link rel="icon" type="image/jpeg" sizes="1024x1024" href="/assets/brand/logomain1.jpg">

@@ -24,10 +24,21 @@ for (const packageName of ['browser-contract', 'persistence', 'shared-ui']) {
   await cp(path.join(root, 'packages', packageName), path.join(dist, 'packages', packageName), { recursive: true });
 }
 
-await replaceFile(path.join(dist, 'index.html'), {
+// Web/PWA "Sign in with Google" configuration (docs/GOOGLE_SIGNIN.md).
+// Resolution order: env var, then the gitignored google-auth.web.config.json
+// at the repo root. Both empty means the feature is simply not configured
+// for this deployment - the injected metas stay empty and the Settings UI
+// shows its honest "not available" message (no placeholder leaks: the
+// runtime resolver treats values starting with "__" as unconfigured).
+const webAuthConfig = await readWebAuthConfig();
+const htmlReplacements = {
   __BUILD_VERSION__: version,
-  __CSP__: buildContentSecurityPolicy()
-});
+  __CSP__: buildContentSecurityPolicy(),
+  __GOOGLE_WEB_CLIENT_ID__: webAuthConfig.clientId,
+  __GOOGLE_AUTH_EXCHANGE_URL__: webAuthConfig.exchangeUrl
+};
+await replaceFile(path.join(dist, 'index.html'), htmlReplacements);
+await replaceFile(path.join(dist, 'auth', 'callback', 'index.html'), htmlReplacements);
 
 const info = { version, sha, builtAt };
 await writeFile(path.join(dist, 'version.json'), `${JSON.stringify(info, null, 2)}\n`);
@@ -42,6 +53,24 @@ sw = sw.replaceAll('__BUILD_VERSION__', version).replaceAll('__BUILD_SHA__', sha
 await writeFile(swPath, sw);
 await writeFile(path.join(dist, 'precache-manifest.json'), `${JSON.stringify(precache, null, 2)}\n`);
 console.log(`built web bundle: dist (${precache.length} precached files) version=${version} sha=${sha} builtAt=${builtAt}`);
+
+async function readWebAuthConfig() {
+  const fromEnv = (process.env.YAYRA_GOOGLE_WEB_CLIENT_ID || '').trim();
+  const exchangeFromEnv = (process.env.YAYRA_GOOGLE_AUTH_EXCHANGE_URL || '').trim();
+  let fileConfig = {};
+  const configPath = path.join(root, 'google-auth.web.config.json');
+  if (existsSync(configPath)) {
+    try {
+      fileConfig = JSON.parse(await readFile(configPath, 'utf8'));
+    } catch {
+      console.warn('google-auth.web.config.json is not valid JSON; ignoring it');
+    }
+  }
+  return {
+    clientId: fromEnv || (typeof fileConfig.clientId === 'string' ? fileConfig.clientId.trim() : ''),
+    exchangeUrl: exchangeFromEnv || (typeof fileConfig.exchangeUrl === 'string' ? fileConfig.exchangeUrl.trim() : '')
+  };
+}
 
 async function replaceFile(file, replacements) {
   let text = await readFile(file, 'utf8');

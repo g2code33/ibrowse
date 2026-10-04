@@ -3,6 +3,8 @@ import { MemoryStorage, PromptSession, UpdateService } from '../services/updateS
 import { mountUpdateButton } from './updateButton.js';
 import { mountMobileUpdatePrompt } from './mobilePrompt.js';
 import { BrowserShell } from '../../packages/shared-ui/src/components/BrowserShell.js';
+import { createWebAuthBridge } from '../services/googleAuthWeb.js';
+import { resolveWebGoogleAuthConfig } from '../config/googleAuthWeb.js';
 
 const root = document.getElementById('app');
 const header = document.getElementById('top-header');
@@ -24,6 +26,32 @@ const service = new UpdateService({
 
 if (header && !['ios', 'android', 'pwa-installed'].includes(target)) {
   mountUpdateButton({ root: header, service, config: DEFAULT_UPDATE_CONFIG });
+}
+
+// Web/PWA "Sign in with Google": BrowserShell drives whatever bridge it
+// finds at window.yayra.auth (on desktop that's the Electron preload's IPC
+// bridge). On plain web there is no preload, so install the web adapter
+// here - but ONLY when a Web Client ID was injected at build time, so an
+// unconfigured deployment keeps the honest "not available on this build"
+// message in Settings -> Account instead of a button that errors out.
+// Running under Electron/Capacitor-with-native-auth is detected by the
+// bridge already existing; never overwrite it.
+if (typeof window !== 'undefined' && !(window.yayra && window.yayra.auth) && !(window.ibrowse && window.ibrowse.auth)) {
+  const webAuthConfig = resolveWebGoogleAuthConfig({});
+  if (webAuthConfig.clientId) {
+    window.yayra = Object.assign(window.yayra || {}, {
+      auth: createWebAuthBridge({
+        clientId: webAuthConfig.clientId,
+        exchangeUrl: webAuthConfig.exchangeUrl,
+        origin: window.location.origin,
+        localStorage: window.localStorage,
+        sessionStorage: window.sessionStorage,
+        navigate: (url) => window.location.assign(url),
+        openWindow: (url) => window.open(url, '_blank', 'noopener'),
+        getPath: () => window.location.pathname + window.location.search
+      })
+    });
+  }
 }
 
 if (root) {

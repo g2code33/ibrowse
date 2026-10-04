@@ -18,7 +18,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.protocol !== 'https:' && url.hostname !== 'localhost') return new Response('HTTPS required', { status: 400 });
-    if (!['/updates/manifest.json', '/api/suggestions', '/api/latest-release'].includes(url.pathname)) {
+    if (!['/updates/manifest.json', '/api/suggestions', '/api/latest-release', '/auth/google/exchange'].includes(url.pathname)) {
       return new Response('not found', { status: 404 });
     }
 
@@ -29,6 +29,7 @@ export default {
 
     if (url.pathname === '/api/suggestions') return proxySuggestions(request, url, headers, ctx);
     if (url.pathname === '/api/latest-release') return proxyLatestRelease(request, headers, env, ctx);
+    if (url.pathname === '/auth/google/exchange') return exchangeGoogleAuthCode(request, headers, env);
     return serveManifest(request, env, headers);
   }
 };
@@ -112,6 +113,98 @@ async function proxyJson(target, headers, requestHeaders = {}, ctx, cacheControl
   }
 }
 
+/**
+ * Server-side half of the Web/PWA "Sign in with Google" flow (the browser
+ * half is src/services/googleAuthWeb.js; architecture + threat model in
+ * docs/GOOGLE_SIGNIN.md).
+ *
+ * WHY THIS EXISTS: Google's token endpoint requires a client_secret for
+ * "Web application" OAuth clients even with PKCE, and a secret cannot live
+ * in browser-delivered JS. So the browser sends ONLY its one-shot
+ * authorization code + PKCE code_verifier here; this Worker (holding
+ * GOOGLE_WEB_CLIENT_ID / GOOGLE_WEB_CLIENT_SECRET as bindings - wrangler
+ * secret put, never committed) performs the code-for-token exchange AND the
+ * userinfo fetch, then returns ONLY the basic profile. The access token is
+ * a local variable in this function and is gone when it returns - raw
+ * tokens are never stored anywhere and never sent to any client, which is
+ * a STRONGER guarantee than the desktop build (where tokens at least exist
+ * encrypted on the user's own machine).
+ *
+ * Replay/abuse resistance: the code is single-use and PKCE-bound (Google
+ * enforces both), redirect_uri must match a URI registered on the Google
+ * client, and the Worker's existing per-IP rate limiter applies.
+ */
+async function exchangeGoogleAuthCode(request, headers, env) {
+  if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'method not allowed' }), { status: 405, headers });
+  if (!env?.GOOGLE_WEB_CLIENT_ID || !env?.GOOGLE_WEB_CLIENT_SECRET) {
+    return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify({ error: 'invalid_json' }), { status: 400, headers });
+  }
+  const code = typeof body?.code === 'string' ? body.code : '';
+  const codeVerifier = typeof body?.codeVerifier === 'string' ? body.codeVerifier : '';
+  const redirectUri = typeof body?.redirectUri === 'string' ? body.redirectUri : '';
+  if (!code || !codeVerifier || !redirectUri) {
+    return new Response(JSON.stringify({ error: 'missing_fields' }), { status: 400, headers });
+  }
+  let redirect;
+  try {
+    redirect = new URL(redirectUri);
+  } catch {
+    return new Response(JSON.stringify({ error: 'invalid_redirect_uri' }), { status: 400, headers });
+  }
+  // Google is the real enforcement point (the URI must be registered on the
+  // OAuth client), but refuse obvious garbage before spending an upstream
+  // round trip: HTTPS everywhere except plain-HTTP localhost dev.
+  const isLocalhost = redirect.hostname === 'localhost' || redirect.hostname === '127.0.0.1';
+  if (redirect.protocol !== 'https:' && !(redirect.protocol === 'http:' && isLocalhost)) {
+    return new Response(JSON.stringify({ error: 'invalid_redirect_uri' }), { status: 400, headers });
+  }
+
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      code_verifier: codeVerifier,
+      client_id: env.GOOGLE_WEB_CLIENT_ID,
+      client_secret: env.GOOGLE_WEB_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code'
+    }).toString()
+  });
+  if (!tokenResponse.ok) {
+    // Pass Google's OAuth error code through (useful: invalid_grant =
+    // expired/reused code) but never echo request contents back.
+    let detail = 'token_exchange_failed';
+    try { detail = (await tokenResponse.json())?.error || detail; } catch { /* keep generic */ }
+    console.log(`[auth] google exchange failed status=${tokenResponse.status} error=${detail}`);
+    return new Response(JSON.stringify({ error: detail }), { status: 502, headers });
+  }
+  const tokens = await tokenResponse.json();
+  if (!tokens?.access_token) {
+    return new Response(JSON.stringify({ error: 'token_exchange_malformed' }), { status: 502, headers });
+  }
+
+  const userinfoResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${tokens.access_token}` }
+  });
+  if (!userinfoResponse.ok) {
+    console.log(`[auth] google userinfo failed status=${userinfoResponse.status}`);
+    return new Response(JSON.stringify({ error: 'userinfo_failed' }), { status: 502, headers });
+  }
+  const userinfo = await userinfoResponse.json();
+  // Profile only. Explicitly reconstruct the object so no token-ish field
+  // can ever ride along, and drop the tokens on the floor right here.
+  const profile = { sub: userinfo.sub, name: userinfo.name, email: userinfo.email, picture: userinfo.picture };
+  return new Response(JSON.stringify({ profile }), { status: 200, headers: { ...headers, 'cache-control': 'no-store' } });
+}
+
 function readManifest(env) {
   if (!env?.UPDATES_MANIFEST_JSON) return DEFAULT_MANIFEST;
   try {
@@ -124,7 +217,7 @@ function readManifest(env) {
 function baseHeaders() {
   return {
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
     'access-control-allow-headers': 'Accept, Content-Type',
     'content-type': 'application/json; charset=utf-8'
   };

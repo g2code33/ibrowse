@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta http-equiv="Content-Security-Policy" content="__CSP__">
     <meta name="theme-color" content="#172554">
+    <!-- Web/PWA "Sign in with Google" (injected by scripts/build-web.mjs;
+         empty when not configured, which disables the feature honestly).
+         A Google OAuth Client ID is public by design; the client SECRET
+         lives only in the Cloudflare Worker. See docs/GOOGLE_SIGNIN.md. -->
+    <meta name="yayra-google-web-client-id" content="__GOOGLE_WEB_CLIENT_ID__">
+    <meta name="yayra-google-auth-exchange-url" content="__GOOGLE_AUTH_EXCHANGE_URL__">
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="icon" type="image/png" sizes="1024x1024" href="./assets/brand/logomain1-transparent.png">
     <link rel="icon" type="image/jpeg" sizes="1024x1024" href="./assets/brand/logomain1.jpg">
