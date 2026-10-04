@@ -350,3 +350,61 @@ test('overlayWindow: on Linux, enabling launch-at-startup writes an XDG autostar
   bridge.applyLoginItemSettings(false);
   assert.equal(fs.existsSync(autostartFile), false, 'disabling startup removes the entry');
 });
+
+test('overlayWindow: bubble shows ONLY the Yayra logo - inlined data URL, no circular backdrop', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const fakePng = Buffer.from('fake-png-bytes');
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null,
+    platform: 'win32',
+    fsImpl: { readFileSync: () => fakePng },
+    logoPath: '/fake/brand/logomain1-transparent.png'
+  });
+
+  bridge.ensureOverlayWindow();
+  const html = decodeURIComponent(instances[0].loadedUrl.replace('data:text/html;charset=utf-8,', ''));
+
+  assert.ok(
+    html.includes(`data:image/png;base64,${fakePng.toString('base64')}`),
+    'brand logo is inlined into the bubble as a base64 data URL'
+  );
+  assert.ok(html.includes('<img id="bubble"'), 'bubble element IS the logo image itself');
+  assert.ok(!html.includes('radial-gradient'), 'no circular gradient plate behind the logo');
+  assert.ok(!html.includes('border-radius:50%'), 'no circle clipping around the logo');
+  assert.ok(html.includes('background:transparent'), 'bubble background stays fully transparent');
+});
+
+test('overlayWindow: bubble falls back to a bare monogram (still no circle) when the logo asset is missing', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null,
+    platform: 'win32',
+    fsImpl: { readFileSync: () => { throw new Error('missing'); } },
+    logoPath: '/fake/missing.png'
+  });
+
+  bridge.ensureOverlayWindow();
+  const html = decodeURIComponent(instances[0].loadedUrl.replace('data:text/html;charset=utf-8,', ''));
+
+  assert.ok(html.includes('id="monogram"'), 'fallback renders the bare Y monogram');
+  assert.ok(!html.includes('radial-gradient'), 'fallback has no circular gradient either');
+  assert.ok(!html.includes('border-radius:50%'), 'fallback has no circle clipping either');
+});

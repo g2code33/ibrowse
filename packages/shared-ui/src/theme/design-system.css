@@ -2545,24 +2545,15 @@ html {
   outline: none;
 }
 
-.fb-dev-ad-icon-tile {
-  display: inline-flex;
-  flex: 0 0 40px;
-  width: 40px;
-  height: 40px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
+/* Sponsor logo: free-standing (no tile/sub-card around it) and large
+   enough to be instantly recognizable. */
 .fb-dev-ad-icon {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
-  border-radius: 7px;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 10px;
   object-fit: contain;
+  background: transparent;
 }
 
 .fb-dev-ad-text {
@@ -2613,16 +2604,10 @@ html {
     grid-column: 1 / -1;
   }
 
-  .fb-dev-ad-icon-tile {
-    flex-basis: 44px;
-    width: 44px;
-    height: 44px;
-  }
-
   .fb-dev-ad-icon {
-    width: 28px;
-    height: 28px;
-    flex-basis: 28px;
+    width: 48px;
+    height: 48px;
+    flex-basis: 48px;
   }
 
   .fb-dev-ad-label,

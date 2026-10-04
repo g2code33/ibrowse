@@ -77,10 +77,29 @@ function createOverlayBridge({
   fsImpl = null,
   homeDir = null,
   platform = process.platform,
+  // Absolute path to the Yayra brand logo (transparent PNG). Inlined as a
+  // data URL into the bubble HTML so the bubble is ONLY the logo - no
+  // circular backdrop around it.
+  logoPath = null,
   logger = console
 }) {
   let overlayWin = null;
   let miniWin = null;
+  let cachedLogoDataUrl;
+
+  function logoDataUrl() {
+    if (cachedLogoDataUrl !== undefined) return cachedLogoDataUrl;
+    cachedLogoDataUrl = null;
+    if (logoPath && fsImpl && typeof fsImpl.readFileSync === 'function') {
+      try {
+        const buf = fsImpl.readFileSync(logoPath);
+        cachedLogoDataUrl = `data:image/png;base64,${buf.toString('base64')}`;
+      } catch (err) {
+        logger?.warn?.(`[yayra:overlay] could not inline bubble logo: ${err?.message || err}`);
+      }
+    }
+    return cachedLogoDataUrl;
+  }
 
   function linuxAutostartFile() {
     if (!homeDir) return null;
@@ -144,30 +163,39 @@ function createOverlayBridge({
   }
 
   function buildOverlayHtml(settings) {
+    const logo = logoDataUrl();
+    // The bubble is JUST the Yayra logo - fully transparent window, no
+    // circular plate/gradient behind it. A soft drop shadow keeps the
+    // logo legible over any app underneath. Fallback (logo asset
+    // unavailable): a bare transparent "Y" monogram, still no circle.
+    const bubbleContent = logo
+      ? `<img id="bubble" src="${logo}" alt="" title="Open Yayra" draggable="false" />`
+      : `<div id="bubble" title="Open Yayra"><span id="monogram">Y</span></div>`;
     return `<!doctype html>
 <html><head><meta charset="utf-8" />
 <style>
   html, body { margin:0; padding:0; background:transparent; overflow:hidden; }
   #bubble {
-    width:100vw; height:100vh; border-radius:50%;
+    width:100vw; height:100vh;
     display:flex; align-items:center; justify-content:center;
-    background:radial-gradient(circle at 35% 30%, #4f7cff, #172554);
-    box-shadow:0 4px 18px rgba(0,0,0,0.45);
+    background:transparent;
+    object-fit:contain;
+    filter:drop-shadow(0 3px 10px rgba(0,0,0,0.55));
     opacity:${settings.opacity};
     -webkit-app-region: drag;
     cursor:grab;
     user-select:none;
   }
   #bubble:active { cursor:grabbing; }
-  svg { width:55%; height:55%; pointer-events:none; }
+  #monogram {
+    font:800 64px/1 system-ui, sans-serif;
+    color:#4f7cff;
+    text-shadow:0 2px 8px rgba(0,0,0,0.6);
+    pointer-events:none;
+  }
 </style></head>
 <body>
-  <div id="bubble" title="Open Yayra">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="9"></circle>
-      <path d="M8 12h8M12 8v8"></path>
-    </svg>
-  </div>
+  ${bubbleContent}
   <script>
     const bubbleEl = document.getElementById('bubble');
     bubbleEl.addEventListener('click', () => {

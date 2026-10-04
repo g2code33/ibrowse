@@ -226,6 +226,7 @@ export class BrowserShell {
         savePasswordsEnabled: true,
         autofillEnabled: true,
         httpsFirst: true,
+        adBlockEnabled: true,
         clearHistoryOnExit: false,
         restoreSessionOnLaunch: true,
         ...locallyPersistedSettings,
@@ -326,6 +327,23 @@ export class BrowserShell {
       setTimeout(() => {
         this.checkForUpdates(false);
       }, 1200);
+    }
+
+    // When the theme preference is "system", follow live OS light/dark
+    // switches. Guarded: dom-shim/test environments may lack matchMedia
+    // or its event API.
+    try {
+      if (typeof matchMedia === 'function') {
+        const mq = matchMedia('(prefers-color-scheme: light)');
+        const onSchemeChange = () => {
+          if ((this.state.settings.theme || 'dark') === 'system') this.render();
+        };
+        if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onSchemeChange);
+        else if (typeof mq.addListener === 'function') mq.addListener(onSchemeChange);
+      }
+    } catch {
+      // Theme still resolves correctly at each render; live OS tracking
+      // is a progressive enhancement.
     }
   }
 
@@ -645,7 +663,7 @@ export class BrowserShell {
 
     const shell = document.createElement('div');
     shell.className = `fb-browser-shell ${this.state.isMobile ? 'fb-mobile-layout' : 'fb-desktop-layout'} ${isPrivate ? 'fb-incognito-mode' : ''}`;
-    shell.setAttribute('data-theme', this.state.settings.theme || 'dark');
+    shell.setAttribute('data-theme', this.resolveEffectiveTheme());
     shell.setAttribute('data-color-theme', this.state.settings.colorTheme || 'blue');
     shell.setAttribute('data-floating-mode', this.state.desktopFloatingMode);
 
@@ -2001,9 +2019,7 @@ export class BrowserShell {
         const host = item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0];
         return `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
-          <span class="fb-dev-ad-icon-tile" aria-hidden="true">
-            <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" />
-          </span>
+          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" />
           <span class="fb-dev-ad-text">
             <span class="fb-dev-ad-label">${item.title}</span>
             <span class="fb-dev-ad-domain">${host}</span>
@@ -2589,6 +2605,7 @@ export class BrowserShell {
         previewBox.style.backdropFilter = `blur(${blurVal}px)`;
       }
       this.ensurePersistentAssistiveBubble();
+      this.updateCssCustomProperties();
     };
 
     bSlider?.addEventListener('input', updatePreview);
@@ -2626,6 +2643,46 @@ export class BrowserShell {
       alert('Settings saved successfully.');
       this.render();
     });
+
+    // -----------------------------------------------------------------
+    // Immediate-apply controls: every dropdown/toggle takes effect the
+    // moment it is changed (Chrome-style) and is persisted right away.
+    // The Save button above remains as an explicit "save everything"
+    // affordance but is no longer required for changes to stick.
+    // -----------------------------------------------------------------
+    const bindSelect = (selector, apply) => {
+      const el = page.querySelector(selector);
+      el?.addEventListener('change', (e) => {
+        const value = e?.target?.value !== undefined ? e.target.value : el.value;
+        apply(value);
+        this.persistSettings();
+        this.render();
+      });
+    };
+
+    const bindToggle = (selector, apply) => {
+      const el = page.querySelector(selector);
+      el?.addEventListener('change', (e) => {
+        const checked = e?.target?.checked !== undefined ? e.target.checked : el.checked;
+        apply(!!checked);
+        this.persistSettings();
+      });
+    };
+
+    bindSelect('#fb-in-set-theme', (v) => { this.state.settings.theme = v || 'dark'; });
+    bindSelect('#fb-in-set-color-theme', (v) => { this.state.settings.colorTheme = v || 'blue'; });
+    bindSelect('#fb-in-set-engine', (v) => { if (v) this.state.settings.searchEngine = v; });
+
+    bindToggle('#fb-in-set-https', (on) => { this.state.settings.httpsFirst = on; });
+    bindToggle('#fb-in-set-adblock', (on) => { this.state.settings.adBlockEnabled = on; });
+    bindToggle('#fb-in-set-restore-session', (on) => { this.state.settings.restoreSessionOnLaunch = on; });
+    bindToggle('#fb-in-set-floating-default', (on) => { this.state.settings.floatingEnabledByDefault = on; });
+
+    // Transparency sliders already preview live on 'input'; persist the
+    // final value once the user releases the handle ('change').
+    bSlider?.addEventListener('change', () => this.persistSettings());
+    fSlider?.addEventListener('change', () => this.persistSettings());
+    blurSlider?.addEventListener('change', () => this.persistSettings());
 
     page.querySelector('.fb-in-open-cleardata-btn')?.addEventListener('click', () => {
       this.openModal('clear-data');
@@ -6214,6 +6271,47 @@ export class BrowserShell {
       this.closeModal();
     } else {
       this.openModal(modalName);
+    }
+  }
+
+  /**
+   * Resolves the user's theme preference into the concrete theme the shell
+   * should render. 'system' follows the OS via prefers-color-scheme and
+   * falls back to dark when media queries are unavailable.
+   */
+  resolveEffectiveTheme() {
+    const pref = this.state.settings.theme || 'dark';
+    if (pref !== 'system') return pref;
+    try {
+      if (typeof matchMedia === 'function') {
+        return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+    } catch {
+      // Fall through to the dark default below.
+    }
+    return 'dark';
+  }
+
+  /**
+   * Persists the current settings snapshot to the settings repository and
+   * localStorage. Fire-and-forget: UI changes always apply immediately
+   * even if persistence fails (e.g. storage quota exceeded).
+   */
+  persistSettings() {
+    if (this.settingsRepo && typeof this.settingsRepo.updateSettings === 'function') {
+      try {
+        const result = this.settingsRepo.updateSettings(this.state.settings);
+        if (result && typeof result.catch === 'function') result.catch(() => {});
+      } catch {
+        // Non-fatal: the in-memory state is already updated.
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('yayra:settings', JSON.stringify(this.state.settings));
+      } catch {
+        // Keep the browser usable when storage is unavailable or full.
+      }
     }
   }
 

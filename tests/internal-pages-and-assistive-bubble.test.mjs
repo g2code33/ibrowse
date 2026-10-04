@@ -470,3 +470,105 @@ test('Requirement 11: Downloads page includes Visit File Location button and Lis
   assert.equal(shell.state.downloadsViewMode, 'card');
   assert.ok(container.querySelector('.fb-downloads-grid-layout'));
 });
+
+test('Settings page: every toggle and dropdown applies IMMEDIATELY on change and persists - no Save click required', async () => {
+  const container = document.createElement('div');
+  const storage = new MemoryPersistenceAdapter();
+  const settingsRepo = new SettingsRepository(storage);
+
+  const shell = new BrowserShell({ container, isMobile: false, settingsRepo });
+  await shell.initialize();
+  shell.render(container);
+  shell.navigateActiveTab('yayra://settings');
+
+  // --- Theme dropdown: applies to the shell instantly ---
+  const themeSelect = container.querySelector('#fb-in-set-theme');
+  assert.ok(themeSelect, 'theme select must exist');
+  themeSelect.value = 'light';
+  themeSelect.dispatchEvent({ type: 'change', target: themeSelect });
+  assert.equal(shell.state.settings.theme, 'light');
+  assert.equal(
+    container.querySelector('.fb-browser-shell').getAttribute('data-theme'),
+    'light',
+    'theme is re-applied to the shell immediately'
+  );
+
+  // --- Accent color dropdown ---
+  const colorSelect = container.querySelector('#fb-in-set-color-theme');
+  assert.ok(colorSelect, 'accent color select must exist');
+  colorSelect.value = 'purple';
+  colorSelect.dispatchEvent({ type: 'change', target: colorSelect });
+  assert.equal(shell.state.settings.colorTheme, 'purple');
+  assert.equal(
+    container.querySelector('.fb-browser-shell').getAttribute('data-color-theme'),
+    'purple',
+    'accent is re-applied to the shell immediately'
+  );
+
+  // --- Search engine dropdown ---
+  const engineSelect = container.querySelector('#fb-in-set-engine');
+  assert.ok(engineSelect, 'engine select must exist');
+  engineSelect.value = 'duckduckgo';
+  engineSelect.dispatchEvent({ type: 'change', target: engineSelect });
+  assert.equal(shell.state.settings.searchEngine, 'duckduckgo');
+
+  // --- Privacy / behavior checkboxes ---
+  const toggles = [
+    ['#fb-in-set-https', 'httpsFirst'],
+    ['#fb-in-set-adblock', 'adBlockEnabled'],
+    ['#fb-in-set-restore-session', 'restoreSessionOnLaunch'],
+    ['#fb-in-set-floating-default', 'floatingEnabledByDefault']
+  ];
+  for (const [selector, key] of toggles) {
+    const box = container.querySelector(selector);
+    assert.ok(box, `${selector} must exist`);
+    box.checked = false;
+    box.dispatchEvent({ type: 'change', target: box });
+    assert.equal(shell.state.settings[key], false, `${key} turns off immediately`);
+    const refreshed = container.querySelector(selector) || box;
+    refreshed.checked = true;
+    refreshed.dispatchEvent({ type: 'change', target: refreshed });
+    assert.equal(shell.state.settings[key], true, `${key} turns back on immediately`);
+  }
+
+  // --- Everything above was persisted without pressing Save ---
+  // (persistSettings is fire-and-forget; give the async repo write a tick)
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const persisted = await settingsRepo.getSettings();
+  assert.equal(persisted.theme, 'light');
+  assert.equal(persisted.colorTheme, 'purple');
+  assert.equal(persisted.searchEngine, 'duckduckgo');
+  assert.equal(persisted.httpsFirst, true);
+  assert.equal(persisted.adBlockEnabled, true);
+  assert.equal(persisted.restoreSessionOnLaunch, true);
+});
+
+test('Settings: "system" theme resolves via prefers-color-scheme and falls back to dark', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    settingsRepo: new SettingsRepository(new MemoryPersistenceAdapter())
+  });
+  await shell.initialize();
+
+  shell.state.settings.theme = 'system';
+
+  const prevMatchMedia = globalThis.matchMedia;
+  try {
+    globalThis.matchMedia = (q) => ({ matches: q.includes('light'), media: q });
+    assert.equal(shell.resolveEffectiveTheme(), 'light', 'system follows a light OS scheme');
+
+    globalThis.matchMedia = (q) => ({ matches: false, media: q });
+    assert.equal(shell.resolveEffectiveTheme(), 'dark', 'system follows a dark OS scheme');
+
+    delete globalThis.matchMedia;
+    assert.equal(shell.resolveEffectiveTheme(), 'dark', 'no matchMedia -> dark fallback');
+  } finally {
+    if (prevMatchMedia === undefined) delete globalThis.matchMedia;
+    else globalThis.matchMedia = prevMatchMedia;
+  }
+
+  shell.state.settings.theme = 'light';
+  assert.equal(shell.resolveEffectiveTheme(), 'light', 'explicit prefs pass through untouched');
+});

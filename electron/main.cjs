@@ -96,7 +96,9 @@ app.whenReady().then(async () => {
       getMainWindow: () => mainWindow,
       // The bubble outlives the main window; clicking "Open full browser"
       // after the main window was closed recreates it from scratch.
-      createMainWindow: () => createWindow()
+      createMainWindow: () => createWindow(),
+      // Bubble shows ONLY the Yayra logo (inlined as a data URL).
+      logoPath: resolveBubbleLogoPath()
     });
     overlayBridge.initializeOnStartup();
 
@@ -125,6 +127,18 @@ app.whenReady().then(async () => {
     if (!bubbleVisible && !trayVisible) createWindow();
   }
 });
+
+function resolveBubbleLogoPath() {
+  const candidates = [
+    path.join(DIST_DIR, 'assets', 'brand', 'logomain1-transparent.png'),
+    path.join(__dirname, '..', 'assets', 'brand', 'logomain1-transparent.png'),
+    path.join(DIST_DIR, 'icons', 'icon-192.png')
+  ];
+  for (const candidate of candidates) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch { /* keep looking */ }
+  }
+  return null;
+}
 
 function resolveTrayIconPath() {
   const candidates = [
