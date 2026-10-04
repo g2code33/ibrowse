@@ -17,7 +17,8 @@ environment, gitignored local config files, or GitHub Actions secrets.
 | `YAYRA_GOOGLE_AUTH_EXCHANGE_URL` | env var (build time, optional) | same | Overrides the Worker exchange endpoint; defaults to the production worker. |
 | `google-auth.web.config.json` | local file at repo root (alternative to the env vars) | `scripts/build-web.mjs` | `{ "clientId": ..., "exchangeUrl"?: ... }`. **Gitignored.** |
 | `GOOGLE_WEB_CLIENT_ID` / `GOOGLE_WEB_CLIENT_SECRET` | **Worker secrets** (`wrangler secret put`) | `worker/update-worker.mjs` (`/auth/google/exchange`) | The web client's secret lives ONLY here — Google requires it for Web-application clients even with PKCE; it must never appear in web-delivered files. |
-| Android / iOS client IDs | local file (mobile builds) | Capacitor sign-in (Phase A2) | "Android" / "iOS" OAuth clients, no secret; verified by package name + SHA-1 / bundle ID. Gitignored via the same pattern. |
+| `YAYRA_GOOGLE_ANDROID_CLIENT_ID` / `YAYRA_GOOGLE_IOS_CLIENT_ID` | env vars (build time) or `google-auth.web.config.json` fields `androidClientId`/`iosClientId` | `scripts/build-web.mjs` → `<meta>` → `src/config/googleAuthCapacitor.js` | "Android"/"iOS" OAuth clients have **no secret** (verified by package name + SHA-1 / bundle ID); the IDs ship in the app bundle by design. |
+| `GOOGLE_ANDROID_CLIENT_ID` / `GOOGLE_IOS_CLIENT_ID` | Worker bindings | `worker/update-worker.mjs` (`/auth/google/exchange`, `platform: android\|ios`) | Same endpoint as web; secretless exchange for native client types. |
 
 ## 2. Update worker (Cloudflare Worker: `yayra-updates-api`)
 

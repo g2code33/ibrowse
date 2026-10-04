@@ -1,0 +1,308 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  DEFAULT_MOBILE_REDIRECT_URI,
+  createCapacitorAuthBridge,
+  signInWithGoogleCapacitor
+} from '../src/services/googleAuthCapacitor.js';
+import { PROFILE_KEY } from '../src/services/googleAuthWeb.js';
+import { resolveCapacitorGoogleAuthConfig } from '../src/config/googleAuthCapacitor.js';
+
+const CLIENT_ID = 'android-client-id.apps.googleusercontent.com';
+const EXCHANGE_URL = 'https://yayra-updates-api.g2code335.workers.dev/auth/google/exchange';
+
+function fakeStorage(seed = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    removeItem: (key) => map.delete(key),
+    dump: () => Object.fromEntries(map.entries())
+  };
+}
+
+/**
+ * A fake of the Capacitor plugin surface: captures Browser.open calls and
+ * lets a test deliver the appUrlOpen deep link (i.e. play the role of the
+ * OS routing com.yayra.app:/oauth2redirect back into the app).
+ */
+function fakeCapacitor() {
+  const opened = [];
+  const closed = [];
+  let urlHandler = null;
+  let finishedHandler = null;
+  return {
+    opened,
+    closed,
+    deliverUrl: (url) => urlHandler?.({ url }),
+    finishBrowser: () => finishedHandler?.(),
+    openBrowser: async ({ url }) => { opened.push(url); },
+    closeBrowser: async () => { closed.push(true); },
+    onUrlOpen: (handler) => { urlHandler = handler; return () => { urlHandler = null; }; },
+    onBrowserFinished: (handler) => { finishedHandler = handler; return () => { finishedHandler = null; }; }
+  };
+}
+
+/**
+ * generatePkcePair awaits crypto.subtle.digest (threadpool), so "one
+ * setTimeout(0)" is NOT guaranteed to run after Browser.open fires. Poll
+ * instead of racing.
+ */
+async function waitFor(predicate, timeoutMs = 2000) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
+function profileResponse() {
+  return new Response(JSON.stringify({
+    profile: { sub: '7', name: 'Ama Mensah', email: 'ama@example.com', picture: 'https://lh3.googleusercontent.com/a/p' }
+  }), { status: 200 });
+}
+
+// --- happy path ------------------------------------------------------------
+
+test('capacitor sign-in opens the SYSTEM browser with a PKCE auth URL and finishes via the deep-link callback + worker exchange', async () => {
+  const cap = fakeCapacitor();
+  const exchanges = [];
+  const fetchImpl = async (url, options) => {
+    exchanges.push({ url, options });
+    return profileResponse();
+  };
+
+  const pending = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID,
+    platform: 'android',
+    exchangeUrl: EXCHANGE_URL,
+    openBrowser: cap.openBrowser,
+    closeBrowser: cap.closeBrowser,
+    onUrlOpen: cap.onUrlOpen,
+    onBrowserFinished: cap.onBrowserFinished,
+    fetchImpl
+  });
+
+  await waitFor(() => cap.opened.length === 1);
+  const authUrl = new URL(cap.opened[0]);
+  assert.equal(authUrl.origin + authUrl.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
+  assert.equal(authUrl.searchParams.get('client_id'), CLIENT_ID);
+  assert.equal(authUrl.searchParams.get('redirect_uri'), DEFAULT_MOBILE_REDIRECT_URI);
+  assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
+  // Mobile Google clients have no secret, and no offline access is wanted.
+  assert.equal(authUrl.searchParams.get('client_secret'), null);
+  assert.equal(authUrl.searchParams.get('access_type'), null);
+
+  const state = authUrl.searchParams.get('state');
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?code=one-shot&state=${state}`);
+
+  const { profile } = await pending;
+  assert.equal(profile.email, 'ama@example.com');
+  assert.equal(cap.closed.length, 1, 'the in-app browser sheet is closed after the callback');
+
+  assert.equal(exchanges.length, 1);
+  const body = JSON.parse(exchanges[0].options.body);
+  assert.equal(body.code, 'one-shot');
+  assert.equal(body.platform, 'android');
+  assert.equal(body.redirectUri, DEFAULT_MOBILE_REDIRECT_URI);
+  assert.match(body.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+  // No token-shaped field may appear anywhere in the request or result.
+  assert.equal(exchanges[0].options.body.includes('client_secret'), false);
+});
+
+test('capacitor sign-in ignores unrelated deep links and still completes on the real callback', async () => {
+  const cap = fakeCapacitor();
+  const pending = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID, platform: 'ios', exchangeUrl: EXCHANGE_URL,
+    openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen,
+    fetchImpl: async () => profileResponse()
+  });
+  await waitFor(() => cap.opened.length === 1);
+  const state = new URL(cap.opened[0]).searchParams.get('state');
+
+  cap.deliverUrl('com.yayra.app:/share?url=https://example.com'); // unrelated deep link
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?code=c1&state=${state}`);
+  const { profile } = await pending;
+  assert.equal(profile.email, 'ama@example.com');
+});
+
+// --- failure paths -----------------------------------------------------------
+
+test('capacitor sign-in rejects a state mismatch without calling the worker', async () => {
+  const cap = fakeCapacitor();
+  const pending = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen,
+    fetchImpl: async () => { throw new Error('must not fetch'); }
+  });
+  await waitFor(() => cap.opened.length === 1);
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?code=c&state=FORGED`);
+  await assert.rejects(() => pending, /state_mismatch/);
+});
+
+test('capacitor sign-in surfaces consent-screen cancellation (error param) and user dismissal (browserFinished)', async () => {
+  const cancelled = fakeCapacitor();
+  const viaErrorParam = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    openBrowser: cancelled.openBrowser, onUrlOpen: cancelled.onUrlOpen,
+    fetchImpl: async () => { throw new Error('must not fetch'); }
+  });
+  await waitFor(() => cancelled.opened.length === 1);
+  cancelled.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?error=access_denied`);
+  await assert.rejects(() => viaErrorParam, /access_denied/);
+
+  const dismissed = fakeCapacitor();
+  const viaDismissal = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    openBrowser: dismissed.openBrowser, onUrlOpen: dismissed.onUrlOpen,
+    onBrowserFinished: dismissed.onBrowserFinished,
+    fetchImpl: async () => { throw new Error('must not fetch'); },
+    // Shrink ONLY the 1000ms dismissal grace period; the (cleared-on-finish)
+    // main sign-in timeout keeps its real delay so the two can't race.
+    setTimeoutImpl: (fn, ms) => setTimeout(fn, ms === 1000 ? 5 : ms),
+    clearTimeoutImpl: clearTimeout
+  });
+  await waitFor(() => dismissed.opened.length === 1);
+  dismissed.finishBrowser();
+  await assert.rejects(() => viaDismissal, /sign_in_cancelled/);
+});
+
+test('capacitor sign-in times out instead of hanging forever when the callback never arrives', async () => {
+  const cap = fakeCapacitor();
+  await assert.rejects(
+    () => signInWithGoogleCapacitor({
+      clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+      openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen,
+      fetchImpl: async () => { throw new Error('must not fetch'); },
+      timeoutMs: 10
+    }),
+    /sign_in_timeout/
+  );
+});
+
+test('capacitor sign-in fails fast when unconfigured and reports worker exchange failures', async () => {
+  await assert.rejects(
+    () => signInWithGoogleCapacitor({ clientId: '', platform: 'android', exchangeUrl: EXCHANGE_URL, openBrowser: async () => {}, onUrlOpen: () => () => {} }),
+    /not_configured/
+  );
+
+  const cap = fakeCapacitor();
+  const pending = signInWithGoogleCapacitor({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen,
+    fetchImpl: async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 502 })
+  });
+  await waitFor(() => cap.opened.length === 1);
+  const state = new URL(cap.opened[0]).searchParams.get('state');
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?code=c&state=${state}`);
+  await assert.rejects(() => pending, /exchange_failed:502/);
+});
+
+// --- the authBridge-shaped adapter ------------------------------------------
+
+test('capacitor auth bridge satisfies the BrowserShell contract and persists profile only', async () => {
+  const cap = fakeCapacitor();
+  const local = fakeStorage();
+  const bridge = createCapacitorAuthBridge({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    localStorage: local,
+    openBrowser: cap.openBrowser, closeBrowser: cap.closeBrowser,
+    onUrlOpen: cap.onUrlOpen, onBrowserFinished: cap.onBrowserFinished,
+    fetchImpl: async () => profileResponse()
+  });
+  const events = [];
+  bridge.onEvent((evt) => events.push(evt.type));
+
+  assert.deepEqual(await bridge.getSession(), { signedIn: false });
+
+  const pending = bridge.signIn();
+  await waitFor(() => cap.opened.length === 1);
+  // Re-entrancy guard, same as the Electron bridge.
+  assert.deepEqual(await bridge.signIn(), { ok: false, error: 'sign_in_already_in_progress' });
+  const state = new URL(cap.opened[0]).searchParams.get('state');
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?code=c&state=${state}`);
+  const result = await pending;
+  assert.equal(result.ok, true);
+  assert.equal(result.profile.email, 'ama@example.com');
+  assert.deepEqual(events, ['signing-in', 'signed-in']);
+
+  const session = await bridge.getSession();
+  assert.equal(session.signedIn, true);
+  assert.ok(session.savedAt);
+  // Profile-only persistence: nothing token-shaped may ever hit storage.
+  const serialized = JSON.stringify(local.dump());
+  for (const needle of ['access_token', 'refresh_token', 'id_token', 'code_verifier']) {
+    assert.equal(serialized.includes(needle), false, `localStorage must never contain ${needle}`);
+  }
+  assert.ok(local.getItem(PROFILE_KEY));
+
+  assert.deepEqual(await bridge.signOut(), { ok: true });
+  assert.deepEqual(await bridge.getSession(), { signedIn: false });
+  assert.deepEqual(events, ['signing-in', 'signed-in', 'signed-out']);
+});
+
+test('capacitor auth bridge reports sign-in errors through the event channel without throwing', async () => {
+  const cap = fakeCapacitor();
+  const bridge = createCapacitorAuthBridge({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    localStorage: fakeStorage(),
+    openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen,
+    fetchImpl: async () => { throw new Error('must not fetch'); }
+  });
+  const events = [];
+  bridge.onEvent((evt) => events.push(evt));
+  const pending = bridge.signIn();
+  await waitFor(() => cap.opened.length === 1);
+  cap.deliverUrl(`${DEFAULT_MOBILE_REDIRECT_URI}?error=access_denied`);
+  const result = await pending;
+  assert.deepEqual(result, { ok: false, error: 'access_denied' });
+  assert.deepEqual(events.map((e) => e.type), ['signing-in', 'error']);
+});
+
+test('capacitor auth bridge openAccountPage opens only the hardcoded Google account URL in the system browser', async () => {
+  const cap = fakeCapacitor();
+  const bridge = createCapacitorAuthBridge({
+    clientId: CLIENT_ID, platform: 'android', exchangeUrl: EXCHANGE_URL,
+    localStorage: fakeStorage(),
+    openBrowser: cap.openBrowser, onUrlOpen: cap.onUrlOpen
+  });
+  assert.deepEqual(await bridge.openAccountPage(), { ok: true });
+  assert.deepEqual(cap.opened, ['https://myaccount.google.com/']);
+});
+
+// --- config resolution --------------------------------------------------------
+
+function fakeDocWithMetas(metas) {
+  return {
+    querySelector: (selector) => {
+      const match = /meta\[name="([^"]+)"\]/.exec(selector);
+      const value = match && metas[match[1]];
+      return value ? { getAttribute: (attr) => (attr === 'content' ? value : null) } : null;
+    }
+  };
+}
+
+test('capacitor auth config picks the client id matching the native platform and ignores placeholders', () => {
+  const metas = {
+    'yayra-google-android-client-id': 'android-id.apps.googleusercontent.com',
+    'yayra-google-ios-client-id': 'ios-id.apps.googleusercontent.com',
+    'yayra-google-auth-exchange-url': EXCHANGE_URL
+  };
+  assert.deepEqual(
+    resolveCapacitorGoogleAuthConfig({ doc: fakeDocWithMetas(metas), getPlatform: () => 'android' }),
+    { platform: 'android', clientId: 'android-id.apps.googleusercontent.com', exchangeUrl: EXCHANGE_URL }
+  );
+  assert.deepEqual(
+    resolveCapacitorGoogleAuthConfig({ doc: fakeDocWithMetas(metas), getPlatform: () => 'ios' }),
+    { platform: 'ios', clientId: 'ios-id.apps.googleusercontent.com', exchangeUrl: EXCHANGE_URL }
+  );
+  // Web platform or missing/placeholder config -> feature off, honestly.
+  assert.deepEqual(
+    resolveCapacitorGoogleAuthConfig({ doc: fakeDocWithMetas(metas), getPlatform: () => 'web' }),
+    { platform: null, clientId: null, exchangeUrl: null }
+  );
+  assert.deepEqual(
+    resolveCapacitorGoogleAuthConfig({ doc: fakeDocWithMetas({ 'yayra-google-android-client-id': '__GOOGLE_ANDROID_CLIENT_ID__' }), getPlatform: () => 'android' }),
+    { platform: 'android', clientId: null, exchangeUrl: null }
+  );
+});

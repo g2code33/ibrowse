@@ -178,6 +178,40 @@ test('auth exchange attaches the client secret server-side, forwards PKCE verifi
   }
 });
 
+test('auth exchange serves Android/iOS clients WITHOUT a secret (public native clients) and accepts custom-scheme redirects', async () => {
+  const originalFetch = globalThis.fetch;
+  const upstream = [];
+  globalThis.fetch = async (target, options) => {
+    upstream.push({ target: String(target), options });
+    if (String(target).includes('/token')) return new Response(JSON.stringify({ access_token: 'ya29.mobile' }), { status: 200 });
+    return new Response(JSON.stringify({ sub: '9', name: 'Kofi', email: 'kofi@example.com', picture: 'p' }), { status: 200 });
+  };
+  const env = { GOOGLE_ANDROID_CLIENT_ID: 'android-id.apps.googleusercontent.com' };
+  try {
+    const response = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'com.yayra.app:/oauth2redirect', platform: 'android' }), env);
+    assert.equal(response.status, 200);
+    const params = new URLSearchParams(upstream[0].options.body);
+    assert.equal(params.get('client_id'), 'android-id.apps.googleusercontent.com');
+    assert.equal(params.get('client_secret'), null, 'native clients have no secret - Google rejects one it never issued');
+    assert.equal(params.get('redirect_uri'), 'com.yayra.app:/oauth2redirect');
+    assert.deepEqual(await response.json(), { profile: { sub: '9', name: 'Kofi', email: 'kofi@example.com', picture: 'p' } });
+
+    // The same request without the matching platform binding is honestly unconfigured.
+    const unconfigured = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'com.yayra.app:/oauth2redirect', platform: 'ios' }), env);
+    assert.equal(unconfigured.status, 501);
+
+    // And a web-platform request must NOT accept a custom-scheme redirect.
+    const badScheme = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'com.yayra.app:/oauth2redirect', platform: 'web' }), AUTH_ENV);
+    assert.equal(badScheme.status, 400);
+
+    const badPlatform = await worker.fetch(exchangeRequest({ code: 'c', codeVerifier: 'v', redirectUri: 'com.yayra.app:/x', platform: 'desktop' }), env);
+    assert.equal(badPlatform.status, 400);
+    assert.equal((await badPlatform.json()).error, 'invalid_platform');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('auth exchange passes Google OAuth error codes through without echoing request contents', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Code was already redeemed.' }), { status: 400 });

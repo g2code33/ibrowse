@@ -209,14 +209,104 @@ shows the honest "not available on this build" message.
 
 ---
 
-# Android / iOS (Capacitor)
+# Android / iOS (Capacitor) — setup & architecture
 
-**Not yet implemented** — next phase of this work (see
-`docs/PRODUCTION_READINESS_PLAN.md`, Phase A2): Authorization Code + PKCE
-in the system browser (`@capacitor/browser`) with a custom-scheme
-(`com.yayra.app:/oauth2redirect`) deep-link callback via `@capacitor/app`,
-"Android"/"iOS" type client IDs (no secret), and the required
-manifest/URL-scheme changes documented here when it lands.
+Same protocol again (Authorization Code + PKCE, RFC 8252 "OAuth 2.0 for
+Native Apps"), mobile transport:
+
+1. The consent screen opens in the **system browser surface** —
+   SFSafariViewController (iOS) / Chrome Custom Tabs (Android) — via the
+   first-party `@capacitor/browser` plugin. Never the app's own WebView
+   (Google blocks that, and RFC 8252 §8.12 forbids it).
+2. Google redirects to the app's **custom URL scheme**
+   `com.yayra.app:/oauth2redirect` (RFC 8252 §7.1). The OS reopens the
+   app; the first-party `@capacitor/app` plugin surfaces the URL as an
+   `appUrlOpen` event.
+3. The one-shot code + PKCE verifier go to the **same Worker exchange
+   endpoint as the web flow** with `platform: 'android' | 'ios'`. These
+   Google client types have **no secret at all** (verified by package
+   name + SHA-1 / bundle ID), so a direct on-device exchange would also
+   be valid AppAuth-style — the Worker hop is kept deliberately so **raw
+   tokens never exist in the app's JS context** (UI and flow logic share
+   one WebView in Capacitor; the only way to keep tokens away from
+   UI-reachable code is to never let them arrive). Trade-off: mobile
+   sign-in needs the Worker reachable, which the app already requires
+   for update checks.
+
+**Plugin choice (researched 2026-10):** the once-standard
+`@byteowls/capacitor-oauth2` is unmaintained (last publish 2023,
+officially superseded), and its successor
+`@capacitor-community/generic-oauth2` currently supports only Capacitor 7
+while Yayra is on Capacitor 8. First-party `@capacitor/app` +
+`@capacitor/browser` are maintained in lockstep with Capacitor itself, and
+the OAuth logic they don't cover (PKCE/state/exchange) is code this repo
+already owns and tests on the other platforms.
+
+Relevant source files:
+- `src/services/googleAuthCapacitor.js` — the flow + bridge adapter.
+  Tested in `tests/google-auth-capacitor.test.mjs`.
+- `src/config/googleAuthCapacitor.js` — build-injected per-platform
+  client-ID resolution.
+- `worker/update-worker.mjs` — the shared exchange endpoint
+  (`platform` selector; secretless for native clients).
+- `scripts/ensure-capacitor-platform.mjs` — injects the native deep-link
+  plumbing (below) into the generated projects.
+- `src/browser/main.js` — installs the bridge on native platforms.
+
+## Native project changes (automated — do not do these by hand)
+
+`android/` and `ios/` are generated and gitignored, so
+`scripts/ensure-capacitor-platform.mjs` (already part of
+`npm run build:android` / `build:ios`) injects the deep-link registration
+idempotently every run:
+
+- **Android** (`AndroidManifest.xml`): a `VIEW` + `BROWSABLE`
+  intent-filter on `MainActivity` for `@string/custom_url_scheme` (which
+  Capacitor already defines as `com.yayra.app`). No `autoVerify` — this is
+  a custom scheme, not an https App Link.
+- **iOS** (`Info.plist`): a `CFBundleURLTypes` entry registering the
+  `com.yayra.app` scheme.
+
+## Creating the "Android" and "iOS" OAuth Client IDs (console steps)
+
+Same project/consent screen as the Desktop steps. These client types issue
+**no client secret** — identity is proven by app signature instead.
+
+Android — **Credentials → Create Credentials → OAuth client ID →
+"Android"**:
+1. Package name: `com.yayra.app`.
+2. SHA-1 fingerprint: for local testing use the debug keystore
+   (`keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android | grep SHA1`).
+   For production you need **two more Android clients or added
+   fingerprints**: your upload/release keystore's SHA-1 AND — if you use
+   Play App Signing (you should) — the **app signing key SHA-1 from Play
+   Console → Setup → App signing**, because that's what actually signs
+   what users install.
+3. No redirect URI is registered for Android clients; Google accepts the
+   package-name custom scheme automatically.
+
+iOS — **Create Credentials → OAuth client ID → "iOS"**:
+1. Bundle ID: `com.yayra.app`.
+2. (App Store ID / Team ID optional until store release.)
+3. No secret, no redirect registration — the custom scheme is derived
+   from the bundle ID.
+
+## Configuring the build
+
+The per-platform client IDs ship inside the app bundle by design (nothing
+secret). Injected by `scripts/build-web.mjs` into the `dist/` bundle that
+`cap sync` copies into the native projects — either:
+```bash
+export YAYRA_GOOGLE_ANDROID_CLIENT_ID="123-android...apps.googleusercontent.com"
+export YAYRA_GOOGLE_IOS_CLIENT_ID="123-ios...apps.googleusercontent.com"
+```
+or add `androidClientId` / `iosClientId` fields to the gitignored
+`google-auth.web.config.json`. The Worker needs matching bindings (no
+secrets for these two):
+```bash
+npx wrangler secret put GOOGLE_ANDROID_CLIENT_ID --config wrangler.worker.toml
+npx wrangler secret put GOOGLE_IOS_CLIENT_ID     --config wrangler.worker.toml
+```
 
 ---
 
@@ -226,7 +316,7 @@ manifest/URL-scheme changes documented here when it lands.
 | --- | --- |
 | Electron desktop (Linux/Windows) | **Implemented**; the live round trip against real Google servers has **not** been run by this agent (no GUI browser or registered Client ID in this sandbox) and must be verified by you on your own machine with your own Client ID. |
 | Web / PWA (`yayra.pages.dev`) | **Implemented** (full-page redirect + Worker-side exchange, see above). Fully unit-tested with mocks (`tests/google-auth-web.test.mjs`, `tests/worker.test.mjs`); the live round trip needs a human with a real "Web application" Client ID, the Worker secrets deployed, and a real browser — see verification steps below. |
-| Android / iOS (Capacitor) | **Not yet implemented.** Planned as Phase A2 (see above); needs real-device/emulator verification this sandbox cannot perform. |
+| Android / iOS (Capacitor) | **Implemented** (system browser + custom-scheme deep link + shared Worker exchange, see above). Fully unit-tested with mocks (`tests/google-auth-capacitor.test.mjs`); native deep-link injection verified against freshly generated Capacitor 8 projects in-sandbox. The live round trip needs a human with real "Android"/"iOS" Client IDs, Worker bindings deployed, and a real device/emulator — this sandbox can run neither a mobile emulator nor a consent screen. |
 
 ## How to verify it actually works (you must do this)
 
@@ -246,6 +336,27 @@ manifest/URL-scheme changes documented here when it lands.
    land on a clear "cancelled" message, not a blank page); press Back
    after signing in (should NOT re-run the callback); sign out and reload
    (stays signed out).
+
+### Android / iOS (Capacitor)
+
+1. Create the "Android" and/or "iOS" Client IDs per the steps above; bind
+   `GOOGLE_ANDROID_CLIENT_ID` / `GOOGLE_IOS_CLIENT_ID` on the Worker and
+   redeploy it.
+2. Build with the matching env vars set
+   (`YAYRA_GOOGLE_ANDROID_CLIENT_ID=... npm run build:android`), install
+   on a real device/emulator whose signing cert SHA-1 matches the Android
+   client (debug keystore for a debug build!).
+3. Settings → Account → "Sign in with Google": a Custom Tab/Safari sheet
+   must open (NOT an in-app webview), and after consent the app must come
+   back to the foreground signed in.
+4. Negative paths: dismiss the sheet without finishing (expect a clear
+   "cancelled" state, not a stuck spinner — there is also a 5-minute
+   timeout); kill and relaunch the app (session persists until explicit
+   sign-out).
+5. If the redirect never returns to the app, verify the injected
+   intent-filter / CFBundleURLTypes survived your build (run
+   `node scripts/ensure-capacitor-platform.mjs android` / `ios` again and
+   grep for "YAYRA GOOGLE SIGN-IN").
 
 ### Electron desktop
 

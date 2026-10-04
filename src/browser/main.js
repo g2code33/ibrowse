@@ -5,6 +5,8 @@ import { mountMobileUpdatePrompt } from './mobilePrompt.js';
 import { BrowserShell } from '../../packages/shared-ui/src/components/BrowserShell.js';
 import { createWebAuthBridge } from '../services/googleAuthWeb.js';
 import { resolveWebGoogleAuthConfig } from '../config/googleAuthWeb.js';
+import { createCapacitorAuthBridge } from '../services/googleAuthCapacitor.js';
+import { resolveCapacitorGoogleAuthConfig } from '../config/googleAuthCapacitor.js';
 
 const root = document.getElementById('app');
 const header = document.getElementById('top-header');
@@ -37,21 +39,52 @@ if (header && !['ios', 'android', 'pwa-installed'].includes(target)) {
 // Running under Electron/Capacitor-with-native-auth is detected by the
 // bridge already existing; never overwrite it.
 if (typeof window !== 'undefined' && !(window.yayra && window.yayra.auth) && !(window.ibrowse && window.ibrowse.auth)) {
-  const webAuthConfig = resolveWebGoogleAuthConfig({});
-  if (webAuthConfig.clientId) {
-    window.yayra = Object.assign(window.yayra || {}, {
-      auth: createWebAuthBridge({
-        clientId: webAuthConfig.clientId,
-        exchangeUrl: webAuthConfig.exchangeUrl,
-        origin: window.location.origin,
-        localStorage: window.localStorage,
-        sessionStorage: window.sessionStorage,
-        navigate: (url) => window.location.assign(url),
-        openWindow: (url) => window.open(url, '_blank', 'noopener'),
-        getPath: () => window.location.pathname + window.location.search
-      })
+  const installedAuthBridge = createPlatformAuthBridge();
+  if (installedAuthBridge) {
+    window.yayra = Object.assign(window.yayra || {}, { auth: installedAuthBridge });
+  }
+}
+
+function createPlatformAuthBridge() {
+  // Native Capacitor app (Android/iOS): system-browser + deep-link flow via
+  // the first-party App/Browser plugins (src/services/googleAuthCapacitor.js).
+  const capacitor = window.Capacitor;
+  if (capacitor && typeof capacitor.isNativePlatform === 'function' && capacitor.isNativePlatform()) {
+    const capAuthConfig = resolveCapacitorGoogleAuthConfig({ getPlatform: () => capacitor.getPlatform?.() });
+    const appPlugin = capacitor.Plugins && capacitor.Plugins.App;
+    const browserPlugin = capacitor.Plugins && capacitor.Plugins.Browser;
+    if (!capAuthConfig.clientId || !appPlugin || !browserPlugin) return null;
+    return createCapacitorAuthBridge({
+      clientId: capAuthConfig.clientId,
+      platform: capAuthConfig.platform,
+      exchangeUrl: capAuthConfig.exchangeUrl,
+      localStorage: window.localStorage,
+      openBrowser: (options) => browserPlugin.open(options),
+      closeBrowser: () => browserPlugin.close(),
+      onUrlOpen: (handler) => {
+        const subscription = appPlugin.addListener('appUrlOpen', handler);
+        return () => subscription.then?.((s) => s.remove()) ?? subscription.remove?.();
+      },
+      onBrowserFinished: (handler) => {
+        const subscription = browserPlugin.addListener('browserFinished', handler);
+        return () => subscription.then?.((s) => s.remove()) ?? subscription.remove?.();
+      }
     });
   }
+
+  // Plain web/PWA: full-page redirect flow (src/services/googleAuthWeb.js).
+  const webAuthConfig = resolveWebGoogleAuthConfig({});
+  if (!webAuthConfig.clientId) return null;
+  return createWebAuthBridge({
+    clientId: webAuthConfig.clientId,
+    exchangeUrl: webAuthConfig.exchangeUrl,
+    origin: window.location.origin,
+    localStorage: window.localStorage,
+    sessionStorage: window.sessionStorage,
+    navigate: (url) => window.location.assign(url),
+    openWindow: (url) => window.open(url, '_blank', 'noopener'),
+    getPath: () => window.location.pathname + window.location.search
+  });
 }
 
 if (root) {

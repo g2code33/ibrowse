@@ -130,15 +130,50 @@ async function proxyJson(target, headers, requestHeaders = {}, ctx, cacheControl
  * a STRONGER guarantee than the desktop build (where tokens at least exist
  * encrypted on the user's own machine).
  *
+ * The Android/iOS (Capacitor) flow reuses this endpoint with
+ * `platform: 'android' | 'ios'` (see src/services/googleAuthCapacitor.js).
+ * Those Google client types have NO secret (they're verified by package
+ * name + SHA-1 / bundle ID), so only GOOGLE_ANDROID_CLIENT_ID /
+ * GOOGLE_IOS_CLIENT_ID bindings are needed - the server-side exchange is
+ * kept anyway so raw tokens never exist in the app's JS context either.
+ *
  * Replay/abuse resistance: the code is single-use and PKCE-bound (Google
  * enforces both), redirect_uri must match a URI registered on the Google
  * client, and the Worker's existing per-IP rate limiter applies.
  */
+function resolveGoogleClient(env, platform) {
+  if (platform === 'android') {
+    return env?.GOOGLE_ANDROID_CLIENT_ID ? { clientId: env.GOOGLE_ANDROID_CLIENT_ID, clientSecret: null } : null;
+  }
+  if (platform === 'ios') {
+    return env?.GOOGLE_IOS_CLIENT_ID ? { clientId: env.GOOGLE_IOS_CLIENT_ID, clientSecret: null } : null;
+  }
+  if (platform === 'web') {
+    return env?.GOOGLE_WEB_CLIENT_ID && env?.GOOGLE_WEB_CLIENT_SECRET
+      ? { clientId: env.GOOGLE_WEB_CLIENT_ID, clientSecret: env.GOOGLE_WEB_CLIENT_SECRET }
+      : null;
+  }
+  return null;
+}
+
+function isAcceptableRedirectUri(redirectUri, platform) {
+  let redirect;
+  try {
+    redirect = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (platform === 'android' || platform === 'ios') {
+    // RFC 8252 custom scheme (com.yayra.app:/oauth2redirect) or an HTTPS
+    // app link. Google is the real enforcement point either way.
+    return redirect.protocol !== 'http:';
+  }
+  const isLocalhost = redirect.hostname === 'localhost' || redirect.hostname === '127.0.0.1';
+  return redirect.protocol === 'https:' || (redirect.protocol === 'http:' && isLocalhost);
+}
+
 async function exchangeGoogleAuthCode(request, headers, env) {
   if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'method not allowed' }), { status: 405, headers });
-  if (!env?.GOOGLE_WEB_CLIENT_ID || !env?.GOOGLE_WEB_CLIENT_SECRET) {
-    return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers });
-  }
 
   let body;
   try {
@@ -149,34 +184,36 @@ async function exchangeGoogleAuthCode(request, headers, env) {
   const code = typeof body?.code === 'string' ? body.code : '';
   const codeVerifier = typeof body?.codeVerifier === 'string' ? body.codeVerifier : '';
   const redirectUri = typeof body?.redirectUri === 'string' ? body.redirectUri : '';
+  const platform = typeof body?.platform === 'string' ? body.platform : 'web';
+  if (!['web', 'android', 'ios'].includes(platform)) {
+    return new Response(JSON.stringify({ error: 'invalid_platform' }), { status: 400, headers });
+  }
+  const client = resolveGoogleClient(env, platform);
+  if (!client) {
+    return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers });
+  }
   if (!code || !codeVerifier || !redirectUri) {
     return new Response(JSON.stringify({ error: 'missing_fields' }), { status: 400, headers });
   }
-  let redirect;
-  try {
-    redirect = new URL(redirectUri);
-  } catch {
+  if (!isAcceptableRedirectUri(redirectUri, platform)) {
     return new Response(JSON.stringify({ error: 'invalid_redirect_uri' }), { status: 400, headers });
   }
-  // Google is the real enforcement point (the URI must be registered on the
-  // OAuth client), but refuse obvious garbage before spending an upstream
-  // round trip: HTTPS everywhere except plain-HTTP localhost dev.
-  const isLocalhost = redirect.hostname === 'localhost' || redirect.hostname === '127.0.0.1';
-  if (redirect.protocol !== 'https:' && !(redirect.protocol === 'http:' && isLocalhost)) {
-    return new Response(JSON.stringify({ error: 'invalid_redirect_uri' }), { status: 400, headers });
-  }
+
+  const tokenParams = new URLSearchParams({
+    code,
+    code_verifier: codeVerifier,
+    client_id: client.clientId,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code'
+  });
+  // Only the Web client type has (and requires) a secret; Android/iOS
+  // clients are public and Google rejects a secret param it never issued.
+  if (client.clientSecret) tokenParams.set('client_secret', client.clientSecret);
 
   const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      code_verifier: codeVerifier,
-      client_id: env.GOOGLE_WEB_CLIENT_ID,
-      client_secret: env.GOOGLE_WEB_CLIENT_SECRET,
-      redirect_uri: redirectUri,
-      grant_type: 'authorization_code'
-    }).toString()
+    body: tokenParams.toString()
   });
   if (!tokenResponse.ok) {
     // Pass Google's OAuth error code through (useful: invalid_grant =

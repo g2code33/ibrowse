@@ -35,7 +35,9 @@ const htmlReplacements = {
   __BUILD_VERSION__: version,
   __CSP__: buildContentSecurityPolicy(),
   __GOOGLE_WEB_CLIENT_ID__: webAuthConfig.clientId,
-  __GOOGLE_AUTH_EXCHANGE_URL__: webAuthConfig.exchangeUrl
+  __GOOGLE_AUTH_EXCHANGE_URL__: webAuthConfig.exchangeUrl,
+  __GOOGLE_ANDROID_CLIENT_ID__: webAuthConfig.androidClientId,
+  __GOOGLE_IOS_CLIENT_ID__: webAuthConfig.iosClientId
 };
 await replaceFile(path.join(dist, 'index.html'), htmlReplacements);
 await replaceFile(path.join(dist, 'auth', 'callback', 'index.html'), htmlReplacements);
@@ -66,9 +68,12 @@ async function readWebAuthConfig() {
       console.warn('google-auth.web.config.json is not valid JSON; ignoring it');
     }
   }
+  const fileValue = (key) => (typeof fileConfig[key] === 'string' ? fileConfig[key].trim() : '');
   return {
-    clientId: fromEnv || (typeof fileConfig.clientId === 'string' ? fileConfig.clientId.trim() : ''),
-    exchangeUrl: exchangeFromEnv || (typeof fileConfig.exchangeUrl === 'string' ? fileConfig.exchangeUrl.trim() : '')
+    clientId: fromEnv || fileValue('clientId'),
+    exchangeUrl: exchangeFromEnv || fileValue('exchangeUrl'),
+    androidClientId: (process.env.YAYRA_GOOGLE_ANDROID_CLIENT_ID || '').trim() || fileValue('androidClientId'),
+    iosClientId: (process.env.YAYRA_GOOGLE_IOS_CLIENT_ID || '').trim() || fileValue('iosClientId')
   };
 }
 
