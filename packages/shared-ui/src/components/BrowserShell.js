@@ -814,6 +814,9 @@ export class BrowserShell {
         const prev = await this.sessionRepo.getLastSession();
         const openNow = new Set(this.state.tabs.map((t) => t.url));
         this.state.continueTabs = (prev.tabs || []).filter((t) => !openNow.has(t.url)).slice(0, 5);
+        // Identifies THIS snapshot so "No thanks" dismisses exactly it
+        // (a future session's tabs will prompt again).
+        this.state.continueSavedAt = prev.savedAt || null;
       } catch (err) {
         console.warn('Failed to load the previous session in BrowserShell:', err);
       }
@@ -3123,11 +3126,13 @@ export class BrowserShell {
 
         frequentSites.forEach((site) => {
           const card = document.createElement('button');
-          card.className = 'fb-frequent-card fb-newtab-shortcut';
-          card.title = site.url;
+          // Logo-only tiles: the title lives in the tooltip, never as
+          // visible text (long page titles made the grid unreadable).
+          card.className = 'fb-frequent-card fb-newtab-shortcut fb-icon-only';
+          card.title = site.title ? `${site.title}\n${site.url}` : site.url;
+          card.setAttribute('aria-label', site.title || site.url);
           card.innerHTML = `
             <div class="fb-frequent-icon-wrap">${this.frequentSiteIconHtml(site)}</div>
-            <span class="fb-frequent-title">${String(site.title || site.url).replace(/</g, '&lt;')}</span>
           `;
           card.addEventListener('click', () => {
             this.navigateActiveTab(site.url);
@@ -3156,11 +3161,16 @@ export class BrowserShell {
         seenContinue.add(site.url);
         continueEntries.push({ url: site.url, title: site.title || site.url, reason: 'You visit often' });
       }
-      if (continueEntries.length > 0) {
+      // ALWAYS a real prompt: the user explicitly recovers or rejects.
+      // "No thanks" remembers the dismissed snapshot so the same session
+      // never re-prompts, while the NEXT session's tabs prompt again.
+      const continueSnapshotId = this.state.continueSavedAt || 'no-snapshot-id';
+      const continueDismissed = this.state.settings.continueDismissedAt === continueSnapshotId;
+      if (continueEntries.length > 0 && !continueDismissed) {
         const continueCard = document.createElement('div');
         continueCard.className = 'fb-continue-card';
         continueCard.innerHTML = `
-          <div class="fb-continue-card-head">Continue with these tabs</div>
+          <div class="fb-continue-card-head">Continue with these tabs?</div>
           ${continueEntries.map((entry) => {
             let host = entry.url;
             try { host = new URL(entry.url).hostname; } catch { /* keep url */ }
@@ -3173,9 +3183,19 @@ export class BrowserShell {
               </span>
             </button>`;
           }).join('')}
+          <div class="fb-continue-actions">
+            <button class="fb-continue-restore-btn">Restore all</button>
+            <button class="fb-continue-dismiss-btn">No thanks</button>
+          </div>
         `;
         continueCard.querySelectorAll('.fb-continue-item').forEach((item) => {
           item.addEventListener('click', () => this.navigateActiveTab(item.dataset.url));
+        });
+        continueCard.querySelector('.fb-continue-restore-btn')?.addEventListener('click', () => {
+          this.restoreContinueTabs(continueEntries);
+        });
+        continueCard.querySelector('.fb-continue-dismiss-btn')?.addEventListener('click', () => {
+          this.dismissContinueTabs();
         });
         newTabPage.appendChild(continueCard);
       }
@@ -9435,6 +9455,31 @@ export class BrowserShell {
     if (!pristine) this.createNewTab();
     this.navigateActiveTab(target);
     return true;
+  }
+
+  /** "Restore all" on the continue-with-these-tabs prompt: open every entry. */
+  restoreContinueTabs(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    let opened = 0;
+    for (const entry of list) {
+      if (!/^https?:\/\//i.test(entry?.url || '')) continue;
+      if (opened === 0) {
+        // The newtab the prompt lives on becomes the first restored tab.
+        this.navigateActiveTab(entry.url);
+      } else {
+        this.createNewTab();
+        this.navigateActiveTab(entry.url);
+      }
+      opened += 1;
+    }
+    if (opened > 0) this.showTransientNotice(`Restored ${opened} tab${opened === 1 ? '' : 's'}.`);
+  }
+
+  /** "No thanks" on the prompt: remember the snapshot so it never re-asks. */
+  dismissContinueTabs() {
+    this.state.settings.continueDismissedAt = this.state.continueSavedAt || 'no-snapshot-id';
+    this.persistSettings?.();
+    this.render();
   }
 
   /** Copy a link (newtab cards' copy buttons) with an honest notice. */

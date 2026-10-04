@@ -4371,6 +4371,60 @@ html {
   text-overflow: ellipsis;
 }
 
+/* Logo-only frequent-site tiles: compact squares, no visible text */
+.fb-frequent-card.fb-icon-only {
+  width: 64px;
+  min-width: 64px;
+  height: 64px;
+  padding: 10px;
+  align-items: center;
+  justify-content: center;
+}
+
+.fb-frequent-card.fb-icon-only .fb-frequent-icon-wrap {
+  margin: 0;
+}
+
+/* Continue-with-these-tabs prompt actions */
+.fb-continue-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 10px;
+  margin-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.fb-continue-restore-btn,
+.fb-continue-dismiss-btn {
+  border: none;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease, background 0.15s ease;
+}
+
+.fb-continue-restore-btn {
+  background: var(--fb-accent, #4f7cff);
+  color: #fff;
+}
+
+.fb-continue-restore-btn:hover {
+  filter: brightness(1.12);
+}
+
+.fb-continue-dismiss-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fb-text-muted);
+}
+
+.fb-continue-dismiss-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--fb-text-primary);
+}
+
 /* Copy-link affordance on Recent history rows */
 .fb-history-copy-btn {
   margin-left: auto;
