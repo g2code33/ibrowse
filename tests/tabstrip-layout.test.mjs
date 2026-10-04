@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { setupDomShim } from './dom-shim.mjs';
 
 setupDomShim();
@@ -35,6 +36,20 @@ test('"+" button is pinned OUTSIDE the scrollable tab row so it never scrolls ou
     !String(newTabBtn.parentElement.className).includes('fb-tabs-scroll-container'),
     'must not live inside the overflow-x container'
   );
+});
+
+test('"+" button FOLLOWS the last tab while there is room (tab row must not stretch)', () => {
+  // Chrome behavior: with a few tabs the "+" sits right next to the last
+  // tab; only when tabs fill the strip does it end up pinned at the far
+  // end (the row shrinks, tabs compress, then the row scrolls). That is
+  // achieved by the scroll row taking ONLY the width its tabs need:
+  // flex-grow MUST be 0 (a grow of 1 would stretch the row full-width and
+  // park the "+" at the far right even with two tabs open).
+  const css = readFileSync(new URL('../packages/shared-ui/src/theme/design-system.css', import.meta.url), 'utf8');
+  const rule = css.split('.fb-tabs-scroll-container {')[1].split('}')[0];
+  assert.match(rule, /flex:\s*0\s+1\s+auto/, 'row hugs its tabs: flex-grow 0, flex-shrink 1');
+  assert.match(rule, /min-width:\s*0/, 'row must still be allowed to shrink for tab compression');
+  assert.match(rule, /overflow-x:\s*auto/, 'row still scrolls once tabs hit their min-width floor');
 });
 
 test('with MANY tabs the "+" button stays a pinned sibling and still creates tabs', async () => {

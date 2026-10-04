@@ -501,10 +501,14 @@ html {
   align-items: flex-end;
   gap: 4px;
   overflow-x: auto;
-  /* Take the available room between the brand and the pinned "+" button /
-     window controls, and ALLOW shrinking (min-width: 0) so the tabs inside
-     compress Chrome-style before any horizontal scrolling kicks in. */
-  flex: 1 1 auto;
+  /* Chrome-style "+" placement: the row only takes the width its tabs
+     actually need (flex-grow 0), so the sibling "+" button sits RIGHT
+     NEXT TO the last tab while there's room. As tabs multiply the row
+     may SHRINK (flex-shrink 1 + min-width 0) - it is the only shrinkable
+     item in the strip - so the tabs inside compress together down to
+     their min-width floor, the "+" ends up pinned at the far end, and
+     only then does horizontal scrolling kick in. */
+  flex: 0 1 auto;
   min-width: 0;
   scrollbar-width: none;
 }
