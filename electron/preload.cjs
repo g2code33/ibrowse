@@ -91,6 +91,8 @@ const api = {
     setEnabled: (enabled) => ipcRenderer.invoke('yayra:overlay-set-enabled', enabled),
     setLaunchAtStartup: (enabled) => ipcRenderer.invoke('yayra:overlay-set-launch-at-startup', enabled),
     setOverlayAllApps: (enabled) => ipcRenderer.invoke('yayra:overlay-set-overlay-all-apps', enabled),
+    setBubbleSize: (size) => ipcRenderer.invoke('yayra:overlay-set-bubble-size', size),
+    setBubbleOpacity: (opacity) => ipcRenderer.invoke('yayra:overlay-set-bubble-opacity', opacity),
     // "Minimize to bubble" on desktop hides the real OS window; the native
     // always-on-top bubble (a separate window) is the way back in.
     minimizeMainWindow: () => ipcRenderer.send('yayra:overlay-minimize-main'),

@@ -221,6 +221,7 @@ export class BrowserShell {
         minimizeToBubble: true,
         closeToTray: true,
         bubbleOpacity: 0.88,
+        bubbleSizePx: 64,
         frameOpacity: 0.85,
         glassmorphismBlurRadius: 24,
         savePasswordsEnabled: true,
@@ -612,7 +613,14 @@ export class BrowserShell {
     if (this.overlayBridge) {
       try {
         const settings = await this.overlayBridge.getSettings();
-        if (settings) this.state.overlaySettings = { ...this.state.overlaySettings, ...settings };
+        if (settings) {
+          this.state.overlaySettings = { ...this.state.overlaySettings, ...settings };
+          // Keep the Settings sliders in sync with the native bubble's
+          // persisted size so the UI shows what's actually on screen.
+          if (Number.isFinite(Number(settings.size)) && Number(settings.size) > 0) {
+            this.state.settings.bubbleSizePx = Number(settings.size);
+          }
+        }
       } catch (err) {
         console.warn('Failed to load overlay settings in BrowserShell:', err);
       }
@@ -2389,6 +2397,14 @@ export class BrowserShell {
 
             <div class="fb-setting-slider-row">
               <div class="fb-slider-header">
+                <label for="fb-in-bubble-size">Floating Bubble Size</label>
+                <span id="fb-in-val-bubble-size">${this.state.settings.bubbleSizePx || 64}px</span>
+              </div>
+              <input type="range" id="fb-in-bubble-size" min="40" max="120" value="${this.state.settings.bubbleSizePx || 64}" class="fb-range-slider" />
+            </div>
+
+            <div class="fb-setting-slider-row">
+              <div class="fb-slider-header">
                 <label for="fb-in-frame-opacity">Floating Browser Frame Opacity</label>
                 <span id="fb-in-val-frame-opacity">${Math.round((this.state.settings.frameOpacity || 0.85) * 100)}%</span>
               </div>
@@ -2435,8 +2451,8 @@ export class BrowserShell {
 
             <div class="fb-setting-toggle-row">
               <div>
-                <strong>Launch at system startup</strong>
-                <p>Yayra's overlay starts automatically right after you log in or reboot.</p>
+                <strong>Open on boot (start with your computer)</strong>
+                <p>On: the Yayra bubble appears automatically right after you log in or reboot. Off: nothing launches at boot - no bubble, no window - until you open Yayra yourself.</p>
               </div>
               <input type="checkbox" id="fb-in-set-overlay-autostart" ${this.state.overlaySettings.launchAtStartup ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
             </div>
@@ -2583,19 +2599,23 @@ export class BrowserShell {
 
     // Sliders & Live Preview
     const bSlider = page.querySelector('#fb-in-bubble-opacity') || page.querySelector('#fb-in-slider-bubble-opacity');
+    const sizeSlider = page.querySelector('#fb-in-bubble-size');
     const fSlider = page.querySelector('#fb-in-frame-opacity') || page.querySelector('#fb-in-slider-frame-opacity');
     const blurSlider = page.querySelector('#fb-in-slider-blur');
     const previewBox = page.querySelector('#fb-in-transparency-live-preview');
 
     const updatePreview = () => {
       const bOp = Number(bSlider?.value || 88) / 100;
+      const bSize = Math.max(40, Math.min(120, Number(sizeSlider?.value || this.state.settings.bubbleSizePx || 64)));
       const fOp = Number(fSlider?.value || 85) / 100;
       const blurVal = Number(blurSlider?.value || 24);
 
       this.state.settings.bubbleOpacity = bOp;
+      this.state.settings.bubbleSizePx = bSize;
       this.state.settings.frameOpacity = fOp;
       this.state.settings.glassmorphismBlurRadius = blurVal;
 
+      if (page.querySelector('#fb-in-val-bubble-size')) page.querySelector('#fb-in-val-bubble-size').textContent = `${bSize}px`;
       if (page.querySelector('#fb-in-val-bubble-opacity')) page.querySelector('#fb-in-val-bubble-opacity').textContent = `${Math.round(bOp * 100)}%`;
       if (page.querySelector('#fb-in-val-frame-opacity')) page.querySelector('#fb-in-val-frame-opacity').textContent = `${Math.round(fOp * 100)}%`;
       if (page.querySelector('#fb-in-val-blur')) page.querySelector('#fb-in-val-blur').textContent = `${blurVal}px`;
@@ -2609,14 +2629,19 @@ export class BrowserShell {
     };
 
     bSlider?.addEventListener('input', updatePreview);
+    sizeSlider?.addEventListener('input', updatePreview);
     fSlider?.addEventListener('input', updatePreview);
     blurSlider?.addEventListener('input', updatePreview);
 
     page.querySelector('.fb-in-reset-transparency-btn')?.addEventListener('click', () => {
       if (bSlider) bSlider.value = '88';
+      if (sizeSlider) sizeSlider.value = '64';
       if (fSlider) fSlider.value = '85';
       if (blurSlider) blurSlider.value = '24';
       updatePreview();
+      this.persistSettings();
+      this.overlayBridge?.setBubbleSize?.(64);
+      this.overlayBridge?.setBubbleOpacity?.(0.88);
     });
 
     page.querySelector('.fb-in-save-btn')?.addEventListener('click', async () => {
@@ -2678,9 +2703,19 @@ export class BrowserShell {
     bindToggle('#fb-in-set-restore-session', (on) => { this.state.settings.restoreSessionOnLaunch = on; });
     bindToggle('#fb-in-set-floating-default', (on) => { this.state.settings.floatingEnabledByDefault = on; });
 
-    // Transparency sliders already preview live on 'input'; persist the
-    // final value once the user releases the handle ('change').
-    bSlider?.addEventListener('change', () => this.persistSettings());
+    // Transparency/size sliders already preview live on 'input'; persist
+    // the final value once the user releases the handle ('change'). Bubble
+    // size and opacity are also pushed to the native desktop bubble so the
+    // real always-on-top overlay window resizes/fades live, not just the
+    // in-page preview bubble.
+    bSlider?.addEventListener('change', () => {
+      this.persistSettings();
+      this.overlayBridge?.setBubbleOpacity?.(this.state.settings.bubbleOpacity);
+    });
+    sizeSlider?.addEventListener('change', () => {
+      this.persistSettings();
+      this.overlayBridge?.setBubbleSize?.(this.state.settings.bubbleSizePx);
+    });
     fSlider?.addEventListener('change', () => this.persistSettings());
     blurSlider?.addEventListener('change', () => this.persistSettings());
 
@@ -3993,6 +4028,12 @@ export class BrowserShell {
     scrim.className = 'fb-dropdown-scrim';
     scrim.setAttribute('aria-label', 'Close menu');
     scrim.addEventListener('click', onClose);
+    // A right-click (or long-press context menu) anywhere outside must
+    // dismiss the open menu too - exactly like native browser menus.
+    scrim.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      onClose(e);
+    });
     root.appendChild(scrim);
     return scrim;
   }
@@ -4401,9 +4442,14 @@ export class BrowserShell {
     scrim.type = 'button';
     scrim.className = 'fb-side-drawer-scrim';
     scrim.setAttribute('aria-label', 'Close Yayra menu');
-    scrim.addEventListener('click', () => {
+    const closeDrawer = () => {
       this.state.isSideDrawerOpen = false;
       this.render();
+    };
+    scrim.addEventListener('click', closeDrawer);
+    scrim.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      closeDrawer();
     });
 
     const drawer = document.createElement('div');
@@ -5726,14 +5772,20 @@ export class BrowserShell {
       document.body.appendChild(bubble);
     }
 
-    // Update opacity, badge, loading pulse
+    // Update size, opacity, badge, loading pulse. Size is user-adjustable
+    // from Settings > Floating Behavior ("Floating Bubble Size") and the
+    // inner logo scales proportionally with it.
     const hasLoadingTab = this.state.tabs.some((t) => t.isLoading);
     const bubbleOpacity = this.state.settings.bubbleOpacity || 0.88;
+    const bubbleSize = Math.max(40, Math.min(120, Number(this.state.settings.bubbleSizePx) || 64));
+    const logoSize = Math.round(bubbleSize * 0.58);
     bubble.style.opacity = String(bubbleOpacity);
+    bubble.style.width = `${bubbleSize}px`;
+    bubble.style.height = `${bubbleSize}px`;
 
     bubble.innerHTML = `
       ${hasLoadingTab ? '<div class="yayra-bubble-loading-ring"></div>' : ''}
-      <div style="width:34px; height:34px; display:flex; align-items:center; justify-content:center; pointer-events:none;">
+      <div style="width:${logoSize}px; height:${logoSize}px; display:flex; align-items:center; justify-content:center; pointer-events:none;">
         ${Icons.officialOrb}
       </div>
       <span class="yayra-circle-badge" style="position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; padding:0 4px; font-size:10px; border-radius:9px; background:var(--fb-accent-primary); color:#ffffff; font-weight:700; display:flex; align-items:center; justify-content:center;">
@@ -5919,13 +5971,21 @@ export class BrowserShell {
     const scrim = document.createElement('button');
     scrim.type = 'button';
     scrim.className = 'fb-dropdown-scrim';
-    scrim.dataset.tabCtx = 'true';
+    scrim.setAttribute('data-tab-ctx', 'true');
     scrim.setAttribute('aria-label', 'Close menu');
-    scrim.addEventListener('click', () => scrim.remove());
-    scrim.addEventListener('contextmenu', (e) => { e.preventDefault(); scrim.remove(); });
 
     const menu = document.createElement('div');
     menu.className = 'fb-tab-context-menu';
+
+    // Clicking/tapping OR right-clicking anywhere outside the menu must
+    // dismiss BOTH the scrim and the menu (previously only the scrim was
+    // removed, stranding the menu on screen forever).
+    const dismiss = () => {
+      scrim.remove();
+      menu.remove();
+    };
+    scrim.addEventListener('click', dismiss);
+    scrim.addEventListener('contextmenu', (e) => { e.preventDefault(); dismiss(); });
     const canCloseOthers = this.state.tabs.length > 1;
     const tabIndex = this.state.tabs.findIndex((t) => t.id === tab.id);
     const canCloseRight = tabIndex > -1 && tabIndex < this.state.tabs.length - 1;
@@ -6320,6 +6380,9 @@ export class BrowserShell {
       if (this.state.settings.bubbleOpacity !== undefined) {
         this.rootElement.style.setProperty('--fb-bubble-opacity', String(this.state.settings.bubbleOpacity));
       }
+      if (this.state.settings.bubbleSizePx !== undefined) {
+        this.rootElement.style.setProperty('--fb-bubble-size', `${this.state.settings.bubbleSizePx}px`);
+      }
       if (this.state.settings.frameOpacity !== undefined) {
         this.rootElement.style.setProperty('--fb-frame-opacity', String(this.state.settings.frameOpacity));
       }
@@ -6509,6 +6572,12 @@ export class BrowserShell {
     }
     // Esc: Close Overlays
     else if (e.key === 'Escape') {
+      // Tab-strip right-click menu lives outside render() state - remove
+      // it (and its scrim) directly.
+      if (typeof document !== 'undefined') {
+        document.body.querySelector('.fb-tab-context-menu')?.remove();
+        document.body.querySelector('.fb-dropdown-scrim[data-tab-ctx]')?.remove();
+      }
       if (this.state.isRadialLauncherOpen) {
         this.closeRadialLauncher();
       }

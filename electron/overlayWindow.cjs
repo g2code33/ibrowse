@@ -410,6 +410,44 @@ function createOverlayBridge({
     return next;
   }
 
+  // Live-resizes the floating bubble (user-adjustable from Settings).
+  // The bubble HTML renders the logo at 100vw x 100vh, so resizing the
+  // window is all that's needed - no reload.
+  function setBubbleSize(size) {
+    const px = Math.max(40, Math.min(160, Math.round(Number(size)))) || 64;
+    const next = overlayStore.save({ size: px });
+    if (overlayWin && !overlayWin.isDestroyed()) {
+      try {
+        if (typeof overlayWin.setBounds === 'function') {
+          const [x, y] = overlayWin.getPosition();
+          overlayWin.setBounds({ x, y, width: px, height: px });
+        } else {
+          destroyOverlayWindow();
+          ensureOverlayWindow();
+        }
+      } catch {
+        // Worst case the new size applies on next launch via the store.
+      }
+    }
+    return next;
+  }
+
+  // Live-updates the bubble's opacity by re-rendering its data-URL HTML
+  // with the new value baked in.
+  function setBubbleOpacity(opacity) {
+    const raw = Number(opacity);
+    const val = Number.isFinite(raw) ? Math.max(0.2, Math.min(1, raw)) : 0.92;
+    const next = overlayStore.save({ opacity: val });
+    if (overlayWin && !overlayWin.isDestroyed()) {
+      try {
+        overlayWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(next))}`);
+      } catch {
+        // Applied on next launch via the store.
+      }
+    }
+    return next;
+  }
+
   function setOverlayAllApps(enabled) {
     const next = overlayStore.save({ overlayAllApps: Boolean(enabled) });
     if (overlayWin && !overlayWin.isDestroyed()) {
@@ -439,6 +477,8 @@ function createOverlayBridge({
   ipcMain.handle('yayra:overlay-set-enabled', (_e, enabled) => setEnabled(enabled));
   ipcMain.handle('yayra:overlay-set-launch-at-startup', (_e, enabled) => setLaunchAtStartup(enabled));
   ipcMain.handle('yayra:overlay-set-overlay-all-apps', (_e, enabled) => setOverlayAllApps(enabled));
+  ipcMain.handle('yayra:overlay-set-bubble-size', (_e, size) => setBubbleSize(size));
+  ipcMain.handle('yayra:overlay-set-bubble-opacity', (_e, opacity) => setBubbleOpacity(opacity));
   ipcMain.on('yayra:overlay-restore', () => restoreMainWindow());
   // Single bubble click: toggle the floating mini browser (independent of
   // the main window). Right-click: quick menu with full-browser/quit.
@@ -478,6 +518,8 @@ function createOverlayBridge({
     setEnabled,
     setLaunchAtStartup,
     setOverlayAllApps,
+    setBubbleSize,
+    setBubbleOpacity,
     initializeOnStartup,
     applyLoginItemSettings
   };

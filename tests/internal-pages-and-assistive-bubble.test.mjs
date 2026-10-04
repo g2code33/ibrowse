@@ -572,3 +572,78 @@ test('Settings: "system" theme resolves via prefers-color-scheme and falls back 
   shell.state.settings.theme = 'light';
   assert.equal(shell.resolveEffectiveTheme(), 'light', 'explicit prefs pass through untouched');
 });
+
+test('Settings: Floating Bubble Size slider previews live, persists on release, and pushes to the native bubble', async () => {
+  const container = document.createElement('div');
+  const storage = new MemoryPersistenceAdapter();
+  const settingsRepo = new SettingsRepository(storage);
+  const overlayCalls = [];
+  const overlayBridge = {
+    getSettings: async () => ({ enabled: true, launchAtStartup: true, overlayAllApps: true, size: 64 }),
+    setEnabled: async () => ({}),
+    setLaunchAtStartup: async () => ({}),
+    setOverlayAllApps: async () => ({}),
+    setBubbleSize: (px) => { overlayCalls.push(['size', px]); return Promise.resolve({ size: px }); },
+    setBubbleOpacity: (op) => { overlayCalls.push(['opacity', op]); return Promise.resolve({ opacity: op }); }
+  };
+
+  // BrowserShell discovers the overlay bridge via window.yayra.overlay
+  // (the Electron preload surface) - install a fake one for this test.
+  const prevYayra = globalThis.window.yayra;
+  globalThis.window.yayra = { ...(prevYayra || {}), overlay: overlayBridge };
+
+  try {
+    const shell = new BrowserShell({ container, isMobile: false, settingsRepo });
+    await shell.initialize();
+    shell.render(container);
+    shell.navigateActiveTab('yayra://settings');
+
+    const slider = container.querySelector('#fb-in-bubble-size');
+    assert.ok(slider, 'bubble size slider must exist in settings');
+
+    // Live preview on input
+    slider.value = '96';
+    slider.dispatchEvent({ type: 'input', target: slider });
+    assert.equal(shell.state.settings.bubbleSizePx, 96, 'size state updates live while dragging');
+    const label = container.querySelector('#fb-in-val-bubble-size');
+    assert.equal(label.textContent, '96px', 'value label tracks the slider');
+
+    // Release persists + pushes to the native overlay bubble
+    slider.dispatchEvent({ type: 'change', target: slider });
+    assert.deepEqual(overlayCalls.at(-1), ['size', 96], 'native desktop bubble is resized on release');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const persisted = await settingsRepo.getSettings();
+    assert.equal(persisted.bubbleSizePx, 96, 'size persisted without pressing Save');
+  } finally {
+    if (prevYayra === undefined) delete globalThis.window.yayra;
+    else globalThis.window.yayra = prevYayra;
+  }
+});
+
+test('Tab right-click menu: clicking or right-clicking anywhere else removes BOTH the menu and its scrim', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    settingsRepo: new SettingsRepository(new MemoryPersistenceAdapter())
+  });
+  await shell.initialize();
+  shell.render(container);
+
+  const tab = shell.getActiveTab();
+  shell.renderTabContextMenu(100, 100, tab);
+  assert.ok(document.body.querySelector('.fb-tab-context-menu'), 'menu opens');
+  assert.ok(document.body.querySelector('[data-tab-ctx]'), 'scrim covers the rest of the screen');
+
+  // Tap anywhere else (hits the scrim) -> menu AND scrim both disappear.
+  document.body.querySelector('[data-tab-ctx]').click();
+  assert.equal(document.body.querySelector('.fb-tab-context-menu'), null, 'menu is gone');
+  assert.equal(document.body.querySelector('[data-tab-ctx]'), null, 'scrim is gone');
+
+  // Right-clicking elsewhere dismisses too.
+  shell.renderTabContextMenu(100, 100, tab);
+  document.body.querySelector('[data-tab-ctx]')
+    .dispatchEvent({ type: 'contextmenu', preventDefault: () => {} });
+  assert.equal(document.body.querySelector('.fb-tab-context-menu'), null, 'menu gone after outside right-click');
+  assert.equal(document.body.querySelector('[data-tab-ctx]'), null, 'scrim gone after outside right-click');
+});

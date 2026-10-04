@@ -23,39 +23,46 @@ async function main() {
   }
   const sourceBuffer = await readFile(sourcePath);
   const source = decodePng(sourceBuffer);
+  // The raw brand canvas carries large transparent margins (the artwork
+  // only covers ~77% x ~66% of it, with a big empty band at the top), which
+  // made the installed app icon look tiny on desktop docks, Android/iOS
+  // home screens and PWA launchers. Crop to the opaque artwork and
+  // re-center it on a square canvas with a slim 4% margin so the logo
+  // fills ~92% of every generated icon. source.png itself is kept as-is.
+  const iconSource = cropToContent(source, 0.04);
   const expected = new Map();
   expected.set('assets/brand/source.png', encodePng(source));
   for (const size of pngSizes) {
-    const png = encodePng(resizeNearest(source, size));
+    const png = encodePng(resizeNearest(iconSource, size));
     if (size === 16) expected.set('public/favicon-16x16.png', png);
     if (size === 32) expected.set('public/favicon-32x32.png', png);
     if (size === 192) expected.set('public/icons/icon-192.png', png);
     if (size === 512) expected.set('public/icons/icon-512.png', png);
   }
-  expected.set('public/apple-touch-icon.png', encodePng(resizeNearest(source, 180)));
+  expected.set('public/apple-touch-icon.png', encodePng(resizeNearest(iconSource, 180)));
   for (const size of hicolorSizes) {
-    expected.set(`build/icons/hicolor/${size}x${size}/apps/yayra.png`, encodePng(resizeNearest(source, size)));
+    expected.set(`build/icons/hicolor/${size}x${size}/apps/yayra.png`, encodePng(resizeNearest(iconSource, size)));
     // electron-builder's Linux "set" icon resolver only reads a flat
     // directory of `<size>x<size>.png` files (see app-builder-lib's
     // iconConverter collectIconsFromDir) — it does not walk the freedesktop
     // hicolor/<size>x<size>/apps/ hierarchy above. Ship both so the .deb
     // installs the full hicolor icon theme AND electron-builder packages
     // every resolution into /usr/share/icons/hicolor/<size>x<size>/apps/.
-    expected.set(`build/icons/linux-set/${size}x${size}.png`, encodePng(resizeNearest(source, size)));
+    expected.set(`build/icons/linux-set/${size}x${size}.png`, encodePng(resizeNearest(iconSource, size)));
   }
-  const ico = makeIco([16, 24, 32, 48, 64, 96, 128, 256].map((size) => ({ size, png: encodePng(resizeNearest(source, size)) })));
+  const ico = makeIco([16, 24, 32, 48, 64, 96, 128, 256].map((size) => ({ size, png: encodePng(resizeNearest(iconSource, size)) })));
   expected.set('build/icons/icon.ico', ico);
   expected.set('build/icons/installer.ico', ico);
   expected.set('build/icons/uninstaller.ico', ico);
   for (const [density, size] of androidTargets) {
-    expected.set(`native-assets/android/${density}/ic_launcher.png`, encodePng(resizeNearest(source, size)));
+    expected.set(`native-assets/android/${density}/ic_launcher.png`, encodePng(resizeNearest(iconSource, size)));
   }
   const iosContents = { images: [], info: { author: 'xcode', version: 1 } };
   for (const base of iosSizes) {
     const pixels = Math.round(base * (base === 1024 ? 1 : 2));
     const filename = `AppIcon-${String(base).replace('.', '_')}@${base === 1024 ? '1' : '2'}x.png`;
     iosContents.images.push({ size: `${base}x${base}`, idiom: base === 1024 ? 'ios-marketing' : 'iphone', scale: base === 1024 ? '1x' : '2x', filename });
-    expected.set(`native-assets/ios/AppIcon.appiconset/${filename}`, encodePng(resizeNearest(source, pixels)));
+    expected.set(`native-assets/ios/AppIcon.appiconset/${filename}`, encodePng(resizeNearest(iconSource, pixels)));
   }
   expected.set('native-assets/ios/AppIcon.appiconset/Contents.json', Buffer.from(`${JSON.stringify(iosContents, null, 2)}\n`));
 
@@ -88,6 +95,39 @@ async function main() {
   } else {
     console.log('branding verification passed: generated icons match assets/brand/source.png');
   }
+}
+
+/**
+ * Crops a decoded RGBA image to its opaque bounding box (alpha > 8) and
+ * re-centers the artwork on a square canvas with `margin` (fraction of the
+ * artwork's larger side) of transparent padding on every edge. Returns the
+ * original image untouched when it has no visible pixels.
+ */
+function cropToContent(image, margin = 0.04) {
+  const { width, height, data } = image;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] > 8) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return image;
+  const contentW = maxX - minX + 1;
+  const contentH = maxY - minY + 1;
+  const side = Math.ceil(Math.max(contentW, contentH) * (1 + margin * 2));
+  const out = Buffer.alloc(side * side * 4);
+  const offX = Math.round((side - contentW) / 2);
+  const offY = Math.round((side - contentH) / 2);
+  for (let y = 0; y < contentH; y += 1) {
+    const srcStart = ((minY + y) * width + minX) * 4;
+    data.copy(out, ((offY + y) * side + offX) * 4, srcStart, srcStart + contentW * 4);
+  }
+  return { width: side, height: side, data: out };
 }
 
 function makeIco(images) {

@@ -408,3 +408,63 @@ test('overlayWindow: bubble falls back to a bare monogram (still no circle) when
   assert.ok(!html.includes('radial-gradient'), 'fallback has no circular gradient either');
   assert.ok(!html.includes('border-radius:50%'), 'fallback has no circle clipping either');
 });
+
+test('overlayWindow: setBubbleSize live-resizes the bubble window and persists the size', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  FakeBrowserWindow.prototype.setBounds = function setBounds(bounds) { this.bounds = bounds; };
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.ensureOverlayWindow();
+  const next = bridge.setBubbleSize(96);
+
+  assert.equal(next.size, 96, 'new size is returned');
+  assert.equal(overlayStore.load().size, 96, 'new size is persisted for the next launch');
+  assert.deepEqual(
+    { width: instances[0].bounds.width, height: instances[0].bounds.height },
+    { width: 96, height: 96 },
+    'live window is resized in place'
+  );
+
+  // Values are clamped to a sane range so the bubble can never vanish.
+  assert.equal(bridge.setBubbleSize(4).size, 40);
+  assert.equal(bridge.setBubbleSize(4000).size, 160);
+  assert.equal(bridge.setBubbleSize('garbage').size, 64);
+});
+
+test('overlayWindow: setBubbleOpacity re-renders the bubble with the new opacity and persists it', () => {
+  const dir = makeTempDir();
+  const overlayStore = createOverlayStore({ fs, userDataDir: dir });
+  const { FakeBrowserWindow, instances } = makeFakeBrowserWindowClass();
+  const bridge = createOverlayBridge({
+    BrowserWindow: FakeBrowserWindow,
+    app: fakeApp(),
+    ipcMain: fakeIpcMain(),
+    screen: fakeScreen(),
+    path,
+    preloadPath: '/fake/overlayPreload.cjs',
+    overlayStore,
+    getMainWindow: () => null
+  });
+
+  bridge.ensureOverlayWindow();
+  const next = bridge.setBubbleOpacity(0.5);
+
+  assert.equal(next.opacity, 0.5);
+  assert.equal(overlayStore.load().opacity, 0.5, 'opacity persisted');
+  const html = decodeURIComponent(instances[0].loadedUrl.replace('data:text/html;charset=utf-8,', ''));
+  assert.ok(html.includes('opacity:0.5'), 'bubble HTML reloaded with the new opacity baked in');
+
+  assert.equal(bridge.setBubbleOpacity(0).opacity, 0.2, 'clamped low');
+  assert.equal(bridge.setBubbleOpacity(7).opacity, 1, 'clamped high');
+});
