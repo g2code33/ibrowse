@@ -62,11 +62,19 @@ if (process.platform === 'linux') {
   app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
   const display = typeof process.env.DISPLAY === 'string' ? process.env.DISPLAY.trim() : '';
   const waylandDisplay = typeof process.env.WAYLAND_DISPLAY === 'string' ? process.env.WAYLAND_DISPLAY.trim() : '';
-  // An explicit --ozone-platform on the command line (ours after the
-  // relaunch, or the user's own choice) is always respected - it is
-  // also what makes this a one-shot instead of a relaunch loop.
-  const argvHasOzonePlatform = process.argv.some((arg) => typeof arg === 'string' && arg.startsWith('--ozone-platform='));
-  if (!argvHasOzonePlatform && waylandDisplay !== '' && display !== '') {
+  // An explicit --ozone-platform on the command line (the /usr/bin/yayra
+  // wrapper's, ours after the relaunch, or the user's own choice) is
+  // always respected - it is also what makes this a one-shot instead of
+  // a relaunch loop.
+  const argvHasOzonePlatform = process.argv.some((arg) => typeof arg === 'string' && arg.startsWith('--ozone-platform='))
+    || app.commandLine.hasSwitch('ozone-platform');
+  // Belt-and-suspenders loop breaker: if we relaunched within the last
+  // 30s and STILL cannot see the switch, something strips argv on this
+  // setup - stay on the native backend rather than relaunch forever.
+  const relaunchStampPath = path.join(app.getPath('userData'), 'x11-relaunch-stamp');
+  let recentlyRelaunched = false;
+  try { recentlyRelaunched = (Date.now() - fs.statSync(relaunchStampPath).mtimeMs) < 30000; } catch { /* no stamp */ }
+  if (!argvHasOzonePlatform && !recentlyRelaunched && waylandDisplay !== '' && display !== '') {
     relaunchingForX11 = true;
     const relaunchOpts = { args: process.argv.slice(1).concat(['--ozone-platform=x11']) };
     // AppImage: relaunch the AppImage itself, not the binary inside the
@@ -75,8 +83,19 @@ if (process.platform === 'linux') {
       relaunchOpts.execPath = process.env.APPIMAGE;
     }
     console.log('[yayra] Wayland session with XWayland detected - relaunching once with --ozone-platform=x11 so the bubble can move and stay above every app');
-    app.relaunch(relaunchOpts);
-    app.exit(0);
+    try {
+      fs.mkdirSync(app.getPath('userData'), { recursive: true });
+      fs.writeFileSync(relaunchStampPath, String(Date.now()));
+    } catch { /* loop breaker unavailable - argv check still guards */ }
+    // IMPORTANT: app.exit() BEFORE 'ready' can tear the process down
+    // without ever spawning the relauncher (observed in the field: the
+    // relaunch message printed, then nothing started). The documented
+    // relaunch-then-exit pattern runs after 'ready', so wait for it -
+    // the rest of startup is skipped via relaunchingForX11.
+    app.whenReady().then(() => {
+      app.relaunch(relaunchOpts);
+      app.exit(0);
+    });
   } else if (display === '') {
     console.warn('[yayra] no $DISPLAY - staying on the native backend; bubble drag/topmost may be limited on native Wayland');
   }
@@ -206,6 +225,9 @@ function createAppModeWindow(url) {
 }
 
 app.whenReady().then(async () => {
+  // Exiting to come back on the x11 backend: build nothing in this
+  // doomed process - the relaunch handler registered above takes over.
+  if (relaunchingForX11) return;
   if (!isPrimaryInstance) return;
 
   // Remove the File/Edit/View/Window menu block entirely (Windows/Linux -

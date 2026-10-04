@@ -1,1 +1,22 @@
-../../opt/yayra/yayra
+#!/bin/sh
+# Yayra launcher.
+#
+# On Wayland desktops the Electron browser process picks its windowing
+# backend before any app code runs, and native Wayland refuses both
+# programmatic window moves and always-on-top - which breaks the
+# floating bubble AND (with a partial in-app switch) used to crash the
+# GPU process so nothing ever painted. Deciding here, before Electron
+# starts, is the only race-free place: when the session is Wayland and
+# XWayland is reachable, launch straight onto the x11 backend.
+#
+# An explicit --ozone-platform=... argument always wins.
+BIN="/opt/yayra/yayra"
+for arg in "$@"; do
+  case "$arg" in
+    --ozone-platform=*) exec "$BIN" "$@" ;;
+  esac
+done
+if [ -n "$WAYLAND_DISPLAY" ] && [ -n "$DISPLAY" ]; then
+  exec "$BIN" --ozone-platform=x11 "$@"
+fi
+exec "$BIN" "$@"
