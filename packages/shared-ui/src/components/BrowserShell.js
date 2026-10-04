@@ -896,6 +896,10 @@ export class BrowserShell {
     // celebrate with the quick Yayra-orb animation + the freshly
     // installed version number.
     this.maybeShowUpdateSplash();
+
+    // Chrome-style live pages: internal data pages keep refreshing
+    // themselves in the background (poll + cross-window storage events).
+    this.startBackgroundRefresh();
   }
 
   /**
@@ -5427,6 +5431,113 @@ export class BrowserShell {
     } catch { /* repo unavailable */ }
   }
 
+  /* -------------------------------------------------------------
+   * CHROME-STYLE LIVE PAGES
+   * -----------------------------------------------------------
+   * Internal pages (history, bookmarks, downloads, the new tab page's
+   * frequent sites, settings) keep themselves fresh in the background -
+   * exactly like Chrome, where chrome://history or the downloads page
+   * update live while you browse in another tab or window. Two signals:
+   *  - a light poll (few seconds) re-reads the per-profile stores;
+   *  - the browser's `storage` event gives INSTANT updates when another
+   *    Yayra window of the same profile writes (mini shell, second
+   *    window) - storage events only fire cross-window, never for this
+   *    window's own writes, which the poll covers.
+   * Repaints are smart, not blind: only when the data actually changed,
+   * only when a live-data page is visible, never over an open menu or
+   * modal, and never while the user is typing in an input. Real
+   * websites are NOT reloaded - like Chrome, background tabs stay alive
+   * untouched (pooled frames / native views).
+   * ----------------------------------------------------------- */
+  startBackgroundRefresh() {
+    if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
+    if (this._bgRefreshTimer) return;
+    this._bgRefreshTimer = window.setInterval(() => {
+      this.backgroundRefreshTick().catch(() => {});
+    }, 4000);
+    this._bgStorageListener = (e) => {
+      // Another same-profile window wrote shared state - sync right away.
+      if (e && e.key && !String(e.key).startsWith('yayra')) return;
+      this.backgroundRefreshTick().catch(() => {});
+    };
+    window.addEventListener('storage', this._bgStorageListener);
+  }
+
+  stopBackgroundRefresh() {
+    if (this._bgRefreshTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+      window.clearInterval(this._bgRefreshTimer);
+    }
+    this._bgRefreshTimer = null;
+    if (this._bgStorageListener && typeof window !== 'undefined') {
+      window.removeEventListener('storage', this._bgStorageListener);
+      this._bgStorageListener = null;
+    }
+  }
+
+  /** One background sync pass: re-read stores, repaint only on change. */
+  async backgroundRefreshTick() {
+    if (this._bgRefreshBusy) return false;
+    this._bgRefreshBusy = true;
+    try {
+      const fresh = {};
+      if (this.historyRepo?.getEntries) {
+        try { fresh.history = await this.historyRepo.getEntries(100); } catch { /* keep current */ }
+      }
+      if (this.bookmarksRepo?.getAllBookmarks) {
+        try { fresh.bookmarks = await this.bookmarksRepo.getAllBookmarks(); } catch { /* keep current */ }
+      }
+      if (this.downloadsBridge?.list) {
+        try {
+          const { items, downloadRoot } = await this.downloadsBridge.list();
+          fresh.downloads = items || [];
+          fresh.downloadRoot = downloadRoot || null;
+        } catch { /* keep current */ }
+      }
+      if (this.settingsRepo?.getSettings) {
+        try { fresh.settings = await this.settingsRepo.getSettings(); } catch { /* keep current */ }
+      }
+
+      const snapshot = JSON.stringify([fresh.history, fresh.bookmarks, fresh.downloads, fresh.settings]);
+      if (snapshot === this._bgRefreshSnapshot) return false;
+      const isFirstPass = this._bgRefreshSnapshot === undefined;
+      this._bgRefreshSnapshot = snapshot;
+
+      if (fresh.history) this.state.historyItems = fresh.history;
+      if (fresh.bookmarks) this.state.bookmarksItems = fresh.bookmarks;
+      if (fresh.downloads) this.state.downloadsItems = fresh.downloads;
+      if (fresh.downloadRoot !== undefined) this.state.downloadRoot = fresh.downloadRoot;
+      if (fresh.settings) this.state.settings = { ...this.state.settings, ...fresh.settings };
+
+      // The very first pass just seeds the snapshot - initialize()
+      // already rendered this exact data.
+      if (!isFirstPass) this.maybeRepaintAfterBackgroundSync();
+      return true;
+    } finally {
+      this._bgRefreshBusy = false;
+    }
+  }
+
+  /** Repaint after a background sync ONLY when it's safe and useful. */
+  maybeRepaintAfterBackgroundSync() {
+    const tab = this.getActiveTab();
+    if (!tab) return false;
+    const url = String(tab.url || '');
+    const livePages = ['yayra://history', 'yayra://bookmarks', 'yayra://downloads', 'yayra://newtab'];
+    if (!livePages.some((p) => url === p || url.startsWith(`${p}?`))) return false;
+    // Never repaint over an open menu/modal/find bar - and never yank
+    // the cursor out from under someone typing (e.g. the history search).
+    if (this.hasBlockingOverlay()) return false;
+    if (typeof document !== 'undefined') {
+      const ae = document.activeElement;
+      const tag = ae && ae.tagName ? String(ae.tagName).toLowerCase() : '';
+      // A focused EMPTY input is fine (the new tab page auto-focuses its
+      // search box); only actual typed-in content blocks the repaint.
+      if ((tag === 'input' || tag === 'textarea') && String(ae.value || '').length > 0) return false;
+    }
+    this.render();
+    return true;
+  }
+
   /** The real bookmarks bar strip rendered under the toolbar. */
   renderBookmarksBar() {
     const bar = document.createElement('div');
@@ -9578,6 +9689,7 @@ export class BrowserShell {
       window.removeEventListener('keydown', this.boundKeyHandler);
     }
     this.stopBackgroundUpdateChecks();
+    this.stopBackgroundRefresh();
     if (this.webFrameLayer) {
       this.webFrameLayer.remove();
       this.webFrameLayer = null;

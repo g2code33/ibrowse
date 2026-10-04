@@ -222,6 +222,84 @@ test('In-Tab Internal Pages: frequent sites are built from REAL visits, most-vis
   assert.ok(container.querySelectorAll('.fb-newtab-shortcut').length > 0, 'tiles render once there is real browsing');
 });
 
+test('Live pages: background sync pulls fresh history/bookmarks into state and repaints visible data pages (Chrome-style)', async () => {
+  const container = document.createElement('div');
+  let historyEntries = [];
+  let bookmarks = [];
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    initialUrl: 'yayra://history',
+    historyRepo: { getEntries: async () => historyEntries, addEntry: async () => {} },
+    bookmarksRepo: { getAllBookmarks: async () => bookmarks, addBookmark: async () => {}, isBookmarked: async () => false }
+  });
+  await shell.initialize();
+  shell.render(container);
+
+  // First pass seeds the snapshot without a repaint.
+  await shell.backgroundRefreshTick();
+
+  // Another window of this profile browses + stars a page.
+  historyEntries = [{ id: 'h1', url: 'https://fresh.com', title: 'Fresh', visitCount: 1, lastVisitedAt: Date.now() }];
+  bookmarks = [{ id: 'b1', url: 'https://fresh.com', title: 'Fresh', addedAt: Date.now() }];
+
+  let rendered = 0;
+  const origRender = shell.render.bind(shell);
+  shell.render = (...args) => { rendered += 1; return origRender(...args); };
+
+  const changed = await shell.backgroundRefreshTick();
+  assert.equal(changed, true, 'tick reports the change');
+  assert.deepEqual(shell.state.historyItems.map((h) => h.url), ['https://fresh.com'], 'history synced in the background');
+  assert.deepEqual(shell.state.bookmarksItems.map((b) => b.url), ['https://fresh.com'], 'bookmarks synced in the background');
+  assert.equal(rendered, 1, 'visible yayra://history page repainted exactly once');
+
+  // Identical data again -> no state churn, NO repaint (no flicker).
+  const unchanged = await shell.backgroundRefreshTick();
+  assert.equal(unchanged, false, 'no-op when nothing changed');
+  assert.equal(rendered, 1, 'no repaint without a data change');
+
+  shell.destroy();
+});
+
+test('Live pages: background repaints never fire over menus/modals or while the user is typing', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    initialUrl: 'yayra://history',
+    historyRepo: { getEntries: async () => [], addEntry: async () => {} }
+  });
+  await shell.initialize();
+  shell.render(container);
+
+  // A real website tab is NEVER repainted (and never reloaded) by sync.
+  shell.getActiveTab().url = 'https://example.com';
+  assert.equal(shell.maybeRepaintAfterBackgroundSync(), false, 'web pages stay untouched, like Chrome');
+
+  shell.getActiveTab().url = 'yayra://history';
+  assert.equal(shell.maybeRepaintAfterBackgroundSync(), true, 'data page repaints when idle');
+
+  shell.state.isSideDrawerOpen = true;
+  assert.equal(shell.maybeRepaintAfterBackgroundSync(), false, 'open drawer blocks repaints');
+  shell.state.isSideDrawerOpen = false;
+
+  shell.state.activeModal = 'radial-customizer';
+  assert.equal(shell.maybeRepaintAfterBackgroundSync(), false, 'open modal blocks repaints');
+  shell.state.activeModal = null;
+
+  shell.destroy();
+});
+
+test('Live pages: the poller only starts where window.setInterval exists (no timer leaks in minimal environments)', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, isMobile: false });
+  await shell.initialize();
+  // The dom-shim window has no setInterval - the shell must notice and
+  // skip the poll instead of crashing or leaking a Node timer.
+  assert.equal(shell._bgRefreshTimer ?? null, null, 'no interval registered without window.setInterval');
+  shell.destroy();
+});
+
 test('Persistent Assistive Bubble: Present in DOM, reflects loading pulse, and preserves session on restore', async () => {
   const container = document.createElement('div');
   const shell = new BrowserShell({
