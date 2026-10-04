@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -12,13 +12,20 @@ const { createDownloadsStore } = require('./downloadsStore.cjs');
 const { createDownloadsBridge } = require('./downloadsBridge.cjs');
 const { createOverlayBridge } = require('./overlayWindow.cjs');
 const { createOverlayStore } = require('./overlayStore.cjs');
+const { createTrayController } = require('./tray.cjs');
 
 const CUSTOM_SCHEME = 'yayra';
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 let mainWindow;
 let overlayBridge = null;
 let webviewBridge = null;
+let trayController = null;
 let lastLoadError = null;
+
+// Boot launches (login items / XDG autostart) pass --yayra-autostart:
+// start the floating bubble + system tray ONLY, without popping the main
+// browser window over whatever the user is doing right after login.
+const isAutostartLaunch = process.argv.includes('--yayra-autostart');
 
 protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
@@ -59,7 +66,9 @@ app.whenReady().then(async () => {
   // the floating bubble, and re-running ipcMain.handle() for an existing
   // channel throws.
   registerIpcBridges();
-  createWindow();
+  const isSmokeStartup = process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1';
+  // Boot launch: bubble + tray only. Manual launch: full browser window.
+  if (!isAutostartLaunch || isSmokeStartup) createWindow();
 
   // The floating overlay bubble is intentionally started independently of
   // createWindow()/the main browser window - see electron/overlayWindow.cjs
@@ -90,8 +99,44 @@ app.whenReady().then(async () => {
       createMainWindow: () => createWindow()
     });
     overlayBridge.initializeOnStartup();
+
+    // System tray: the bubble overlays every app on the PC, so it is also
+    // visible and regulated from the OS notification area (enable/disable
+    // bubble, overlay-above-all-apps, start-at-login, open mini/full, quit).
+    trayController = createTrayController({
+      Tray,
+      Menu,
+      nativeImage,
+      app,
+      iconPath: resolveTrayIconPath(),
+      overlayStore,
+      overlayBridge,
+      getMainWindow: () => mainWindow,
+      createMainWindow: () => createWindow()
+    });
+    trayController.init();
+  }
+
+  // Safety net: a boot launch must NEVER run invisibly. If the user had
+  // disabled the bubble AND the platform has no tray, show the browser.
+  if (isAutostartLaunch && !isSmokeRun) {
+    const bubbleVisible = overlayBridge && overlayBridge.getOverlayWindow && overlayBridge.getOverlayWindow();
+    const trayVisible = trayController && trayController.getTray && trayController.getTray();
+    if (!bubbleVisible && !trayVisible) createWindow();
   }
 });
+
+function resolveTrayIconPath() {
+  const candidates = [
+    path.join(DIST_DIR, 'icons', 'icon-192.png'),
+    path.join(__dirname, '..', 'public', 'icons', 'icon-192.png'),
+    path.join(__dirname, '..', 'build', 'icons', 'hicolor', '32x32', 'apps', 'yayra.png')
+  ];
+  for (const candidate of candidates) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch { /* keep looking */ }
+  }
+  return null;
+}
 
 // The floating bubble + mini window keep Yayra alive in the background by
 // design (they are real windows, so 'window-all-closed' only fires once
@@ -192,6 +237,13 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    // Dark surface behind EVERYTHING. Electron's default window background
+    // is white, and every time the native page view hides/moves (menu
+    // drawer, dropdowns, modals, tab switches) the compositor exposes the
+    // window background for a frame or two - which users saw as a blank
+    // WHITE flash before the menu appeared. Matching the app's dark theme
+    // makes those frames invisible.
+    backgroundColor: '#101218',
     show: process.env.YAYRA_SMOKE !== '1' && process.env.IBROWSE_SMOKE !== '1',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

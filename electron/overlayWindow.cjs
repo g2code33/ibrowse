@@ -94,12 +94,15 @@ function createOverlayBridge({
     try {
       if (enabled) {
         const execPath = process.env.APPIMAGE || process.execPath;
+        // --yayra-autostart tells main.cjs this is a boot launch: start the
+        // bubble + tray only, WITHOUT popping the main browser window over
+        // whatever the user is doing right after login.
         const desktop = [
           '[Desktop Entry]',
           'Type=Application',
           'Name=Yayra',
           'Comment=Yayra floating browser bubble',
-          `Exec=${JSON.stringify(execPath)}`,
+          `Exec=${JSON.stringify(execPath)} --yayra-autostart`,
           'X-GNOME-Autostart-enabled=true',
           'Terminal=false'
         ].join('\n') + '\n';
@@ -115,7 +118,9 @@ function createOverlayBridge({
 
   function applyLoginItemSettings(enabled) {
     try {
-      app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
+      // args: boot launches carry --yayra-autostart so only the bubble +
+      // tray appear at login (never a surprise main window).
+      app.setLoginItemSettings({ openAtLogin: Boolean(enabled), args: ['--yayra-autostart'] });
     } catch (err) {
       // Not supported in some sandboxed/CI/Linux-without-autostart
       // environments - never fatal, just means this one convenience is

@@ -345,6 +345,13 @@ function createWebviewBridge({
     if (typeof view.webContents.setUserAgent === 'function') {
       view.webContents.setUserAgent(buildBrowserUserAgent());
     }
+    // Pre-paint background: Chromium's default surface is WHITE, which
+    // flashes whenever a view is created/hidden/resized inside Yayra's
+    // dark chrome. Pages paint their own background the moment they
+    // render, so this only affects the un-painted instants.
+    if (typeof view.setBackgroundColor === 'function') {
+      try { view.setBackgroundColor('#101218'); } catch { /* older electron */ }
+    }
     const entry = { view, lastUrl: null, tabId, hostWc, hostWin, isPrivate: Boolean(isPrivate) };
     views.set(key, entry);
     attachListeners(key, entry);
@@ -385,6 +392,29 @@ function createWebviewBridge({
 
   function setBounds(key, bounds) {
     withView(key, (view) => view.setBounds(sanitizeBounds(bounds)));
+  }
+
+  /**
+   * Snapshot the page WITHOUT touching its visibility/bounds. The renderer
+   * uses this to paint the still image UNDER its chrome BEFORE asking for
+   * the hide - eliminating the blank flash between "native view gone" and
+   * "snapshot painted" that the combined hide+capture round-trip had.
+   */
+  async function capture(key) {
+    const entry = views.get(key);
+    if (!entry) return undefined;
+    const wc = entry.view.webContents;
+    if (wc && typeof wc.capturePage === 'function') {
+      try {
+        const image = await wc.capturePage();
+        if (image && typeof image.toDataURL === 'function' && !(typeof image.isEmpty === 'function' && image.isEmpty())) {
+          return { snapshot: image.toDataURL() };
+        }
+      } catch (err) {
+        logger.error?.(`[yayra:webview] capturePage failed for ${key}`, err);
+      }
+    }
+    return undefined;
   }
 
   async function setVisible(key, visible, { capture = false } = {}) {
@@ -475,6 +505,7 @@ function createWebviewBridge({
   });
   ipcMain.handle('yayra:webview-set-bounds', (event, { tabId, bounds } = {}) => setBounds(viewKey(event, tabId), bounds));
   ipcMain.handle('yayra:webview-set-visible', (event, { tabId, visible, capture } = {}) => setVisible(viewKey(event, tabId), visible, { capture }));
+  ipcMain.handle('yayra:webview-capture', (event, { tabId } = {}) => capture(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-go-back', (event, { tabId } = {}) => goBack(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-go-forward', (event, { tabId } = {}) => goForward(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-reload', (event, { tabId } = {}) => reload(viewKey(event, tabId)));
@@ -528,7 +559,7 @@ function createWebviewBridge({
     destroyAll,
     destroyForWebContents,
     // Exposed for tests and for main.cjs lifecycle hooks only.
-    _internal: { views, ensureView, setBounds, setVisible, goBack, goForward, reload, stop, destroyView }
+    _internal: { views, ensureView, setBounds, setVisible, capture, goBack, goForward, reload, stop, destroyView }
   };
 }
 

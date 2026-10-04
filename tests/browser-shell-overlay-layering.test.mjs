@@ -258,3 +258,99 @@ test('a thrown update check is reported as an error state with feedback - not si
   assert.equal(notices.length, 1);
   assert.match(notices[0], /failed/i);
 });
+
+/* -----------------------------------------------------------------
+ * No-blank-flash ordering: with a capture-capable bridge the still
+ * image is captured and painted BEFORE the native surface hides.
+ * ----------------------------------------------------------------- */
+
+function installCaptureCapableWebview() {
+  const order = [];
+  const calls = { capture: [], setVisible: [] };
+  const fake = {
+    ensure: () => Promise.resolve({ handedOffToSystemBrowser: false }),
+    setBounds: () => Promise.resolve(),
+    capture: (tabId) => {
+      calls.capture.push(tabId);
+      order.push('capture');
+      return Promise.resolve({ snapshot: 'data:image/png;base64,LIVE-SNAPSHOT' });
+    },
+    setVisible: (tabId, visible, options) => {
+      calls.setVisible.push({ tabId, visible, options });
+      order.push(`setVisible:${visible}`);
+      return Promise.resolve();
+    },
+    goBack: () => Promise.resolve(),
+    goForward: () => Promise.resolve(),
+    reload: () => Promise.resolve(),
+    stop: () => Promise.resolve(),
+    destroy: () => Promise.resolve(),
+    onEvent: () => () => {}
+  };
+  globalThis.window.yayra = { webview: fake };
+  return { fake, calls, order, uninstall: () => { delete globalThis.window.yayra; } };
+}
+
+async function waitForCondition(cond, ms = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  return false;
+}
+
+test('no blank flash: drawer open captures the live page and paints the still BEFORE hiding the native view', async () => {
+  const { calls, order, uninstall } = installCaptureCapableWebview();
+  try {
+    const { container, shell } = await makeDesktopShellOnExternalPage();
+    const tabId = shell.getActiveTab().id;
+    calls.setVisible.length = 0;
+    calls.capture.length = 0;
+    order.length = 0;
+
+    shell.state.isSideDrawerOpen = true;
+    shell.render(container);
+
+    // Capture happens immediately, while the page is still visible.
+    assert.deepEqual(calls.capture, [tabId], 'capture requested for the active tab');
+    assert.equal(calls.setVisible.length, 0, 'native view NOT hidden yet - no blank gap');
+
+    // The hide follows only after the snapshot is painted (or the decode
+    // fail-safe elapses) - never before the capture.
+    assert.ok(await waitForCondition(() => calls.setVisible.some((c) => c.visible === false)),
+      'native view eventually hidden under the painted still');
+    assert.equal(order[0], 'capture', 'capture strictly precedes the hide');
+    assert.ok(order.indexOf('setVisible:false') > order.indexOf('capture'));
+
+    // Snapshot was stored and the placeholder img carries it.
+    const still = container.querySelector('.fb-page-snapshot-img');
+    assert.ok(still, 'still image placeholder rendered');
+    assert.ok(await waitForCondition(() => still.src === 'data:image/png;base64,LIVE-SNAPSHOT'),
+      'freshly captured snapshot painted into the slot');
+
+    // Closing the drawer restores the live page.
+    shell.state.isSideDrawerOpen = false;
+    shell.render(container);
+    assert.ok(calls.setVisible.some((c) => c.visible === true), 'page surface restored');
+  } finally {
+    uninstall();
+  }
+});
+
+test('no blank flash: a failing capture still hides the view via the fail-safe (never hangs)', async () => {
+  const { fake, calls, uninstall } = installCaptureCapableWebview();
+  fake.capture = () => Promise.reject(new Error('capture backend gone'));
+  try {
+    const { container, shell } = await makeDesktopShellOnExternalPage();
+    calls.setVisible.length = 0;
+
+    shell.state.isSideDrawerOpen = true;
+    shell.render(container);
+
+    assert.ok(await waitForCondition(() => calls.setVisible.some((c) => c.visible === false)),
+      'hide still happens when the capture fails');
+  } finally {
+    uninstall();
+  }
+});

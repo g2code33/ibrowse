@@ -343,6 +343,9 @@ test('overlayWindow: on Linux, enabling launch-at-startup writes an XDG autostar
   const contents = fs.readFileSync(autostartFile, 'utf8');
   assert.match(contents, /\[Desktop Entry\]/);
   assert.match(contents, /Exec=/);
+  // Boot launches must be bubble-only: the autostart entry carries the
+  // flag main.cjs uses to skip opening the main browser window at login.
+  assert.match(contents, /--yayra-autostart/);
 
   bridge.applyLoginItemSettings(false);
   assert.equal(fs.existsSync(autostartFile), false, 'disabling startup removes the entry');

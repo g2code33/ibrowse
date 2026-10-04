@@ -1549,11 +1549,34 @@ export class BrowserShell {
         this.nativeWebview.setVisible(tabId, true).catch(() => {});
         continue;
       }
-      // Hiding the ACTIVE tab because chrome needs to overlay it: ask the
-      // main process to snapshot the page first, then swap the still image
-      // into the placeholder slot so the page visually stays put under the
-      // chrome. (Hidden background tabs need no snapshot.)
+      // Hiding the ACTIVE tab because chrome needs to overlay it. Order
+      // matters to avoid a blank flash: FIRST snapshot the still-visible
+      // page and paint the still image into the slot, THEN hide the
+      // native surface - with a fail-safe so the hide can never hang on a
+      // slow/failed capture. (Hidden background tabs need no snapshot.)
       const wantsCapture = captureActive && tabId === activeTabId;
+      if (wantsCapture && typeof this.nativeWebview.capture === 'function') {
+        let hidden = false;
+        const hideNow = () => {
+          if (hidden) return;
+          hidden = true;
+          const r = this.nativeWebview.setVisible(tabId, false);
+          if (r && typeof r.catch === 'function') r.catch(() => {});
+        };
+        const failSafe = setTimeout(hideNow, 350);
+        this.nativeWebview.capture(tabId).then((res) => {
+          if (res && res.snapshot) {
+            this._pageSnapshots.set(tabId, res.snapshot);
+            this.applyPageSnapshot(tabId, () => { clearTimeout(failSafe); hideNow(); });
+          } else {
+            clearTimeout(failSafe);
+            hideNow();
+          }
+        }).catch(() => { clearTimeout(failSafe); hideNow(); });
+        continue;
+      }
+      // Legacy combined path (older preloads without capture()): the main
+      // process snapshots before zeroing bounds and returns the image.
       const result = this.nativeWebview.setVisible(tabId, false, wantsCapture ? { capture: true } : undefined);
       if (wantsCapture && result && typeof result.then === 'function') {
         result.then((res) => {
@@ -1573,12 +1596,36 @@ export class BrowserShell {
    * placeholder slot for a tab. Runs after the async capture resolves, and
    * only while chrome is actually overlaying the page.
    */
-  applyPageSnapshot(tabId) {
-    if (typeof document === 'undefined' || !this.hasBlockingOverlay()) return;
+  applyPageSnapshot(tabId, onPainted = null) {
+    const done = () => { if (typeof onPainted === 'function') onPainted(); };
+    if (typeof document === 'undefined' || !this.hasBlockingOverlay()) { done(); return; }
     const snapshot = this._pageSnapshots.get(tabId);
-    if (!snapshot) return;
-    const img = document.querySelector(`.fb-page-snapshot-img[data-tab-id="${tabId}"]`);
-    if (img && img.src !== snapshot) img.src = snapshot;
+    if (!snapshot) { done(); return; }
+    // Search the shell's own rendered tree first (works for the main
+    // window, the mini window, and detached test containers), falling
+    // back to the whole document.
+    let img = null;
+    for (const root of [this.viewportElement, this.rootElement, document]) {
+      if (!root || typeof root.querySelectorAll !== 'function') continue;
+      const stills = Array.from(root.querySelectorAll('.fb-page-snapshot-img') || []);
+      img = stills.find((el) => (el.dataset && el.dataset.tabId === tabId)
+        || (typeof el.getAttribute === 'function' && el.getAttribute('data-tab-id') === tabId)) || null;
+      if (img) break;
+    }
+    if (!img) { done(); return; }
+    if (img.src === snapshot) { done(); return; }
+    if (typeof onPainted === 'function') {
+      // Signal readiness only after the data-URL actually decodes and
+      // paints, so the native view hides UNDER an already-visible still.
+      let signalled = false;
+      const signal = () => { if (!signalled) { signalled = true; done(); } };
+      img.onload = () => { img.onload = null; signal(); };
+      setTimeout(signal, 250); // decode fail-safe
+      img.src = snapshot;
+      if (img.complete) signal();
+      return;
+    }
+    img.src = snapshot;
   }
 
   /**

@@ -29,6 +29,10 @@ const api = {
     ensure: (tabId, url, isPrivate = false) => ipcRenderer.invoke('yayra:webview-ensure', { tabId, url, isPrivate }),
     setBounds: (tabId, bounds) => ipcRenderer.invoke('yayra:webview-set-bounds', { tabId, bounds }),
     setVisible: (tabId, visible, options = {}) => ipcRenderer.invoke('yayra:webview-set-visible', { tabId, visible, capture: Boolean(options && options.capture) }),
+    // Snapshot the live page WITHOUT hiding it - lets the renderer paint
+    // the still image first and only then hide the native surface, so
+    // opening the menu/modals never flashes a blank frame.
+    capture: (tabId) => ipcRenderer.invoke('yayra:webview-capture', { tabId }),
     goBack: (tabId) => ipcRenderer.invoke('yayra:webview-go-back', { tabId }),
     goForward: (tabId) => ipcRenderer.invoke('yayra:webview-go-forward', { tabId }),
     reload: (tabId) => ipcRenderer.invoke('yayra:webview-reload', { tabId }),
