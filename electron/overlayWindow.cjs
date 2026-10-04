@@ -1043,7 +1043,29 @@ function createOverlayBridge({
       { type: 'separator' },
       { label: 'Quit Yayra', click: () => { try { app.quit(); } catch { /* already quitting */ } } }
     ];
-    Menu.buildFromTemplate(template).popup({ window: overlayWin });
+    const menu = Menu.buildFromTemplate(template);
+    // OUTSIDE-CLICK DISMISSAL: the bubble window is focusable:false by
+    // design (it must never steal focus from the app under it), but a
+    // native popup anchored to an unfocusable window never sees focus
+    // leave, so clicking anywhere else left the menu stuck open. Make
+    // the window focusable just for the popup's lifetime: a click
+    // anywhere else now blurs it, and blur closes the popup.
+    const onBlur = () => { try { menu.closePopup?.(overlayWin); } catch { /* popup already gone */ } };
+    try {
+      overlayWin.setFocusable?.(true);
+      overlayWin.focus?.();
+      overlayWin.once?.('blur', onBlur);
+    } catch { /* focus dance is best-effort */ }
+    menu.popup({
+      window: overlayWin,
+      // Fires on ANY close (item clicked, Esc, or the blur above) -
+      // restore the never-steal-focus contract and the topmost claim.
+      callback: () => {
+        try { overlayWin.removeListener?.('blur', onBlur); } catch { /* listener already gone */ }
+        try { overlayWin.setFocusable?.(false); } catch { /* window raced destruction */ }
+        assertTopmost(overlayWin);
+      }
+    });
   }
 
   function setEnabled(enabled) {

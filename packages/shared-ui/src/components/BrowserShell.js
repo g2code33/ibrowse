@@ -2060,6 +2060,9 @@ export class BrowserShell {
           if (res && res.snapshot) {
             this._pageSnapshots.set(tabId, res.snapshot);
             this.applyPageSnapshot(tabId, () => { clearTimeout(failSafe); hideNow(); });
+            // The tab switcher may already be on screen showing a stale
+            // or placeholder preview for this tab - paint the fresh one.
+            this.refreshTabSwitcherPreviews();
           } else {
             clearTimeout(failSafe);
             hideNow();
@@ -2075,12 +2078,39 @@ export class BrowserShell {
           if (res && res.snapshot) {
             this._pageSnapshots.set(tabId, res.snapshot);
             this.applyPageSnapshot(tabId);
+            this.refreshTabSwitcherPreviews();
           }
         }).catch(() => {});
       } else if (result && typeof result.catch === 'function') {
         result.catch(() => {});
       }
     }
+  }
+
+  /**
+   * Live-updates an OPEN tab-switcher's preview cards with the latest
+   * captured snapshots. The switcher renders before the async
+   * capturePage() of the active tab resolves, so without this the
+   * just-opened switcher would show a placeholder for the very page the
+   * user is looking at.
+   */
+  refreshTabSwitcherPreviews() {
+    if (this.state.activeModal !== 'tab-switcher' || typeof document === 'undefined') return;
+    const cards = document.querySelectorAll('.fb-mobile-tab-card');
+    if (!cards || typeof cards.forEach !== 'function') return;
+    cards.forEach((card) => {
+      const tabId = card.dataset?.tabId || card.getAttribute?.('data-tab-id');
+      const snapshot = tabId ? this._pageSnapshots.get(tabId) : null;
+      if (!snapshot) return;
+      const slot = card.querySelector('.fb-mobile-tab-preview');
+      if (!slot) return;
+      const img = slot.querySelector('.fb-tab-preview-img');
+      if (img) {
+        if (img.src !== snapshot) img.src = snapshot;
+      } else {
+        slot.innerHTML = `<img class="fb-tab-preview-img" src="${snapshot}" alt="" draggable="false" />`;
+      }
+    });
   }
 
   /**
@@ -6949,17 +6979,29 @@ export class BrowserShell {
         </div>
       </div>
       <div class="fb-modal-body fb-mobile-tabs-grid">
-        ${this.state.tabs.map((tab) => `
+        ${this.state.tabs.map((tab) => {
+          // Real page preview: the last capturePage() snapshot of this
+          // tab's native view (taken when overlays open, when switching
+          // away from a tab, and when this switcher opens). Tabs that
+          // were never on screen since launch fall back to an honest
+          // favicon + URL placeholder instead of a fake thumbnail.
+          const snapshot = this._pageSnapshots.get(tab.id);
+          return `
           <div class="fb-tab-card fb-mobile-tab-card ${tab.id === this.state.activeTabId ? 'active' : ''}" data-tab-id="${tab.id}">
             <div class="fb-mobile-tab-header">
               <span class="fb-mobile-tab-title">${this.getTabTitle(tab)}</span>
               <button class="fb-mobile-tab-close" data-tab-id="${tab.id}">${Icons.close}</button>
             </div>
-            <div class="fb-mobile-tab-preview">
-              <span class="fb-mobile-tab-url">${tab.url}</span>
+            <div class="fb-mobile-tab-preview fb-tab-card-preview">
+              ${snapshot
+                ? `<img class="fb-tab-preview-img" src="${snapshot}" alt="" draggable="false" />`
+                : `<span class="fb-tab-preview-placeholder">
+                     <span class="fb-tab-preview-favicon">${this.getTabFavicon(tab)}</span>
+                     <span class="fb-mobile-tab-url">${tab.url}</span>
+                   </span>`}
             </div>
-          </div>
-        `).join('')}
+          </div>`;
+        }).join('')}
       </div>
     `;
 
@@ -7597,6 +7639,20 @@ export class BrowserShell {
     const tab = this.state.tabs.find((t) => t.id === tabId);
     if (!tab) return;
 
+    // Snapshot the OUTGOING tab before it leaves the screen so the tab
+    // switcher can show a real preview of every recently-seen tab, not
+    // just the one that happened to be active when it opened.
+    const prevId = this.state.activeTabId;
+    if (prevId && prevId !== tabId
+      && this._nativeWebviewTabIds.has(prevId)
+      && this.nativeWebview && typeof this.nativeWebview.capture === 'function') {
+      try {
+        this.nativeWebview.capture(prevId).then((res) => {
+          if (res && res.snapshot) this._pageSnapshots.set(prevId, res.snapshot);
+        }).catch(() => { /* preview stays as-is */ });
+      } catch { /* preview stays as-is */ }
+    }
+
     this.state.activeTabId = tabId;
     this.state.urlInputValue = this.getDisplayUrl(tab.url);
     this.updateBookmarkState(tab.url);
@@ -7608,6 +7664,7 @@ export class BrowserShell {
     if (tabIndex === -1) return;
 
     this.destroyNativeWebview(tabId);
+    this._pageSnapshots.delete(tabId); // closed tab, dead preview
 
     const [closedTab] = this.state.tabs.splice(tabIndex, 1);
 

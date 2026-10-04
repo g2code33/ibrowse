@@ -62,6 +62,15 @@ function makeFakeBrowserWindowClass() {
     setAlwaysOnTop() {}
     setVisibleOnAllWorkspaces() {}
     setContentProtection() {}
+    setFocusable(flag) { (this.focusableCalls = this.focusableCalls || []).push(flag); }
+    once(event, cb) { (this._onceListeners = this._onceListeners || {})[event] = cb; }
+    removeListener(event, cb) {
+      if (this._onceListeners && this._onceListeners[event] === cb) delete this._onceListeners[event];
+    }
+    emitOnce(event, ...args) {
+      const cb = this._onceListeners && this._onceListeners[event];
+      if (cb) { delete this._onceListeners[event]; cb(...args); }
+    }
     setMovable(flag) { this.movable = flag; }
     setPosition(x, y) { this._position = [x, y]; }
     getPosition() { return this._position; }
@@ -89,10 +98,26 @@ function makeHarness({ cursor = { x: 500, y: 300 }, withMenu = false, screenshot
   const ipcMain = fakeIpcMain();
   const screenState = { cursor };
   const mainWindowCalls = [];
-  // Right-click menu capture (openBubbleMenu test).
+  // Right-click menu capture (openBubbleMenu tests). `menus` keeps the
+  // raw templates (item assertions); `menuObjects` exposes the fake menu
+  // instances (popup options + closePopup tracking for the dismissal test).
   const menus = [];
+  const menuObjects = [];
   const Menu = withMenu
-    ? { buildFromTemplate: (template) => { menus.push(template); return { popup: () => {} }; } }
+    ? {
+      buildFromTemplate: (template) => {
+        const menu = {
+          template,
+          popupOptions: null,
+          closeCalls: 0,
+          popup: (options) => { menu.popupOptions = options || null; },
+          closePopup: () => { menu.closeCalls += 1; }
+        };
+        menus.push(template);
+        menuObjects.push(menu);
+        return menu;
+      }
+    }
     : null;
   // Real-screenshot fakes: a capturer that returns one screen source and
   // a shell that records the reveal call. Files land in the temp dir.
@@ -134,7 +159,7 @@ function makeHarness({ cursor = { x: 500, y: 300 }, withMenu = false, screenshot
     Menu,
     ...screenshotDeps
   });
-  return { bridge, overlayStore, instances, ipcMain, screenState, mainWindowCalls, dir, menus, revealed };
+  return { bridge, overlayStore, instances, ipcMain, screenState, mainWindowCalls, dir, menus, menuObjects, revealed };
 }
 
 /* --------------------------- bubble HTML contract --------------------------- */
@@ -441,4 +466,34 @@ test('right-click menu: classic items restored - AI assistants submenu, Capture 
   assert.ok(labels.includes('Quit Yayra'));
   const sub = menus[0].find((item) => item.label === 'AI assistants').submenu.map((s) => s.label);
   assert.deepEqual(sub, ['Ask ChatGPT', 'Rephrase with Gemini', 'Claude Assistant', 'Perplexity Search']);
+});
+
+test('right-click menu: clicking anywhere ELSE dismisses it - focusable only for the popup lifetime', () => {
+  const { bridge, instances, menuObjects } = makeHarness({ withMenu: true });
+  bridge.ensureOverlayWindow();
+  const bubble = instances[0];
+
+  bridge.openBubbleMenu();
+  const menu = menuObjects[0];
+  assert.ok(menu, 'menu built');
+  assert.deepEqual(bubble.focusableCalls, [true], 'window made focusable so the popup can lose focus');
+  assert.ok(menu.popupOptions && typeof menu.popupOptions.callback === 'function', 'popup wired with a close callback');
+
+  // The user clicks anywhere else on screen -> the now-focusable window
+  // blurs -> the popup is told to close. (This was the stuck-menu bug:
+  // a popup anchored to a focusable:false window never saw focus leave.)
+  bubble.emitOnce('blur');
+  assert.equal(menu.closeCalls, 1, 'outside click closes the menu');
+
+  // Electron fires the popup callback on any close - the bubble must go
+  // back to never stealing focus.
+  menu.popupOptions.callback();
+  assert.deepEqual(bubble.focusableCalls, [true, false], 'never-steal-focus contract restored after close');
+
+  // Re-opening repeats the dance cleanly (no stale blur listeners).
+  bridge.openBubbleMenu();
+  const menu2 = menuObjects[1];
+  menu2.popupOptions.callback();
+  bubble.emitOnce('blur'); // listener was removed in the callback
+  assert.equal(menu2.closeCalls, 0, 'no ghost close after the menu already closed');
 });

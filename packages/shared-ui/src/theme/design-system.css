@@ -1360,10 +1360,54 @@ html {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px;
   font-size: 0.75rem;
   color: var(--fb-text-muted);
   text-align: center;
+  overflow: hidden;
+  position: relative;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+/* Real page snapshot (capturePage of the tab's native view). */
+.fb-tab-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  display: block;
+}
+
+/* Honest fallback for tabs never seen on screen yet: favicon + URL. */
+.fb-tab-preview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  max-width: 100%;
+}
+
+.fb-tab-preview-placeholder .fb-tab-preview-favicon {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+}
+
+.fb-tab-preview-placeholder .fb-tab-preview-favicon img,
+.fb-tab-preview-placeholder .fb-tab-preview-favicon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.fb-tab-preview-placeholder .fb-mobile-tab-url {
+  font-size: 0.7rem;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .fb-tabswitcher-footer {
