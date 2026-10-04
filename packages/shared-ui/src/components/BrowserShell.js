@@ -1087,7 +1087,9 @@ export class BrowserShell {
       tabsScroll.appendChild(tabEl);
     });
 
-    // New Tab "+" Button
+    // New Tab "+" Button - lives OUTSIDE the scrollable tab row, pinned
+    // right after it, so it NEVER scrolls out of sight no matter how many
+    // tabs are open (the tab row scrolls horizontally behind it).
     const newTabBtn = document.createElement('button');
     newTabBtn.className = 'fb-btn-newtab';
     newTabBtn.setAttribute('title', 'New Tab (Ctrl+T)');
@@ -1096,9 +1098,20 @@ export class BrowserShell {
     newTabBtn.addEventListener('click', () => {
       this.createNewTab();
     });
-    tabsScroll.appendChild(newTabBtn);
 
     tabStrip.appendChild(tabsScroll);
+    tabStrip.appendChild(newTabBtn);
+
+    // Keep the active tab visible inside the scrollable row (e.g. a tab
+    // just opened at the far end while many tabs are already open).
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        const activeEl = tabsScroll.querySelector?.('.fb-tab-item.active');
+        if (activeEl && typeof activeEl.scrollIntoView === 'function') {
+          activeEl.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+        }
+      });
+    }
 
     // REAL window controls for the frameless Electron window. The OS title
     // bar and menu block are removed (electron/main.cjs), so the tab strip

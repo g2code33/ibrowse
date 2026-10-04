@@ -501,7 +501,11 @@ html {
   align-items: flex-end;
   gap: 4px;
   overflow-x: auto;
-  max-width: calc(100% - 120px);
+  /* Take the available room between the brand and the pinned "+" button /
+     window controls, and ALLOW shrinking (min-width: 0) so the tabs inside
+     compress Chrome-style before any horizontal scrolling kicks in. */
+  flex: 1 1 auto;
+  min-width: 0;
   scrollbar-width: none;
 }
 .fb-tabs-scroll-container::-webkit-scrollbar {
@@ -557,6 +561,7 @@ html {
 
 .fb-tab-title {
   flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -591,6 +596,11 @@ html {
   border: none;
   color: var(--fb-text-secondary);
   display: flex;
+  /* Pinned sibling of the scrollable tab row: never shrinks away and
+     never scrolls out of sight, no matter how many tabs are open. */
+  flex-shrink: 0;
+  align-self: flex-end;
+  margin: 0 0 5px 6px;
   align-items: center;
   justify-content: center;
   cursor: pointer;
@@ -2270,6 +2280,20 @@ html {
   cursor: pointer;
   white-space: nowrap;
   transition: var(--fb-transition);
+  /* Chrome-style sizing: a tab is CAPPED at 220px (a long page title can
+     never produce a giant tab - the title ellipsizes instead), and as more
+     tabs open they all shrink together down to 76px before the row starts
+     scrolling horizontally. */
+  flex: 0 1 220px;
+  max-width: 220px;
+  min-width: 76px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.fb-tab-item .fb-tab-favicon,
+.fb-tab-item .fb-tab-close-btn {
+  flex-shrink: 0;
 }
 
 .fb-tab-item.active {

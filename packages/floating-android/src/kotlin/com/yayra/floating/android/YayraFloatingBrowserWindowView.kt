@@ -28,7 +28,7 @@ class YayraFloatingBrowserWindowView @JvmOverloads constructor(
         fun onMinimizeClicked()
         fun onMaximizeClicked()
         fun onCloseClicked()
-        fun onNavigateRequested(url: stringOrChar: String)
+        fun onNavigateRequested(url: String)
         fun onBackClicked()
         fun onForwardClicked()
         fun onReloadClicked()
