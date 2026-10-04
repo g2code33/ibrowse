@@ -1387,7 +1387,13 @@ function createOverlayBridge({
     // so explicitly commit the "launch at startup" default to the OS once,
     // rather than only taking effect after the user visits Settings.
     applyLoginItemSettings(settings.launchAtStartup);
-    if (settings.enabled) ensureOverlayWindow();
+    if (settings.enabled) {
+      ensureOverlayWindow();
+    } else {
+      // Not a bug, a persisted choice ("Hide bubble" / radial Hide) - but
+      // say so, because a missing bubble otherwise looks like a crash.
+      console.log('[yayra] floating bubble is disabled in overlay-settings.json - re-enable it in Settings (or the tray menu)');
+    }
   }
 
   ipcMain.handle('yayra:overlay-get-settings', () => overlayStore.load());
