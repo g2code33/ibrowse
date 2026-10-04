@@ -177,18 +177,55 @@ async function registerPwaUpdateHandler(config) {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
   try {
     const registration = await navigator.serviceWorker.register('./sw.js');
+
+    // Tell the freshly installed worker to take over. Without this the new
+    // version sits in "waiting" forever (reloads keep serving the OLD
+    // cache), which is why updates used to feel broken on web/PWA. Once it
+    // activates, the controllerchange listener below reloads exactly once.
+    const activateWaiting = (worker) => {
+      const target = worker || registration.waiting;
+      if (!target) return false;
+      try { target.postMessage({ type: 'SKIP_WAITING' }); } catch { return false; }
+      return true;
+    };
+    // Manual hook: the in-shell "Update" button calls this before its own
+    // reload so the new service worker actually takes effect.
+    window.__yayraApplyPwaUpdate = () => activateWaiting(null);
+
+    const announce = (worker) => {
+      if (config.pwa.reloadStrategy === 'auto') { activateWaiting(worker); return; }
+      const toast = document.getElementById('toast');
+      if (toast) toast.textContent = 'Update ready to reload.';
+      let ok = true;
+      try {
+        if (typeof window.confirm === 'function') {
+          ok = window.confirm('A new version of Yayra is ready. Reload now to update?');
+        }
+      } catch { /* blocked dialogs must not stall the update path */ }
+      if (ok) activateWaiting(worker);
+      // Declined: the waiting worker stays staged; the in-shell Update
+      // button (via __yayraApplyPwaUpdate) or the next visit applies it.
+    };
+
+    // A worker may already be stuck waiting from a previous visit.
+    if (registration.waiting && navigator.serviceWorker.controller) announce(registration.waiting);
     registration.addEventListener('updatefound', () => {
       const worker = registration.installing;
       if (!worker) return;
       worker.addEventListener('statechange', () => {
-        if (worker.state === 'installed' && navigator.serviceWorker.controller) {
-          const toast = document.getElementById('toast');
-          if (toast) toast.textContent = 'Update ready to reload.';
-          if (config.pwa.reloadStrategy === 'auto') reloadExactlyOnce(worker.scriptURL);
-        }
+        if (worker.state === 'installed' && navigator.serviceWorker.controller) announce(worker);
       });
     });
     navigator.serviceWorker.addEventListener('controllerchange', () => reloadExactlyOnce('controllerchange'));
+
+    // Yayra is a long-lived SPA: browsers only recheck sw.js on page
+    // navigations, so poll periodically and when the tab regains focus.
+    const recheck = () => { registration.update().catch(() => {}); };
+    const intervalMinutes = Math.min(Math.max(Number(config.checkIntervalMinutes) || 720, 15), 60);
+    setInterval(recheck, intervalMinutes * 60 * 1000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') recheck();
+    });
   } catch (err) {
     // Ignore worker registration errors in testing/non-HTTPS environments
   }

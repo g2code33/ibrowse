@@ -2535,71 +2535,146 @@ html {
 }
 
 /* Developer Advertisement Links Badge Showcase (Sleek & Non-Overshadowing) */
+/* Developer Sponsor cards: prominent glass cards (icon tile + name +
+   domain). Sized for readability + touch on web, PWA and Android. */
 .fb-dev-ad-showcase {
   display: flex;
-  flex-direction: row;
-  flex-wrap: nowrap;
+  flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  width: fit-content;
-  max-width: 100%;
-  overflow-x: auto;
-  margin: 0 auto 16px auto;
-  padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 30px;
-  backdrop-filter: blur(12px);
-  scrollbar-width: none;
+  gap: 12px;
+  width: min(100%, 880px);
+  margin: 0 auto 22px auto;
 }
 
-.fb-dev-ad-showcase::-webkit-scrollbar {
-  display: none;
+.fb-dev-ad-heading {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fb-text-muted);
+}
+
+.fb-dev-ad-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
 }
 
 .fb-dev-ad-card {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: max-content;
-  height: 32px;
-  padding: 0 10px;
+  gap: 12px;
+  min-height: 62px;
+  padding: 10px 18px 10px 12px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   cursor: pointer;
   position: relative;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   text-decoration: none;
 }
 
-.fb-dev-ad-card:hover {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.18);
+.fb-dev-ad-card:hover,
+.fb-dev-ad-card:focus-visible {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.12);
   border-color: rgba(6, 182, 212, 0.6);
-  box-shadow: 0 4px 16px rgba(6, 182, 212, 0.35);
+  box-shadow: 0 8px 24px rgba(6, 182, 212, 0.3);
+  outline: none;
+}
+
+.fb-dev-ad-icon-tile {
+  display: inline-flex;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .fb-dev-ad-icon {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 7px;
   object-fit: contain;
 }
 
+.fb-dev-ad-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
 .fb-dev-ad-label {
-  max-width: 150px;
+  max-width: 220px;
   overflow: hidden;
-  color: var(--fb-text-secondary);
-  font-size: 0.72rem;
+  color: var(--fb-text-primary);
+  font-size: 0.95rem;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.fb-dev-ad-domain {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--fb-text-muted);
+  font-size: 0.74rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Phones (Android/PWA): two generous touch-friendly columns; a trailing
+   odd card stretches across the full row. */
+@media (max-width: 600px) {
+  .fb-dev-ad-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .fb-dev-ad-card {
+    min-height: 68px;
+    padding: 10px 12px;
+  }
+
+  .fb-dev-ad-card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .fb-dev-ad-icon-tile {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+  }
+
+  .fb-dev-ad-icon {
+    width: 28px;
+    height: 28px;
+    flex-basis: 28px;
+  }
+
+  .fb-dev-ad-label,
+  .fb-dev-ad-domain {
+    max-width: none;
+  }
 }
 
 .fb-dev-ad-tooltip {
@@ -3118,22 +3193,12 @@ html {
 /* =============================================================
    6. SPONSORED & FEATURED SHOWCASE ABOVE LOGO (NEW TAB)
    ============================================================= */
+/* .fb-sponsored-* companions ride on the same elements as .fb-dev-ad-*
+   above — keep these rules non-conflicting so the larger card design in
+   section 2 stays authoritative. */
 .fb-sponsored-showcase {
-  width: fit-content;
-  max-width: 100%;
-  margin: 0 auto 24px;
-  display: flex;
-  flex-direction: row;
-  flex-wrap: nowrap;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.fb-sponsored-showcase::-webkit-scrollbar {
-  display: none;
+  width: min(100%, 880px);
+  margin: 0 auto 22px;
 }
 
 .fb-sponsored-header {
@@ -3177,32 +3242,11 @@ html {
 }
 
 .fb-sponsored-card {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 20px;
   color: var(--fb-text-primary);
   text-decoration: none;
-  font-size: 0.825rem;
-  font-weight: 600;
-  transition: all 0.15s ease;
-  cursor: pointer;
-}
-
-.fb-sponsored-card:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(6, 182, 212, 0.4);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .fb-sponsored-icon {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
   object-fit: contain;
 }
 

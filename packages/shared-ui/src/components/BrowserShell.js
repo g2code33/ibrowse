@@ -1689,18 +1689,31 @@ export class BrowserShell {
     const newTabPage = document.createElement('div');
     newTabPage.className = `fb-newtab-page ${this.state.isMobile ? 'fb-mobile-safari-start-page' : ''}`;
 
-    // Requirement 5 & 7: Developer Advertisement Badges (Sleek, Non-Overshadowing)
+    // Requirement 5 & 7: Developer Sponsor cards — prominent, glassy cards
+    // (icon tile + name + domain) that read clearly on web, PWA and Android.
     const adLinks = DEVELOPER_AD_LINKS || this.state.sponsoredLinks || [];
     if (!activeTab.isPrivate && adLinks.length > 0) {
       const sponsoredSection = document.createElement('section');
       sponsoredSection.className = 'fb-dev-ad-showcase fb-sponsored-showcase';
-      sponsoredSection.innerHTML = adLinks.map((item) => `
+      sponsoredSection.setAttribute('aria-label', 'Developer sponsors');
+      const cardsHtml = adLinks.map((item) => {
+        const host = item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0];
+        return `
         <a class="fb-dev-ad-card fb-sponsored-card" href="${item.url}" data-url="${item.url}" target="_blank" rel="noopener" aria-label="${item.title}" title="${item.title}">
-          <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${item.domain || item.url.replace(/^https?:\/\//, '').split('/')[0]}.ico" alt="${item.title}" />
-          <span class="fb-dev-ad-label">${item.title}</span>
+          <span class="fb-dev-ad-icon-tile" aria-hidden="true">
+            <img class="fb-dev-ad-icon fb-sponsored-icon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" />
+          </span>
+          <span class="fb-dev-ad-text">
+            <span class="fb-dev-ad-label">${item.title}</span>
+            <span class="fb-dev-ad-domain">${host}</span>
+          </span>
           <span class="fb-dev-ad-tooltip">${item.title}</span>
-        </a>
-      `).join('');
+        </a>`;
+      }).join('');
+      sponsoredSection.innerHTML = `
+        <h2 class="fb-dev-ad-heading">Developer Sponsors</h2>
+        <div class="fb-dev-ad-row">${cardsHtml}</div>
+      `;
 
       sponsoredSection.querySelectorAll('.fb-sponsored-card').forEach((card) => {
         card.addEventListener('click', (e) => {
@@ -3769,6 +3782,15 @@ export class BrowserShell {
     } catch {
       // Dialogs can be blocked by the browser after repeated prompts - that
       // must never prevent the actual reload/update below from happening.
+    }
+    try {
+      // PWA: promote any waiting service worker BEFORE reloading, otherwise
+      // the reload keeps serving the previous cached build.
+      if (typeof window !== 'undefined' && typeof window.__yayraApplyPwaUpdate === 'function') {
+        window.__yayraApplyPwaUpdate();
+      }
+    } catch {
+      // Never let the service-worker handoff block the reload fallback.
     }
     if (typeof window !== 'undefined' && window.location && typeof window.location.reload === 'function') {
       window.location.reload();
