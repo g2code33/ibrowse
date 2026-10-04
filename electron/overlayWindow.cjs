@@ -306,12 +306,28 @@ function createOverlayBridge({
       screenshot: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>',
       shields: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>'
     };
-    const ringButtons = [
+    // Real logos for link-backed buttons: the site's actual favicon,
+    // with the original glyph as an instant fallback if it can't load
+    // (offline, firewalled, ...). Non-link actions keep custom glyphs.
+    const linkIcon = (url, glyph) => {
+      try {
+        const host = new URL(url).hostname;
+        return `<img src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" draggable="false"`
+          + ` style="width:22px;height:22px;border-radius:6px;pointer-events:none;"`
+          + ` onerror="this.style.display='none'; if (this.nextElementSibling) this.nextElementSibling.style.display='';" />`
+          + `<span style="display:none;pointer-events:none;">${glyph || ''}</span>`;
+      } catch {
+        return glyph || '';
+      }
+    };
+    const letterBadge = (title) =>
+      `<span style="font:700 18px/1 system-ui;pointer-events:none;">${String(title || '?').trim().charAt(0).toUpperCase() || '?'}</span>`;
+    const classicRing = [
       { action: 'ai', label: 'Ask Yayra AI', icon: icons.ai, cls: 'radial-btn-ai' },
-      { action: 'chatgpt', label: 'Ask ChatGPT', icon: icons.chatgpt, cls: '' },
-      { action: 'gemini', label: 'Rephrase with Gemini', icon: icons.gemini, cls: 'radial-btn-gemini' },
-      { action: 'claude', label: 'Claude Assistant', icon: icons.claude, cls: '' },
-      { action: 'perplexity', label: 'Perplexity Search', icon: icons.perplexity, cls: '' },
+      { action: 'chatgpt', label: 'Ask ChatGPT', icon: linkIcon('https://chatgpt.com', icons.chatgpt), cls: '' },
+      { action: 'gemini', label: 'Rephrase with Gemini', icon: linkIcon('https://gemini.google.com', icons.gemini), cls: 'radial-btn-gemini' },
+      { action: 'claude', label: 'Claude Assistant', icon: linkIcon('https://claude.ai', icons.claude), cls: '' },
+      { action: 'perplexity', label: 'Perplexity Search', icon: linkIcon('https://perplexity.ai', icons.perplexity), cls: '' },
       { action: 'screenshot', label: 'Capture screenshot', icon: icons.screenshot, cls: '' },
       { action: 'mini', label: 'Open yayra mini', icon: icons.mini, cls: '' },
       { action: 'full', label: 'Open full browser', icon: icons.full, cls: '' },
@@ -320,9 +336,41 @@ function createOverlayBridge({
       { action: 'hide', label: 'Hide bubble', icon: icons.hide, cls: '' },
       { action: 'quit', label: 'Quit Yayra', icon: icons.quit, cls: '' }
     ];
+    // When the user customized the in-app action wheel, the bubble's
+    // double-tap radial mirrors it 1:1 (synced via
+    // yayra:overlay-set-wheel-items). Unknown/renderer-only actions are
+    // forwarded to the main window - see handleRadialAction.
+    const wheelItems = Array.isArray(settings.wheelItems) && settings.wheelItems.length > 0
+      ? settings.wheelItems
+      : null;
+    const builtinGlyphs = {
+      chatgpt: icons.chatgpt,
+      gemini: icons.gemini,
+      claude: icons.claude,
+      perplexity: icons.perplexity,
+      screenshot: icons.screenshot,
+      shields: icons.shields,
+      sparkles: icons.ai,
+      finder: icons.mini,
+      duplicate: icons.full
+    };
+    const ringButtons = wheelItems
+      ? wheelItems.map((item) => ({
+          action: `wheel:${item.id}`,
+          label: String(item.title || item.id || 'Action'),
+          icon: (item.url && linkIcon(item.url, builtinGlyphs[item.id] || letterBadge(item.title)))
+            || builtinGlyphs[item.id]
+            || letterBadge(item.title),
+          cls: ''
+        }))
+      : classicRing;
     const radialButtonsHtml = ringButtons.map((btn, i) =>
       `<button class="radial-btn ${btn.cls}" data-action="${btn.action}" title="${btn.label}" aria-label="${btn.label}" style="${ringPos(i, ringButtons.length)}">${btn.icon}</button>`
-    ).join('');
+    ).join('')
+      // Down-arrow below the center close - opens the wheel customizer in
+      // the full browser, exactly like the in-app wheel's bottom arrow.
+      + `<button class="radial-btn radial-btn-customize" data-action="customize" title="Customize wheel & bookmarks" aria-label="Customize wheel & bookmarks" style="left:${C - BTN / 2}px; top:${C + 42}px;">`
+      + '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>';
     return `<!doctype html>
 <html><head><meta charset="utf-8" />
 <style>
@@ -1010,8 +1058,51 @@ function createOverlayBridge({
     }
   }
 
+  /**
+   * Forward a wheel action the native ring can't run itself to the main
+   * renderer (Quick Notes, Duplicate Window, the customizer, ...): the
+   * full browser is brought up and executes it via executeWheelActionById.
+   */
+  function forwardWheelToMain(actionId) {
+    const win = restoreMainWindow();
+    try {
+      win?.webContents?.send?.('yayra:wheel-action', actionId);
+    } catch (err) {
+      logger?.warn?.(`[yayra:overlay] could not forward wheel action "${actionId}": ${err?.message || err}`);
+    }
+    return win;
+  }
+
+  /** Run one synced custom-wheel item from the native radial. */
+  function runWheelItem(actionId) {
+    const settings = overlayStore.load();
+    const items = Array.isArray(settings.wheelItems) ? settings.wheelItems : [];
+    const item = items.find((i) => i && i.id === actionId) || null;
+    // Link items (bookmarks, custom sites, the AI assistants) open right
+    // here in yayra mini - no need to wake the full browser.
+    if (item && item.url) return openMiniPanelAt(item.url);
+    switch (actionId) {
+      case 'screenshot': return captureScreenshot();
+      case 'shields': return openMiniPanelAt('yayra://extensions');
+      case 'sparkles': return openMiniPanelAt('yayra://ai');
+      case 'finder': return toggleMiniPanel();
+      default:
+        // play / notes / touch / duplicate / unknown ids: only the full
+        // renderer owns these features.
+        return forwardWheelToMain(actionId);
+    }
+  }
+
   /** A circular button in the radial menu was pressed. */
   function handleRadialAction(action) {
+    if (typeof action === 'string' && action.startsWith('wheel:')) {
+      closeRadialMenu();
+      return runWheelItem(action.slice('wheel:'.length));
+    }
+    if (action === 'customize') {
+      closeRadialMenu();
+      return forwardWheelToMain('customize');
+    }
     if (ASSISTANT_PAGES[action]) {
       closeRadialMenu();
       return openMiniPanelAt(ASSISTANT_PAGES[action]);
@@ -1236,6 +1327,35 @@ function createOverlayBridge({
     return next;
   }
 
+  /**
+   * Sync the customized in-app action wheel onto the bubble's double-tap
+   * radial. `items` is an array of plain {id,title,url,type} (or null to
+   * fall back to the classic default ring). Persisted, and the live
+   * bubble HTML is rebuilt immediately so the next double-tap shows it.
+   */
+  function setWheelItems(items) {
+    const sanitized = Array.isArray(items)
+      ? items
+          .filter((i) => i && i.id && i.title)
+          .slice(0, 24)
+          .map((i) => ({
+            id: String(i.id),
+            title: String(i.title).slice(0, 60),
+            url: typeof i.url === 'string' && /^(https?:|yayra:)/i.test(i.url) ? i.url : null,
+            type: i.type ? String(i.type) : null
+          }))
+      : null;
+    const next = overlayStore.save({ wheelItems: sanitized && sanitized.length ? sanitized : null });
+    if (overlayWin && !overlayWin.isDestroyed()) {
+      try {
+        overlayWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(next))}`);
+      } catch {
+        // Applied on next launch via the store.
+      }
+    }
+    return next;
+  }
+
   function setOverlayAllApps(enabled) {
     const next = overlayStore.save({ overlayAllApps: Boolean(enabled) });
     if (overlayWin && !overlayWin.isDestroyed()) {
@@ -1267,6 +1387,7 @@ function createOverlayBridge({
   ipcMain.handle('yayra:overlay-set-overlay-all-apps', (_e, enabled) => setOverlayAllApps(enabled));
   ipcMain.handle('yayra:overlay-set-bubble-size', (_e, size) => setBubbleSize(size));
   ipcMain.handle('yayra:overlay-set-bubble-opacity', (_e, opacity) => setBubbleOpacity(opacity));
+  ipcMain.handle('yayra:overlay-set-wheel-items', (_e, items) => setWheelItems(items));
   ipcMain.on('yayra:overlay-restore', () => restoreMainWindow());
   // Single bubble click: toggle the floating mini browser (independent of
   // the main window). Right-click: quick menu with full-browser/quit.
@@ -1353,6 +1474,7 @@ function createOverlayBridge({
     isRadialOpen,
     handleRadialAction,
     openMiniPanelAt,
+    setWheelItems,
     initializeOnStartup,
     applyLoginItemSettings
   };

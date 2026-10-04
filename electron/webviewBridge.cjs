@@ -361,6 +361,9 @@ function createWebviewBridge({
   // does nothing instead of throwing.
   Menu = null,
   clipboard = null,
+  // Electron's dialog module, injected for the "Save page as..." OS save
+  // dialog. Optional: without it savePage reports { ok:false }.
+  dialog = null,
   // Absolute path to electron/autofillPreload.cjs. When provided, every
   // page view gets Chrome-style password capture/fill hooks (sandboxed,
   // context-isolated, nothing exposed to the page). Optional so existing
@@ -674,6 +677,127 @@ function createWebviewBridge({
   ipcMain.handle('yayra:webview-reload', (event, { tabId } = {}) => reload(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-stop', (event, { tabId } = {}) => stop(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-destroy', (event, { tabId } = {}) => destroyView(viewKey(event, tabId)));
+
+  // ---- Menu > More tools: real page-level actions -------------------
+  // Each works on the tab's native view when it exists; DevTools falls
+  // back to the SHELL's own webContents so internal yayra:// pages are
+  // inspectable too.
+  ipcMain.handle('yayra:webview-open-devtools', (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = (entry && entry.view && entry.view.webContents) || (event && event.sender) || null;
+    if (!wc || typeof wc.openDevTools !== 'function') return { ok: false, reason: 'unavailable' };
+    try {
+      wc.openDevTools({ mode: 'detach' });
+      return { ok: true };
+    } catch (err) {
+      logger.error?.('[yayra:webview] openDevTools failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  ipcMain.handle('yayra:webview-print', (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = (entry && entry.view && entry.view.webContents) || (event && event.sender) || null;
+    if (!wc || typeof wc.print !== 'function') return { ok: false, reason: 'unavailable' };
+    try {
+      wc.print({});
+      return { ok: true };
+    } catch (err) {
+      logger.error?.('[yayra:webview] print failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  ipcMain.handle('yayra:webview-save-page', async (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry && entry.view && entry.view.webContents;
+    if (!wc || typeof wc.savePage !== 'function') return { ok: false, reason: 'no-native-page' };
+    if (!dialog || typeof dialog.showSaveDialog !== 'function') return { ok: false, reason: 'unavailable' };
+    try {
+      const title = (typeof wc.getTitle === 'function' && wc.getTitle()) || 'page';
+      const safeName = String(title).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80) || 'page';
+      const owner = (typeof getWindowForWebContents === 'function' && event && event.sender
+        && getWindowForWebContents(event.sender)) || getMainWindow?.() || null;
+      const { canceled, filePath } = await dialog.showSaveDialog(owner, {
+        title: 'Save page as',
+        defaultPath: `${safeName}.html`,
+        filters: [{ name: 'Web page, complete', extensions: ['html'] }]
+      });
+      if (canceled || !filePath) return { ok: false, canceled: true };
+      await wc.savePage(filePath, 'HTMLComplete');
+      return { ok: true, path: filePath };
+    } catch (err) {
+      logger.error?.('[yayra:webview] savePage failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  ipcMain.handle('yayra:webview-set-zoom', (event, { tabId, factor } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry && entry.view && entry.view.webContents;
+    const f = Number(factor);
+    if (!wc || typeof wc.setZoomFactor !== 'function' || !Number.isFinite(f) || f <= 0) {
+      return { ok: false, reason: 'unavailable' };
+    }
+    try {
+      wc.setZoomFactor(Math.min(5, Math.max(0.25, f)));
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // Reading mode: pull the page's readable text blocks out of the real
+  // document (main world, read-only query).
+  ipcMain.handle('yayra:webview-reader-extract', async (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry && entry.view && entry.view.webContents;
+    if (!wc || typeof wc.executeJavaScript !== 'function') return { ok: false, reason: 'no-native-page' };
+    const script = `(() => {
+      const root = document.querySelector('article') || document.querySelector('main') || document.body;
+      if (!root) return { title: document.title, url: location.href, blocks: [] };
+      const nodes = root.querySelectorAll('h1, h2, h3, p, li');
+      const blocks = [];
+      for (const el of nodes) {
+        const text = (el.innerText || '').trim();
+        if (text.length < 2) continue;
+        blocks.push({ tag: el.tagName.toLowerCase(), text: text.slice(0, 4000) });
+        if (blocks.length >= 400) break;
+      }
+      return { title: document.title, url: location.href, blocks };
+    })()`;
+    try {
+      const result = await wc.executeJavaScript(script, true);
+      return { ok: true, title: result?.title || '', url: result?.url || '', blocks: Array.isArray(result?.blocks) ? result.blocks : [] };
+    } catch (err) {
+      logger.error?.('[yayra:webview] reader extract failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // Media Controller: real per-tab audio state + mute.
+  ipcMain.handle('yayra:webview-media-state', (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry && entry.view && entry.view.webContents;
+    if (!wc) return { ok: false, reason: 'no-native-page' };
+    return {
+      ok: true,
+      audible: typeof wc.isCurrentlyAudible === 'function' ? Boolean(wc.isCurrentlyAudible()) : false,
+      muted: typeof wc.isAudioMuted === 'function' ? Boolean(wc.isAudioMuted()) : false
+    };
+  });
+
+  ipcMain.handle('yayra:webview-set-muted', (event, { tabId, muted } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry && entry.view && entry.view.webContents;
+    if (!wc || typeof wc.setAudioMuted !== 'function') return { ok: false, reason: 'unavailable' };
+    try {
+      wc.setAudioMuted(Boolean(muted));
+      return { ok: true, muted: Boolean(muted) };
+    } catch {
+      return { ok: false, reason: 'failed' };
+    }
+  });
 
   // ---- Chrome-style password capture / autofill routing -------------
   // The autofill preload inside a page view sends on these channels; the

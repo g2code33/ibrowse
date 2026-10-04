@@ -31,7 +31,10 @@ const DEFAULTS = Object.freeze({
   // Triple-clicking the bubble locks it exactly where it is (no dragging)
   // until it is triple-clicked again. Persisted so a locked bubble stays
   // locked across restarts.
-  positionLocked: false
+  positionLocked: false,
+  // Customized radial action wheel synced from the in-app customizer
+  // ({id,title,url,type} items). null = show the classic default ring.
+  wheelItems: null
 });
 
 function createOverlayStore({ fs, userDataDir }) {

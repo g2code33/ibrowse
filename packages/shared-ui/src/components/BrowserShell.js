@@ -21,6 +21,13 @@ import qrcode from '../vendor/qrcode.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
 import { PasskeyService } from '../services/passkeyService.js';
 import { ProfileService } from '../services/profileService.js';
+import {
+  createProfileScopedStorage,
+  createHistoryRepo,
+  createBookmarksRepo,
+  createSettingsRepo,
+  createWheelRepo
+} from '../services/profileStorage.js';
 import { YayraAiService, AI_DEFAULTS, describeAiReason } from '../services/aiService.js';
 import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract/src/extensions/ExtensionManager.js';
 
@@ -124,21 +131,9 @@ export class BrowserShell {
     this.updateService = options.updateService || null;
     this.storageAdapter = options.storageAdapter || null;
 
-    this.passwordManager = options.passwordManager || new PasswordManager(this.storageAdapter);
-    this.extensionManager = options.extensionManager || new ExtensionManager(this.storageAdapter);
-    // Passkey for the Yayra account: biometric/PIN gate for revealing
-    // vault secrets + account security. Web/PWA uses real WebAuthn; the
-    // Electron desktop (custom yayra:// scheme, where Chromium refuses
-    // WebAuthn) uses the OS-keychain device-passkey bridge instead - see
-    // get passkeysBridge() + electron/passkeyBridge.cjs. DI for tests.
-    this.passkeyService = options.passkeyService
-      || new PasskeyService({ storage: this.storageAdapter, nativeBridge: this.passkeysBridge });
-    // Yayra AI (Chrome-style "AI options on every search"): omnibox "Ask
-    // Yayra AI" row, the yayra://ai chat page, and Settings > Yayra AI.
-    // See packages/shared-ui/src/services/aiService.js. DI for tests.
-    this.aiService = options.aiService || new YayraAiService({ storage: this.storageAdapter });
     // Browser profiles + the Chrome-style "keep your browsing separate"
-    // smart prompt. See packages/shared-ui/src/services/profileService.js.
+    // smart prompt. Created BEFORE the storage wiring below because all
+    // real persistence is scoped to the current profile.
     this.profileService = options.profileService
       || new ProfileService({ storage: typeof localStorage !== 'undefined' ? localStorage : null });
     // Per-profile windows boot with ?profile=<id> (Electron
@@ -152,6 +147,45 @@ export class BrowserShell {
         if (exists) this.profileService.switchTo(options.windowProfileId);
       } catch { /* unknown profile id - stay on the stored current one */ }
     }
+
+    // REAL per-profile persistence. The shipped app used to construct
+    // the shell with NO repositories at all, so bookmarks, history,
+    // saved passwords and extension state silently went nowhere. When
+    // the host didn't inject repos (production web + Electron), build
+    // them here over localStorage, namespaced per profile. Tests that
+    // inject fakes (or run without localStorage) are untouched.
+    if (typeof localStorage !== 'undefined') {
+      const scoped = createProfileScopedStorage({
+        backing: localStorage,
+        getProfileId: () => {
+          try { return this.profileService.current().id; } catch { return 'default'; }
+        },
+        legacyKeys: { settings: 'yayra:settings', 'radial-wheel': 'yayra_radial_actions' }
+      });
+      this.profileStorage = scoped;
+      if (!this.historyRepo) this.historyRepo = createHistoryRepo(scoped);
+      if (!this.bookmarksRepo) this.bookmarksRepo = createBookmarksRepo(scoped);
+      if (!this.settingsRepo) this.settingsRepo = createSettingsRepo(scoped);
+      if (!this.storageAdapter) this.storageAdapter = scoped;
+      this.wheelRepo = options.wheelRepo || createWheelRepo(scoped);
+    } else {
+      this.profileStorage = null;
+      this.wheelRepo = options.wheelRepo || null;
+    }
+
+    this.passwordManager = options.passwordManager || new PasswordManager(this.storageAdapter);
+    this.extensionManager = options.extensionManager || new ExtensionManager(this.storageAdapter);
+    // Passkey for the Yayra account: biometric/PIN gate for revealing
+    // vault secrets + account security. Web/PWA uses real WebAuthn; the
+    // Electron desktop (custom yayra:// scheme, where Chromium refuses
+    // WebAuthn) uses the OS-keychain device-passkey bridge instead - see
+    // get passkeysBridge() + electron/passkeyBridge.cjs. DI for tests.
+    this.passkeyService = options.passkeyService
+      || new PasskeyService({ storage: this.storageAdapter, nativeBridge: this.passkeysBridge });
+    // Yayra AI (Chrome-style "AI options on every search"): omnibox "Ask
+    // Yayra AI" row, the yayra://ai chat page, and Settings > Yayra AI.
+    // See packages/shared-ui/src/services/aiService.js. DI for tests.
+    this.aiService = options.aiService || new YayraAiService({ storage: this.storageAdapter });
     // One suggestion per account per session, even before "No thanks".
     this._profileSignalsSeen = new Set();
     // Guards so a page is only auto-filled once per navigation target.
@@ -283,6 +317,7 @@ export class BrowserShell {
         adBlockEnabled: true,
         clearHistoryOnExit: false,
         restoreSessionOnLaunch: true,
+        showBookmarksBar: false,
         ...locallyPersistedSettings,
         ...options.initialSettings
       },
@@ -751,6 +786,20 @@ export class BrowserShell {
       }
     }
 
+    // Radial action wheel: load this profile's saved customization (the
+    // old build wrote customizations to localStorage but never read them
+    // back, so every restart silently reset the wheel).
+    if (this.wheelRepo) {
+      try {
+        const storedWheel = await this.wheelRepo.getItems();
+        if (storedWheel && storedWheel.length) {
+          this.state.customRadialActions = this.hydrateWheelItems(storedWheel);
+        }
+      } catch (err) {
+        console.warn('Failed to load the radial wheel in BrowserShell:', err);
+      }
+    }
+
     // Real download history + the user's chosen storage root (Electron
     // desktop build only - see electron/downloadsBridge.cjs). Also listens
     // for live progress/completion events so the Downloads page updates in
@@ -789,6 +838,17 @@ export class BrowserShell {
         }
       } catch (err) {
         console.warn('Failed to load overlay settings in BrowserShell:', err);
+      }
+      // Keep the native bubble's double-tap radial in lockstep with the
+      // in-app customizable wheel, and execute wheel actions the native
+      // ring can't run itself (notes, duplicate window, customize, ...).
+      this.syncWheelToOverlay();
+      if (typeof this.overlayBridge.onWheelAction === 'function') {
+        try {
+          this.overlayBridge.onWheelAction((actionId) => {
+            this.executeWheelActionById(actionId);
+          });
+        } catch { /* older preload without the channel */ }
       }
     }
 
@@ -1554,6 +1614,12 @@ export class BrowserShell {
     navbar.appendChild(toolbarActions);
     root.appendChild(navbar);
 
+    // 4b. Bookmarks bar (menu > Bookmarks > Show bookmarks bar) - a real
+    // strip of this profile's bookmarks, not a decorative toggle.
+    if (this.state.settings.showBookmarksBar) {
+      root.appendChild(this.renderBookmarksBar());
+    }
+
     // 5. Main Browser Viewport
     const viewport = document.createElement('main');
     viewport.className = 'fb-browser-viewport';
@@ -1848,7 +1914,10 @@ export class BrowserShell {
       // External Web Content Frame
       const webViewContainer = document.createElement('div');
       webViewContainer.className = 'fb-webview-container';
-      if (this.state.zoomLevel !== 100) {
+      // CSS-transform zoom is the web/iframe fallback only; the native
+      // engine zooms for real via applyNativeZoom() and must keep its
+      // untransformed container so setBounds stays accurate.
+      if (this.state.zoomLevel !== 100 && !this.nativeWebview) {
         webViewContainer.style.transform = `scale(${this.state.zoomLevel / 100})`;
         webViewContainer.style.transformOrigin = 'top left';
         webViewContainer.style.width = `${(100 / this.state.zoomLevel) * 100}%`;
@@ -4690,24 +4759,122 @@ export class BrowserShell {
     if (existing) existing.remove();
   }
 
-  getRadialActions() {
-    if (this.state.customRadialActions && this.state.customRadialActions.length > 0) {
-      return this.state.customRadialActions;
-    }
+  /**
+   * The 12 built-in wheel actions. Link-backed entries carry their real
+   * `url`, so the wheel shows the site's actual favicon (ask: "replace
+   * all the logos with real logos") and stored customizations can
+   * rebuild the live `action` by id after a restart.
+   */
+  getDefaultWheelDefs() {
     return [
-      { id: 'play', title: 'Media Controller', icon: Icons.play, x: 0, y: -130, isDark: false, action: () => alert('Yayra Media Controller: Background audio active.') },
+      { id: 'play', title: 'Media Controller', icon: Icons.play, x: 0, y: -130, isDark: false, action: () => this.openMediaController() },
       { id: 'notes', title: 'Quick Notes', icon: Icons.edit, x: 55, y: -90, isDark: false, action: () => this.openQuickNotes() },
-      { id: 'chatgpt', title: 'Ask ChatGPT', icon: Icons.chatgpt, x: 125, y: -125, isDark: false, action: () => this.executeAiAction('ChatGPT') },
-      { id: 'claude', title: 'Claude Assistant', icon: Icons.claude, x: 150, y: -50, isDark: false, action: () => this.executeAiAction('Claude') },
-      { id: 'sparkles', title: 'AI Assistant', icon: Icons.sparkles, x: 65, y: -20, isDark: true, action: () => this.executeAiAction('Gemini') },
-      { id: 'gemini', title: 'Rephrase with Gemini', icon: Icons.gemini, x: 145, y: 35, isDark: true, isFeatured: true, showPillAlways: true, action: () => this.executeAiAction('Gemini') },
-      { id: 'perplexity', title: 'Perplexity Search', icon: Icons.perplexity, x: 120, y: 110, isDark: false, action: () => this.executeAiAction('Perplexity') },
+      { id: 'chatgpt', title: 'Ask ChatGPT', url: 'https://chatgpt.com', icon: Icons.chatgpt, x: 125, y: -125, isDark: false, action: () => this.executeAiAction('ChatGPT') },
+      { id: 'claude', title: 'Claude Assistant', url: 'https://claude.ai', icon: Icons.claude, x: 150, y: -50, isDark: false, action: () => this.executeAiAction('Claude') },
+      { id: 'sparkles', title: 'AI Assistant', icon: Icons.sparkles, x: 65, y: -20, isDark: true, action: () => this.openFloatingMini('yayra://ai') },
+      { id: 'gemini', title: 'Rephrase with Gemini', url: 'https://gemini.google.com', icon: Icons.gemini, x: 145, y: 35, isDark: true, isFeatured: true, showPillAlways: true, action: () => this.executeAiAction('Gemini') },
+      { id: 'perplexity', title: 'Perplexity Search', url: 'https://perplexity.ai', icon: Icons.perplexity, x: 120, y: 110, isDark: false, action: () => this.executeAiAction('Perplexity') },
       { id: 'shields', title: 'Security & Shields', icon: Icons.desktopLock, x: 55, y: 70, isDark: false, action: () => this.openInternalPage('yayra://extensions') },
-      { id: 'touch', title: 'Assistive Touch', icon: Icons.mouseTouch, x: -35, y: 100, isDark: false, action: () => alert('Assistive Touch cursor active.') },
+      { id: 'touch', title: 'Assistive Touch', icon: Icons.mouseTouch, x: -35, y: 100, isDark: false, action: () => this.enableAssistiveTouch() },
       { id: 'screenshot', title: 'Capture Screenshot', icon: Icons.crop, x: -105, y: 65, isDark: false, action: () => this.captureScreenshot() },
       { id: 'duplicate', title: 'Duplicate Window', icon: Icons.tabs, x: -130, y: -15, isDark: false, action: () => this.duplicateFloatingMini() },
       { id: 'finder', title: 'Yayra Assistive', icon: Icons.finderFace, x: -85, y: -80, isDark: false, action: () => this.openFloatingMini() }
     ];
+  }
+
+  getRadialActions() {
+    if (this.state.customRadialActions && this.state.customRadialActions.length > 0) {
+      return this.state.customRadialActions;
+    }
+    return this.getDefaultWheelDefs();
+  }
+
+  /**
+   * Rebuild live wheel items from the stored {id,title,url,type} shape:
+   * builtin ids get their real action/icon back from the defaults
+   * table; everything else is a user-added site opened in yayra mini.
+   */
+  hydrateWheelItems(stored) {
+    const defaults = this.getDefaultWheelDefs();
+    const items = (stored || []).map((raw) => {
+      const def = defaults.find((d) => d.id === raw.id);
+      if (def) return { ...def, title: raw.title || def.title };
+      return { id: raw.id, title: raw.title, url: raw.url || null, type: raw.type || 'site', isDark: false };
+    });
+    return this.applyWheelLayout(items);
+  }
+
+  /** Even circle layout for customized wheels of any size. */
+  applyWheelLayout(items) {
+    const n = Math.max(items.length, 1);
+    const R = 135;
+    return items.map((item, i) => {
+      const angle = (i / n) * 2 * Math.PI - Math.PI / 2;
+      return { ...item, x: Math.round(R * Math.cos(angle)), y: Math.round(R * Math.sin(angle)) };
+    });
+  }
+
+  /**
+   * Real logos on the wheel: link items render the site's actual
+   * favicon (with the original glyph as fallback if the icon can't
+   * load); non-link actions keep their custom Yayra glyphs.
+   */
+  wheelIconHtml(item) {
+    const url = item.url || null;
+    if (url && /^https?:/i.test(url)) {
+      try {
+        const host = new URL(url).hostname;
+        const fallback = item.icon || Icons.globe;
+        return `<img class="fb-wheel-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" `
+          + `style="width:22px;height:22px;border-radius:6px;" `
+          + `onerror="this.style.display='none'; if (this.nextElementSibling) this.nextElementSibling.style.display='';" />`
+          + `<span class="fb-wheel-glyph-fallback" style="display:none">${fallback}</span>`;
+      } catch { /* malformed url - fall back to the glyph */ }
+    }
+    return item.icon || Icons.globe;
+  }
+
+  /** Persist the customized wheel per profile + mirror it to the native bubble ring. */
+  saveWheelItems(items) {
+    this.state.customRadialActions = items && items.length ? this.applyWheelLayout(items) : null;
+    if (this.wheelRepo) {
+      try {
+        const plain = (items || []).map(({ id, title, url = null, type = null }) => ({ id, title, url, type }));
+        const op = items && items.length ? this.wheelRepo.setItems(plain) : this.wheelRepo.reset();
+        if (op && typeof op.catch === 'function') op.catch(() => {});
+      } catch { /* persistence best-effort; the session keeps the wheel */ }
+    }
+    this.syncWheelToOverlay();
+  }
+
+  /** Mirror the wheel to the native bubble's double-tap radial (Electron). */
+  syncWheelToOverlay() {
+    const bridge = this.overlayBridge;
+    if (!bridge || typeof bridge.setWheelItems !== 'function') return;
+    const custom = this.state.customRadialActions;
+    const items = custom && custom.length
+      ? custom.map(({ id, title, url = null, type = null }) => ({ id, title, url, type }))
+      : null; // null -> the native ring shows its own defaults
+    try {
+      const res = bridge.setWheelItems(items);
+      if (res && typeof res.catch === 'function') res.catch(() => {});
+    } catch { /* older preload without the channel */ }
+  }
+
+  /**
+   * Run a wheel action by id - used by the native bubble's radial for
+   * actions only the full renderer can do, and by the in-app wheel.
+   */
+  executeWheelActionById(actionId) {
+    if (!actionId) return;
+    if (actionId === 'customize') {
+      this.openModal('radial-customizer');
+      return;
+    }
+    const item = this.getRadialActions().find((i) => i.id === actionId);
+    if (!item) return;
+    if (typeof item.action === 'function') item.action();
+    else if (item.url) this.openFloatingMini(item.url);
   }
 
   renderRadialLauncher() {
@@ -4744,7 +4911,7 @@ export class BrowserShell {
       btn.setAttribute('aria-label', item.title);
 
       btn.innerHTML = `
-        ${item.icon || Icons.globe}
+        ${this.wheelIconHtml(item)}
         <span class="yayra-radial-tooltip-pill">${item.title}</span>
       `;
 
@@ -4794,18 +4961,471 @@ export class BrowserShell {
     this.openFloatingMini(targetUrl);
   }
 
-  openQuickNotes() {
-    const note = prompt('Quick Scratchpad Note:', (typeof localStorage !== 'undefined' ? localStorage.getItem('yayra-quick-note') : '') || '');
-    if (note !== null) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('yayra-quick-note', note);
+  /**
+   * Quick Notes: a real scratchpad overlay (window.prompt doesn't work
+   * in Electron renderers), persisted per profile.
+   */
+  async openQuickNotes() {
+    if (typeof document === 'undefined') return;
+    let saved = '';
+    try {
+      saved = (this.profileStorage ? await this.profileStorage.get('quick-notes') : null)
+        || (typeof localStorage !== 'undefined' ? localStorage.getItem('yayra-quick-note') : '')
+        || '';
+    } catch { saved = ''; }
+
+    document.getElementById('yayra-quick-notes-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'yayra-quick-notes-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(10,12,20,0.55);display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+      <div style="width:min(440px,92vw);background:var(--fb-surface,#161923);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:18px;box-shadow:0 18px 60px rgba(0,0,0,0.5);">
+        <div style="font:600 15px/1.3 system-ui;color:var(--fb-text,#f2f4f8);margin-bottom:10px;">Quick Notes</div>
+        <textarea id="yayra-quick-notes-text" style="width:100%;min-height:160px;resize:vertical;border-radius:10px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--fb-text,#f2f4f8);padding:10px;font:400 13px/1.5 system-ui;box-sizing:border-box;" placeholder="Jot something down - it stays on this profile."></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+          <button id="yayra-quick-notes-cancel" style="padding:8px 14px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:var(--fb-text,#f2f4f8);cursor:pointer;">Cancel</button>
+          <button id="yayra-quick-notes-save" style="padding:8px 14px;border-radius:9px;border:none;background:#4f7cff;color:#fff;cursor:pointer;font-weight:600;">Save note</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const textarea = overlay.querySelector('#yayra-quick-notes-text');
+    if (textarea) textarea.value = saved;
+    textarea?.focus?.();
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#yayra-quick-notes-cancel')?.addEventListener('click', close);
+    overlay.querySelector('#yayra-quick-notes-save')?.addEventListener('click', async () => {
+      const value = textarea ? textarea.value : '';
+      try {
+        if (this.profileStorage) await this.profileStorage.set('quick-notes', value);
+        else if (typeof localStorage !== 'undefined') localStorage.setItem('yayra-quick-note', value);
+        this.showTransientNotice('Note saved to this profile.');
+      } catch {
+        this.showTransientNotice("Couldn't save the note - storage is unavailable.");
       }
-      alert('Note saved to local vault.');
-    }
+      close();
+    });
   }
 
-  captureScreenshot() {
-    alert('Screenshot captured! Saved to ~/Downloads/screenshot-yayra.png');
+  /**
+   * Real screenshot: on the Electron desktop the active tab's native
+   * page is snapshotted and saved as a PNG download; elsewhere we say
+   * honestly that the build can't capture the screen itself.
+   */
+  async captureScreenshot() {
+    const tab = this.getActiveTab();
+    if (this.nativeWebview && typeof this.nativeWebview.capture === 'function' && tab) {
+      try {
+        const res = await this.nativeWebview.capture(tab.id);
+        const dataUrl = res && (res.snapshot || res.dataUrl);
+        if (dataUrl && typeof document !== 'undefined') {
+          const a = document.createElement('a');
+          a.href = dataUrl;
+          a.download = `yayra-screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          this.showTransientNotice('Screenshot captured - check your downloads.');
+          return;
+        }
+      } catch { /* fall through to the honest message */ }
+    }
+    this.showTransientNotice('This page has no native capture here - use your system screenshot tool (PrtScn / Cmd+Shift+4).');
+  }
+
+  /**
+   * Media Controller: a real panel listing every tab with live native
+   * audio state (Electron), mute/unmute per tab and jump-to-tab.
+   */
+  async openMediaController() {
+    if (typeof document === 'undefined') return;
+    document.getElementById('yayra-media-controller-overlay')?.remove();
+
+    const native = this.nativeWebview;
+    const canAudio = Boolean(native && typeof native.mediaState === 'function');
+    const rows = [];
+    for (const tab of this.state.tabs) {
+      let audible = false; let muted = false; let hasState = false;
+      if (canAudio) {
+        try {
+          const s = await native.mediaState(tab.id);
+          if (s && s.ok) { audible = Boolean(s.audible); muted = Boolean(s.muted); hasState = true; }
+        } catch { /* internal page or gone - no audio state */ }
+      }
+      rows.push({ tab, audible, muted, hasState });
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'yayra-media-controller-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(10,12,20,0.55);display:flex;align-items:center;justify-content:center;';
+    const rowsHtml = rows.map(({ tab, audible, muted, hasState }) => `
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid rgba(255,255,255,0.06);">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fb-text,#f2f4f8);font:500 13px/1.3 system-ui;">
+          ${audible ? '🔊 ' : (muted ? '🔇 ' : '')}${(tab.title || tab.url || 'Tab').replace(/</g, '&lt;')}
+        </span>
+        ${hasState ? `<button data-media-mute="${tab.id}" data-muted="${muted ? '1' : '0'}" style="padding:5px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:var(--fb-text,#f2f4f8);cursor:pointer;font:500 12px system-ui;">${muted ? 'Unmute' : 'Mute'}</button>` : ''}
+        <button data-media-goto="${tab.id}" style="padding:5px 10px;border-radius:8px;border:none;background:#4f7cff;color:#fff;cursor:pointer;font:500 12px system-ui;">Go to tab</button>
+      </div>`).join('');
+    overlay.innerHTML = `
+      <div style="width:min(480px,94vw);max-height:70vh;overflow:auto;background:var(--fb-surface,#161923);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,0.5);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <div style="font:600 15px system-ui;color:var(--fb-text,#f2f4f8);">Media Controller</div>
+          <button id="yayra-media-close" style="border:none;background:transparent;color:var(--fb-text,#f2f4f8);font-size:18px;cursor:pointer;">×</button>
+        </div>
+        ${canAudio ? '' : '<div style="font:400 12px/1.4 system-ui;color:rgba(242,244,248,0.6);margin-bottom:8px;">Per-tab mute needs the desktop app - this build lists your tabs only.</div>'}
+        ${rowsHtml || '<div style="color:rgba(242,244,248,0.6);font:400 13px system-ui;padding:8px 0;">No open tabs.</div>'}
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#yayra-media-close')?.addEventListener('click', close);
+    overlay.querySelectorAll('[data-media-goto]').forEach((btn) => btn.addEventListener('click', () => {
+      close();
+      this.selectTab(btn.getAttribute('data-media-goto'));
+    }));
+    overlay.querySelectorAll('[data-media-mute]').forEach((btn) => btn.addEventListener('click', async () => {
+      const tabId = btn.getAttribute('data-media-mute');
+      const nextMuted = btn.getAttribute('data-muted') !== '1';
+      try {
+        await native.setMuted(tabId, nextMuted);
+        btn.setAttribute('data-muted', nextMuted ? '1' : '0');
+        btn.textContent = nextMuted ? 'Unmute' : 'Mute';
+      } catch { this.showTransientNotice("Couldn't change that tab's audio."); }
+    }));
+  }
+
+  /**
+   * Assistive Touch: genuinely turn on the system-wide floating bubble
+   * where the platform supports it; honest message where it can't.
+   */
+  async enableAssistiveTouch() {
+    if (this.overlayBridge && typeof this.overlayBridge.setEnabled === 'function') {
+      try {
+        await this.overlayBridge.setEnabled(true);
+        this.state.overlaySettings = { ...this.state.overlaySettings, enabled: true };
+        this.showTransientNotice('Assistive Touch bubble enabled - it floats over every app.');
+        return;
+      } catch { /* fall through */ }
+    }
+    // In-app fallback: minimize the shell to its floating bubble.
+    if (typeof this.minimizeToBubble === 'function') {
+      this.minimizeToBubble();
+      return;
+    }
+    this.showTransientNotice('The system-wide bubble needs the desktop or Android app.');
+  }
+
+  /** window.yayra.system (Electron): app metrics + desktop shortcuts. */
+  get systemBridge() {
+    if (typeof window === 'undefined') return null;
+    return (window.yayra && window.yayra.system) || (window.ibrowse && window.ibrowse.system) || null;
+  }
+
+  /** Generic single-line text prompt (window.prompt is dead in Electron renderers). */
+  _textPromptDialog({ title, description = '', placeholder = '', initialValue = '' } = {}) {
+    return new Promise((resolve) => {
+      if (typeof document === 'undefined' || !document.body) { resolve(null); return; }
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,10,16,0.62);display:flex;align-items:center;justify-content:center;';
+      const card = document.createElement('div');
+      card.style.cssText = 'background:var(--fb-bg-elevated,#171a22);color:var(--fb-text-primary,#f3f4f6);border-radius:16px;padding:22px;max-width:380px;width:92%;box-shadow:0 18px 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;gap:12px;';
+      const h = document.createElement('strong');
+      h.textContent = title;
+      card.appendChild(h);
+      if (description) {
+        const p = document.createElement('p');
+        p.textContent = description;
+        p.style.cssText = 'margin:0;font-size:0.84rem;color:var(--fb-text-secondary,#9ca3af);line-height:1.5;';
+        card.appendChild(p);
+      }
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = placeholder;
+      input.value = initialValue;
+      input.style.cssText = 'padding:10px;border-radius:10px;border:1px solid var(--fb-border,#2a2f3b);background:var(--fb-bg,#101218);color:inherit;font-size:0.95rem;';
+      card.appendChild(input);
+      const done = (value) => { try { overlay.remove(); } catch { /* gone */ } resolve(value); };
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      cancel.style.cssText = 'padding:10px 14px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-bg,#232734);color:inherit;';
+      cancel.addEventListener('click', () => done(null));
+      const ok = document.createElement('button');
+      ok.textContent = 'Save';
+      ok.style.cssText = 'padding:10px 14px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-accent,#6d5df2);color:#fff;';
+      ok.addEventListener('click', () => done(input.value.trim() || null));
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      card.appendChild(row);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(input.value.trim() || null); });
+      overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) done(null); });
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      input.focus();
+      input.select();
+    });
+  }
+
+  /**
+   * Real QR code modal for the current page (vendored generator - no
+   * network, works offline). Used by "Create QR Code" and the honest
+   * version of "Send to your devices" (scan on the phone to open there).
+   */
+  showUrlQrModal(url, { title = 'QR code for this page', subtitle = 'Scan it with your phone camera to open the page there.' } = {}) {
+    if (typeof document === 'undefined' || !document.body || !url) return;
+    document.getElementById('yayra-url-qr-overlay')?.remove();
+    let svg = '';
+    try {
+      const qr = qrcode(0, 'M');
+      qr.addData(url, 'Byte');
+      qr.make();
+      svg = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+    } catch { svg = ''; }
+    const overlay = document.createElement('div');
+    overlay.id = 'yayra-url-qr-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,10,16,0.62);display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+      <div style="background:var(--fb-bg-elevated,#171a22);color:var(--fb-text-primary,#f3f4f6);border-radius:16px;padding:22px;max-width:380px;width:92%;box-shadow:0 18px 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;gap:12px;text-align:center;">
+        <strong style="font-size:1.05rem;">${title}</strong>
+        <div style="background:#fff;border-radius:12px;padding:10px;align-self:center;width:220px;height:220px;display:flex;align-items:center;justify-content:center;">
+          <div style="width:200px;height:200px;">${svg || ''}</div>
+        </div>
+        <p style="margin:0;font-size:0.8rem;color:var(--fb-text-secondary,#9ca3af);line-height:1.5;">
+          ${subtitle}
+          <br /><code style="font-size:0.72rem;word-break:break-all;">${url.replace(/</g, '&lt;')}</code>
+        </p>
+        <div style="display:flex;gap:8px;">
+          <button class="fb-qr-copy" style="flex:1;padding:11px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-bg,#232734);color:inherit;">Copy link</button>
+          <button class="fb-qr-close" style="flex:1;padding:11px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-accent,#6d5df2);color:#fff;">Done</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.fb-qr-close')?.addEventListener('click', close);
+    overlay.querySelector('.fb-qr-copy')?.addEventListener('click', () => {
+      try { navigator.clipboard?.writeText(url); this.showTransientNotice('Link copied to clipboard.'); } catch { /* no clipboard */ }
+    });
+  }
+
+  /** REAL developer tools: detached Chromium DevTools on desktop; honest elsewhere. */
+  async openDevToolsForActiveTab() {
+    const tab = this.getActiveTab();
+    if (this.nativeWebview && typeof this.nativeWebview.openDevTools === 'function') {
+      try {
+        await this.nativeWebview.openDevTools(tab ? tab.id : null);
+        return;
+      } catch { /* fall through to honesty */ }
+    }
+    this.showTransientNotice("DevTools aren't available in the web build - use your browser's own (F12 / Ctrl+Shift+I).");
+  }
+
+  /** Print the actual page: the native view's print dialog on desktop, window.print on web. */
+  printActivePage() {
+    const tab = this.getActiveTab();
+    if (this.nativeWebview && typeof this.nativeWebview.print === 'function' && tab) {
+      try {
+        const res = this.nativeWebview.print(tab.id);
+        if (res && typeof res.catch === 'function') res.catch(() => {});
+        return;
+      } catch { /* fall through */ }
+    }
+    if (typeof window !== 'undefined' && window.print) window.print();
+  }
+
+  /** Save the real page (HTML + assets) through the OS save dialog on desktop. */
+  async savePageAs() {
+    const tab = this.getActiveTab();
+    if (this.nativeWebview && typeof this.nativeWebview.savePage === 'function' && tab) {
+      try {
+        const res = await this.nativeWebview.savePage(tab.id);
+        if (res && res.ok) { this.showTransientNotice(`Page saved to ${res.path}`); return; }
+        if (res && res.canceled) return;
+      } catch { /* fall through */ }
+    }
+    this.showTransientNotice("Saving full pages needs the desktop app - use your browser's Ctrl+S here.");
+  }
+
+  /** Real desktop shortcut for the current page (desktop app only). */
+  async createShortcutForActivePage() {
+    const tab = this.getActiveTab();
+    if (this.systemBridge && typeof this.systemBridge.createShortcut === 'function' && tab) {
+      try {
+        const res = await this.systemBridge.createShortcut({ url: tab.url, title: tab.title || tab.url });
+        if (res && res.ok) { this.showTransientNotice(`Shortcut created on your desktop: ${res.path}`); return; }
+        this.showTransientNotice(`Couldn't create the shortcut${res && res.reason ? ` (${res.reason})` : ''}.`);
+        return;
+      } catch { /* fall through */ }
+    }
+    this.showTransientNotice('Desktop shortcuts need the desktop app - on web, use your browser\'s "Install" / "Add to home screen".');
+  }
+
+  /**
+   * Reading mode: on desktop the real page text is extracted from the
+   * native view and shown in a clean article overlay; the web build is
+   * honest that cross-origin frames can't be read.
+   */
+  async openReadingMode() {
+    const tab = this.getActiveTab();
+    if (this.nativeWebview && typeof this.nativeWebview.readerExtract === 'function' && tab) {
+      try {
+        const res = await this.nativeWebview.readerExtract(tab.id);
+        if (res && res.ok && Array.isArray(res.blocks) && res.blocks.length) {
+          this.renderReaderOverlay(res);
+          return;
+        }
+      } catch { /* fall through */ }
+      this.showTransientNotice("This page doesn't have readable article text.");
+      return;
+    }
+    this.showTransientNotice('Reading mode needs the desktop app - web pages here live in frames Yayra may not read.');
+  }
+
+  renderReaderOverlay({ title, url, blocks }) {
+    if (typeof document === 'undefined' || !document.body) return;
+    document.getElementById('yayra-reader-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'yayra-reader-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;background:var(--fb-bg,#101218);overflow:auto;';
+    const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const body = blocks.map((b) => {
+      if (b.tag === 'h1' || b.tag === 'h2' || b.tag === 'h3') return `<h2 style="font:700 1.25rem/1.4 Georgia,serif;margin:1.4em 0 0.4em;">${esc(b.text)}</h2>`;
+      if (b.tag === 'li') return `<li style="margin:0.3em 0;">${esc(b.text)}</li>`;
+      return `<p style="margin:0.8em 0;">${esc(b.text)}</p>`;
+    }).join('');
+    overlay.innerHTML = `
+      <div style="position:sticky;top:0;display:flex;justify-content:flex-end;padding:12px;background:linear-gradient(var(--fb-bg,#101218),transparent);">
+        <button class="fb-reader-close" style="padding:8px 16px;border:none;border-radius:10px;font-weight:600;cursor:pointer;background:var(--fb-bg-elevated,#232734);color:var(--fb-text-primary,#f3f4f6);">Close reader</button>
+      </div>
+      <article style="max-width:680px;margin:0 auto;padding:12px 20px 80px;color:var(--fb-text-primary,#e8eaf0);font:400 1.05rem/1.75 Georgia,serif;">
+        <h1 style="font:700 1.7rem/1.3 Georgia,serif;">${esc(title)}</h1>
+        <p style="font-size:0.8rem;color:var(--fb-text-secondary,#9ca3af);word-break:break-all;">${esc(url)}</p>
+        ${body}
+      </article>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('.fb-reader-close')?.addEventListener('click', () => overlay.remove());
+  }
+
+  /**
+   * Performance / Task manager: REAL process metrics from
+   * app.getAppMetrics() on desktop plus this renderer's own JS heap -
+   * no invented numbers anywhere.
+   */
+  async openTaskManagerModal() {
+    if (typeof document === 'undefined' || !document.body) return;
+    document.getElementById('yayra-taskmgr-overlay')?.remove();
+
+    let metrics = null;
+    if (this.systemBridge && typeof this.systemBridge.appMetrics === 'function') {
+      try { metrics = await this.systemBridge.appMetrics(); } catch { metrics = null; }
+    }
+    const heap = (typeof performance !== 'undefined' && performance.memory)
+      ? Math.round(performance.memory.usedJSHeapSize / (1024 * 1024))
+      : null;
+
+    const esc = (s) => String(s || '').replace(/</g, '&lt;');
+    let rowsHtml = '';
+    if (metrics && Array.isArray(metrics.processes) && metrics.processes.length) {
+      rowsHtml = metrics.processes.map((p) => `
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.06);">${esc(p.label || p.type)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">${p.pid ?? '-'}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">${Number.isFinite(p.cpu) ? `${p.cpu.toFixed(1)}%` : '-'}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.06);text-align:right;">${Number.isFinite(p.memoryMB) ? `${p.memoryMB} MB` : '-'}</td>
+        </tr>`).join('');
+    }
+    const heapLine = heap !== null
+      ? `<p style="margin:8px 0 0;font-size:0.8rem;color:var(--fb-text-secondary,#9ca3af);">This window's JS heap: ${heap} MB &middot; ${this.state.tabs.length} tab(s) open</p>`
+      : `<p style="margin:8px 0 0;font-size:0.8rem;color:var(--fb-text-secondary,#9ca3af);">${this.state.tabs.length} tab(s) open</p>`;
+    const table = rowsHtml
+      ? `<table style="width:100%;border-collapse:collapse;font-size:0.84rem;">
+           <thead><tr>
+             <th style="text-align:left;padding:6px 10px;color:var(--fb-text-secondary,#9ca3af);font-weight:600;">Process</th>
+             <th style="text-align:right;padding:6px 10px;color:var(--fb-text-secondary,#9ca3af);font-weight:600;">PID</th>
+             <th style="text-align:right;padding:6px 10px;color:var(--fb-text-secondary,#9ca3af);font-weight:600;">CPU</th>
+             <th style="text-align:right;padding:6px 10px;color:var(--fb-text-secondary,#9ca3af);font-weight:600;">Memory</th>
+           </tr></thead><tbody>${rowsHtml}</tbody></table>`
+      : '<p style="margin:0;font-size:0.84rem;color:var(--fb-text-secondary,#9ca3af);">Per-process metrics are only available in the desktop app. Your browser\'s own task manager (Shift+Esc in Chrome) covers this tab here.</p>';
+
+    const overlay = document.createElement('div');
+    overlay.id = 'yayra-taskmgr-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(8,10,16,0.62);display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+      <div style="background:var(--fb-bg-elevated,#171a22);color:var(--fb-text-primary,#f3f4f6);border-radius:16px;padding:22px;max-width:560px;width:94%;max-height:72vh;overflow:auto;box-shadow:0 18px 60px rgba(0,0,0,0.5);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <strong style="font-size:1.05rem;">Performance &amp; Task Manager</strong>
+          <button class="fb-taskmgr-close" style="border:none;background:transparent;color:inherit;font-size:18px;cursor:pointer;">×</button>
+        </div>
+        ${table}
+        ${heapLine}
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.fb-taskmgr-close')?.addEventListener('click', close);
+  }
+
+  /** Bookmark every open web tab (menu + Ctrl+Shift+D). */
+  async bookmarkAllTabs() {
+    let saved = 0;
+    if (this.bookmarksRepo) {
+      for (const t of this.state.tabs) {
+        if (t.url && !t.url.startsWith('yayra://')) {
+          await this.bookmarksRepo.addBookmark({ url: t.url, title: t.title, favicon: t.favicon || null });
+          saved += 1;
+        }
+      }
+      try { this.state.bookmarksItems = await this.bookmarksRepo.getAllBookmarks(); } catch { /* keep stale list */ }
+      const active = this.getActiveTab();
+      if (active) await this.updateBookmarkState(active.url);
+    }
+    this.render();
+    this.showTransientNotice(saved > 0
+      ? `Bookmarked ${saved} open tab${saved === 1 ? '' : 's'}.`
+      : 'No web pages open to bookmark.');
+  }
+
+  /** The real bookmarks bar strip rendered under the toolbar. */
+  renderBookmarksBar() {
+    const bar = document.createElement('div');
+    bar.className = 'fb-bookmarks-bar';
+    bar.style.cssText = 'display:flex;align-items:center;gap:4px;padding:3px 10px;overflow-x:auto;white-space:nowrap;background:var(--fb-bg-elevated,rgba(255,255,255,0.03));border-bottom:1px solid var(--fb-border,rgba(255,255,255,0.07));min-height:28px;';
+    const items = this.state.bookmarksItems || [];
+    if (!items.length) {
+      const hint = document.createElement('span');
+      hint.style.cssText = 'font-size:0.75rem;color:var(--fb-text-secondary,#9ca3af);padding:2px 6px;';
+      hint.textContent = 'No bookmarks yet - star a page and it shows up here.';
+      bar.appendChild(hint);
+      return bar;
+    }
+    for (const bm of items.slice(0, 30)) {
+      let host = '';
+      try { host = new URL(bm.url).hostname; } catch { host = ''; }
+      const chip = document.createElement('button');
+      chip.className = 'fb-bookmarks-bar-item';
+      chip.title = bm.url;
+      chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;max-width:170px;padding:3px 8px;border:none;border-radius:8px;background:transparent;color:var(--fb-text-primary,#e8eaf0);cursor:pointer;font:500 12px/1.2 system-ui;overflow:hidden;';
+      chip.innerHTML = `${host ? `<img src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" style="width:14px;height:14px;border-radius:4px;flex:none;" onerror="this.remove()" />` : ''}<span style="overflow:hidden;text-overflow:ellipsis;">${String(bm.title || bm.url).replace(/</g, '&lt;')}</span>`;
+      chip.addEventListener('click', () => this.navigateActiveTab(bm.url));
+      bar.appendChild(chip);
+    }
+    return bar;
+  }
+
+  /** Name window... - a real dialog + real window title change. */
+  async nameThisWindow() {
+    const current = this.state.windowName || '';
+    const name = await this._textPromptDialog({
+      title: 'Name this window',
+      description: 'The name shows in the window title so you can tell your Yayra windows apart.',
+      placeholder: 'e.g. Work, Research, Shopping',
+      initialValue: current
+    });
+    if (name === null) return;
+    this.state.windowName = name;
+    if (typeof document !== 'undefined') document.title = name ? `${name} - yayra` : 'yayra';
+    this.showTransientNotice(`Window named "${name}".`);
   }
 
   /* -------------------------------------------------------------
@@ -5375,6 +5995,36 @@ export class BrowserShell {
     if (profile) {
       this.showTransientNotice(`Browsing as ${profile.name}${profile.email ? ` (${profile.email})` : ''} - separate from other profiles.`);
     }
+    // All persistence is profile-scoped (see profileStorage.js): after a
+    // switch, load the NEW profile's settings, history, bookmarks and
+    // wheel so nothing from the previous profile leaks across.
+    this.reloadProfileScopedState().catch(() => {});
+  }
+
+  /** Load the current profile's persisted state into this.state. */
+  async reloadProfileScopedState() {
+    if (this.settingsRepo?.getSettings) {
+      try {
+        const stored = await this.settingsRepo.getSettings();
+        if (stored) this.state.settings = { ...this.state.settings, ...stored };
+      } catch { /* keep current */ }
+    }
+    if (this.historyRepo?.getEntries) {
+      try { this.state.historyItems = await this.historyRepo.getEntries(100); } catch { /* keep current */ }
+    }
+    if (this.bookmarksRepo?.getAllBookmarks) {
+      try { this.state.bookmarksItems = await this.bookmarksRepo.getAllBookmarks(); } catch { /* keep current */ }
+    }
+    if (this.wheelRepo?.getItems) {
+      try {
+        const storedWheel = await this.wheelRepo.getItems();
+        this.state.customRadialActions = storedWheel && storedWheel.length
+          ? this.hydrateWheelItems(storedWheel)
+          : null;
+        this.syncWheelToOverlay();
+      } catch { /* keep current */ }
+    }
+    this.render();
   }
 
   /* -------------------------------------------------------------
@@ -6329,7 +6979,7 @@ export class BrowserShell {
           <div class="fb-drawer-submenu">
             <button class="fb-drawer-item fb-dr-bm-curr">${Icons.star} <span>Bookmark this tab...</span> <kbd>Ctrl+D</kbd></button>
             <button class="fb-drawer-item fb-dr-bm-all">${Icons.starFilled} <span>Bookmark all tabs...</span> <kbd>Ctrl+Shift+D</kbd></button>
-            <button class="fb-drawer-item fb-dr-bm-bar">${Icons.bookmark} <span>Show bookmarks bar</span> <kbd>Ctrl+Shift+B</kbd></button>
+            <button class="fb-drawer-item fb-dr-bm-bar">${Icons.bookmark} <span>${this.state.settings.showBookmarksBar ? 'Hide bookmarks bar' : 'Show bookmarks bar'}</span> <kbd>Ctrl+Shift+B</kbd></button>
             <div class="fb-drawer-separator"></div>
             <button class="fb-drawer-item fb-dr-bookmarks">${Icons.folder} <span>Bookmark manager</span> <kbd>Ctrl+Shift+O</kbd></button>
             <button class="fb-drawer-item fb-dr-bm-import">${Icons.download} <span>Import bookmarks...</span></button>
@@ -6544,8 +7194,9 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-tg-ungroup')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('The active tab has been removed from its tab group.');
       this.render();
+      // Honest: Yayra has no tab grouping yet, so there is nothing to ungroup.
+      this.showTransientNotice('Tab groups are not available in Yayra yet - no group to remove this tab from.');
     });
 
     drawer.querySelector('.fb-dr-downloads')?.addEventListener('click', () => {
@@ -6563,21 +7214,21 @@ export class BrowserShell {
       await this.toggleBookmarkCurrentTab();
     });
 
-    drawer.querySelector('.fb-dr-bm-all')?.addEventListener('click', async () => {
+    drawer.querySelector('.fb-dr-bm-all')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      if (this.bookmarksRepo) {
-        for (const t of this.state.tabs) {
-          if (t.url && !t.url.startsWith('yayra://newtab')) {
-            await this.bookmarksRepo.addBookmark({ url: t.url, title: t.title });
-          }
-        }
-      }
-      alert('All open tabs bookmarked!');
+      this.bookmarkAllTabs();
     });
 
     drawer.querySelector('.fb-dr-bm-bar')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Bookmarks bar visibility toggled.');
+      // Real toggle: persisted per profile + the bar actually renders
+      // under the toolbar (see renderBookmarksBar).
+      this.state.settings = { ...this.state.settings, showBookmarksBar: !this.state.settings.showBookmarksBar };
+      this.persistSettings();
+      this.render();
+      this.showTransientNotice(this.state.settings.showBookmarksBar
+        ? 'Bookmarks bar shown. Star pages to fill it.'
+        : 'Bookmarks bar hidden.');
     });
 
     drawer.querySelector('.fb-dr-bm-import')?.addEventListener('click', () => {
@@ -6652,13 +7303,11 @@ export class BrowserShell {
     });
 
     drawer.querySelector('.fb-dr-zoom-in')?.addEventListener('click', () => {
-      this.state.zoomLevel = Math.min(200, this.state.zoomLevel + 10);
-      this.render();
+      this.setZoom(Math.min(200, this.state.zoomLevel + 10));
     });
 
     drawer.querySelector('.fb-dr-zoom-out')?.addEventListener('click', () => {
-      this.state.zoomLevel = Math.max(50, this.state.zoomLevel - 10);
-      this.render();
+      this.setZoom(Math.max(50, this.state.zoomLevel - 10));
     });
 
     drawer.querySelector('.fb-dr-fullscreen')?.addEventListener('click', () => {
@@ -6671,7 +7320,8 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-print')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      if (typeof window !== 'undefined' && window.print) window.print();
+      this.render();
+      this.printActivePage();
     });
 
     drawer.querySelector('.fb-dr-lens')?.addEventListener('click', () => {
@@ -6686,15 +7336,18 @@ export class BrowserShell {
       this.navigateActiveTab(`https://translate.google.com/translate?u=${encodeURIComponent(url)}`);
     });
 
-    // Cast, Save, and Share Actions (Image 3)
+    // Cast, Save, and Share Actions
     drawer.querySelector('.fb-dr-cast')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Scanning for Cast and AirPlay display targets on local network...');
+      this.render();
+      // Honest: Chromecast/AirPlay discovery isn't implemented in Yayra yet.
+      this.showTransientNotice('Casting to TVs/displays is not available in Yayra yet.');
     });
 
     drawer.querySelector('.fb-dr-save-page')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert(`Saving current page (${activeTab.title})...`);
+      this.render();
+      this.savePageAs();
     });
 
     drawer.querySelector('.fb-dr-open-pharmagame')?.addEventListener('click', () => {
@@ -6704,33 +7357,45 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-create-shortcut')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert(`Desktop shortcut created for: ${activeTab.title}`);
+      this.render();
+      this.createShortcutForActivePage();
     });
 
     drawer.querySelector('.fb-dr-copy-link')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      if (typeof navigator !== 'undefined' && navigator.clipboard) {
-        navigator.clipboard.writeText(activeTab.url);
-      }
-      alert('Page link copied to clipboard!');
+      this.render();
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.writeText(activeTab.url);
+          this.showTransientNotice('Page link copied to clipboard.');
+          return;
+        }
+      } catch { /* fall through */ }
+      this.showTransientNotice("Couldn't reach the clipboard on this device.");
     });
 
     drawer.querySelector('.fb-dr-send-devices')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Page pushed to your synchronized Yayra devices.');
+      this.render();
+      // Honest "send to devices": no cloud sync exists, so hand the page
+      // over the real way - scan the QR with the other device.
+      this.showUrlQrModal(activeTab.url, {
+        title: 'Send to your devices',
+        subtitle: 'Yayra has no cloud tab-sync yet - scan this with the other device to open the page there.'
+      });
     });
 
     drawer.querySelector('.fb-dr-qr-code')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(activeTab.url)}`;
-      alert(`QR Code generated for URL:\n${activeTab.url}`);
+      this.render();
+      this.showUrlQrModal(activeTab.url);
     });
 
-    // More Tools Actions (Image 1)
+    // More Tools Actions
     drawer.querySelector('.fb-dr-name-win')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      const name = prompt('Name this window:', 'Yayra Window 1');
-      if (name && typeof document !== 'undefined') document.title = `${name} - yayra`;
+      this.render();
+      this.nameThisWindow();
     });
 
     drawer.querySelector('.fb-dr-customize-yayra')?.addEventListener('click', () => {
@@ -6740,27 +7405,32 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-reading-mode')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Reader view activated: Distraction-free high contrast formatting.');
+      this.render();
+      this.openReadingMode();
     });
 
     drawer.querySelector('.fb-dr-performance')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Performance Monitor: Memory usage optimal, GPU DirectComposition hardware acceleration active.');
+      this.render();
+      this.openTaskManagerModal();
     });
 
     drawer.querySelector('.fb-dr-task-mgr')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert(`Task Manager: ${this.state.tabs.length} tabs active. Renderer memory: 42 MB.`);
+      this.render();
+      this.openTaskManagerModal();
     });
 
     drawer.querySelector('.fb-dr-devtools')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      alert('Developer Tools: Web inspector console attached.');
+      this.render();
+      this.openDevToolsForActiveTab();
     });
 
+    // "Exit" must actually exit (it used to just minimize to the bubble).
     drawer.querySelector('.fb-dr-exit')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      this.minimizeToBubble();
+      this.requestAppClose();
     });
 
     root.appendChild(scrim);
@@ -6857,7 +7527,7 @@ export class BrowserShell {
             ${actions.map((item, idx) => `
               <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; background:rgba(255,255,255,0.06); border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
                 <div style="display:flex; align-items:center; gap:8px; overflow:hidden;">
-                  <span style="width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;">${item.icon || Icons.globe}</span>
+                  <span style="width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center;">${this.wheelIconHtml(item)}</span>
                   <span style="font-size:0.825rem; font-weight:600; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">${item.title}</span>
                 </div>
                 <button class="fb-btn fb-btn-secondary fb-del-radial-item-btn" data-idx="${idx}" style="padding:2px 6px; font-size:12px;" title="Remove Item">${Icons.trash}</button>
@@ -6912,10 +7582,7 @@ export class BrowserShell {
         const idx = Number(btn.dataset.idx);
         const current = [...this.getRadialActions()];
         current.splice(idx, 1);
-        this.state.customRadialActions = current;
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('yayra_radial_actions', JSON.stringify(current));
-        }
+        this.saveWheelItems(current);
         this.renderRadialCustomizerModal(modal);
       });
     });
@@ -6924,25 +7591,11 @@ export class BrowserShell {
       btn.addEventListener('click', () => {
         const url = btn.dataset.url;
         const title = btn.dataset.title;
-        let domain = url;
-        try { domain = new URL(url).hostname; } catch {}
         const current = [...this.getRadialActions()];
-        const angle = (current.length / 12) * 2 * Math.PI;
-        const x = Math.round(130 * Math.cos(angle));
-        const y = Math.round(130 * Math.sin(angle));
-        current.push({
-          id: `site-${Date.now()}`,
-          title,
-          url,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
-          x,
-          y,
-          type: 'site'
-        });
-        this.state.customRadialActions = current;
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('yayra_radial_actions', JSON.stringify(current));
-        }
+        // Real favicon + position are derived at render time (see
+        // wheelIconHtml/applyWheelLayout); only plain data is stored.
+        current.push({ id: `site-${Date.now()}`, title, url, type: 'site' });
+        this.saveWheelItems(current);
         this.renderRadialCustomizerModal(modal);
       });
     });
@@ -6953,33 +7606,17 @@ export class BrowserShell {
       if (title && url) {
         let fullUrl = url;
         if (!/^https?:\/\//i.test(fullUrl)) fullUrl = `https://${fullUrl}`;
-        let domain = fullUrl;
-        try { domain = new URL(fullUrl).hostname; } catch {}
         const current = [...this.getRadialActions()];
-        const angle = (current.length / 12) * 2 * Math.PI;
-        const x = Math.round(130 * Math.cos(angle));
-        const y = Math.round(130 * Math.sin(angle));
-        current.push({
-          id: `custom-${Date.now()}`,
-          title,
-          url: fullUrl,
-          icon: `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico" style="width:22px; height:22px; border-radius:50%;" alt="" />`,
-          x,
-          y,
-          type: 'site'
-        });
-        this.state.customRadialActions = current;
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('yayra_radial_actions', JSON.stringify(current));
-        }
+        current.push({ id: `custom-${Date.now()}`, title, url: fullUrl, type: 'site' });
+        this.saveWheelItems(current);
         this.renderRadialCustomizerModal(modal);
       }
     });
 
     modal.querySelector('.fb-reset-radial-btn')?.addEventListener('click', () => {
-      this.state.customRadialActions = null;
+      this.saveWheelItems([]);
       if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem('yayra_radial_actions');
+        try { localStorage.removeItem('yayra_radial_actions'); } catch { /* legacy key */ }
       }
       this.renderRadialCustomizerModal(modal);
     });
@@ -8052,6 +8689,19 @@ export class BrowserShell {
       this.createNewTab();
       this.navigateActiveTab(schemeUrl);
     }
+    // History/Bookmarks pages always show the CURRENT stored data, not
+    // whatever was loaded at boot.
+    if (schemeUrl === 'yayra://history' && this.historyRepo?.getEntries) {
+      this.historyRepo.getEntries(200).then((items) => {
+        this.state.historyItems = items || [];
+        this.render();
+      }).catch(() => {});
+    } else if (schemeUrl === 'yayra://bookmarks' && this.bookmarksRepo?.getAllBookmarks) {
+      this.bookmarksRepo.getAllBookmarks().then((items) => {
+        this.state.bookmarksItems = items || [];
+        this.render();
+      }).catch(() => {});
+    }
   }
 
   goBack() {
@@ -8670,12 +9320,28 @@ export class BrowserShell {
   setZoom(level) {
     const clamped = Math.max(25, Math.min(500, Math.round(level)));
     this.state.zoomLevel = clamped;
+    this.applyNativeZoom();
     this.render();
   }
 
   resetZoom() {
     this.state.zoomLevel = 100;
+    this.applyNativeZoom();
     this.render();
+  }
+
+  /**
+   * On the Electron desktop the page lives in a native WebContentsView
+   * that CSS transforms can't touch - push the zoom factor to the real
+   * engine so the menu's +/- actually zooms the page.
+   */
+  applyNativeZoom() {
+    const tab = this.getActiveTab();
+    if (!tab || !this.nativeWebview || typeof this.nativeWebview.setZoom !== 'function') return;
+    try {
+      const res = this.nativeWebview.setZoom(tab.id, this.state.zoomLevel / 100);
+      if (res && typeof res.catch === 'function') res.catch(() => {});
+    } catch { /* view not ready yet */ }
   }
 
   executeFindInPage(query) {
@@ -8803,6 +9469,18 @@ export class BrowserShell {
       e.preventDefault();
       this.omniboxInput?.focus();
       this.omniboxInput?.select();
+    }
+    // Ctrl+Shift+B: Toggle the bookmarks bar
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      this.state.settings = { ...this.state.settings, showBookmarksBar: !this.state.settings.showBookmarksBar };
+      this.persistSettings();
+      this.render();
+    }
+    // Ctrl+Shift+D: Bookmark all open tabs
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
+      e.preventDefault();
+      this.bookmarkAllTabs();
     }
     // Ctrl+D: Bookmark Tab
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {

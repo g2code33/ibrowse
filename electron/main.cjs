@@ -234,6 +234,60 @@ function registerIpcBridges() {
     senderWindow(event)?.close();
   });
 
+  // Menu > More tools > Performance / Task manager: REAL process metrics
+  // (no invented numbers). Summarized here so the renderer gets plain data.
+  ipcMain.handle('yayra:app-metrics', () => {
+    try {
+      const metrics = app.getAppMetrics() || [];
+      return {
+        ok: true,
+        processes: metrics.map((m) => ({
+          type: m.type || 'unknown',
+          label: m.name || m.serviceName || m.type || 'process',
+          pid: m.pid ?? null,
+          cpu: m.cpu && Number.isFinite(m.cpu.percentCPUUsage) ? m.cpu.percentCPUUsage : null,
+          memoryMB: m.memory && Number.isFinite(m.memory.workingSetSize)
+            ? Math.round(m.memory.workingSetSize / 1024)
+            : null
+        }))
+      };
+    } catch (err) {
+      console.error('[yayra] app metrics failed', err);
+      return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // Menu > Save and share > Create shortcut...: a REAL shortcut file on
+  // the user's desktop that opens the page in the default browser
+  // (.desktop on Linux, .url on Windows, .webloc on macOS).
+  ipcMain.handle('yayra:create-shortcut', (_event, { url, title } = {}) => {
+    try {
+      if (!url || !/^https?:\/\//i.test(String(url))) return { ok: false, reason: 'invalid-url' };
+      const desktopDir = app.getPath('desktop');
+      const safeName = String(title || url).replace(/[\\/:*?"<>|]+/g, '-').trim().slice(0, 60) || 'yayra-page';
+      let filePath;
+      let contents;
+      if (process.platform === 'win32') {
+        filePath = path.join(desktopDir, `${safeName}.url`);
+        contents = `[InternetShortcut]\r\nURL=${url}\r\n`;
+      } else if (process.platform === 'darwin') {
+        filePath = path.join(desktopDir, `${safeName}.webloc`);
+        contents = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>URL</key><string>${String(url).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</string></dict></plist>\n`;
+      } else {
+        filePath = path.join(desktopDir, `${safeName}.desktop`);
+        contents = `[Desktop Entry]\nType=Link\nName=${safeName}\nURL=${url}\nIcon=text-html\n`;
+      }
+      fs.writeFileSync(filePath, contents, 'utf8');
+      if (process.platform === 'linux') {
+        try { fs.chmodSync(filePath, 0o755); } catch { /* best effort */ }
+      }
+      return { ok: true, path: filePath };
+    } catch (err) {
+      console.error('[yayra] create shortcut failed', err);
+      return { ok: false, reason: err && err.code === 'EACCES' ? 'permission-denied' : 'failed' };
+    }
+  });
+
   // Native website-rendering engine bridge (replaces <iframe>-based rendering
   // so real sites with X-Frame-Options/frame-ancestors - Google, GitHub,
   // etc. - actually load). See electron/webviewBridge.cjs for the full
@@ -245,6 +299,7 @@ function registerIpcBridges() {
     shell,
     Menu,
     clipboard,
+    dialog,
     getMainWindow: () => mainWindow,
     getWindowForWebContents: (wc) => BrowserWindow.fromWebContents(wc),
     // Chrome-style password capture/fill inside real pages (sandboxed

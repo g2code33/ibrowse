@@ -49,6 +49,14 @@ const api = {
     destroy: (tabId) => ipcRenderer.invoke('yayra:webview-destroy', { tabId }),
     // Autofill saved credentials into the page's login form (Chrome-style).
     fillCredentials: (tabId, { username, password } = {}) => ipcRenderer.invoke('yayra:webview-fill-credentials', { tabId, username, password }),
+    // Menu > More tools: REAL page-level actions on the native engine.
+    openDevTools: (tabId) => ipcRenderer.invoke('yayra:webview-open-devtools', { tabId }),
+    print: (tabId) => ipcRenderer.invoke('yayra:webview-print', { tabId }),
+    savePage: (tabId) => ipcRenderer.invoke('yayra:webview-save-page', { tabId }),
+    setZoom: (tabId, factor) => ipcRenderer.invoke('yayra:webview-set-zoom', { tabId, factor }),
+    readerExtract: (tabId) => ipcRenderer.invoke('yayra:webview-reader-extract', { tabId }),
+    mediaState: (tabId) => ipcRenderer.invoke('yayra:webview-media-state', { tabId }),
+    setMuted: (tabId, muted) => ipcRenderer.invoke('yayra:webview-set-muted', { tabId, muted }),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on(WEBVIEW_EVENT_CHANNEL, listener);
@@ -134,7 +142,23 @@ const api = {
     minimizeMainWindow: () => ipcRenderer.send('yayra:overlay-minimize-main'),
     // Used by the floating mini-shell window's own slim chrome.
     closeMini: () => ipcRenderer.send('yayra:overlay-mini-close'),
-    openFullFromMini: () => ipcRenderer.send('yayra:overlay-mini-open-full')
+    openFullFromMini: () => ipcRenderer.send('yayra:overlay-mini-open-full'),
+    // Keep the native bubble's double-tap radial in lockstep with the
+    // in-app customizable action wheel (items are {id,title,url,type}).
+    setWheelItems: (items) => ipcRenderer.invoke('yayra:overlay-set-wheel-items', items),
+    // Wheel actions the native ring can't run itself are forwarded to
+    // the main renderer (e.g. 'notes', 'duplicate', 'customize').
+    onWheelAction: (callback) => {
+      const listener = (_event, actionId) => callback(actionId);
+      ipcRenderer.on('yayra:wheel-action', listener);
+      return () => ipcRenderer.removeListener('yayra:wheel-action', listener);
+    }
+  },
+  // Desktop-only system facilities: real process metrics for the task
+  // manager and real desktop shortcuts for "Create shortcut...".
+  system: {
+    appMetrics: () => ipcRenderer.invoke('yayra:app-metrics'),
+    createShortcut: ({ url, title } = {}) => ipcRenderer.invoke('yayra:create-shortcut', { url, title })
   }
 };
 
