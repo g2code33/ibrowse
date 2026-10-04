@@ -129,6 +129,14 @@ if (root) {
   browserShell.initialize().then(() => {
     browserShell.render(root);
   });
+  // The mini titlebar's "open full browser" needs the CURRENT tab url,
+  // and the main window needs to receive such handoffs - both via the
+  // overlay bridge (Electron only; a no-op elsewhere).
+  window.__yayraShell = browserShell;
+  if (!isMiniShell) {
+    const overlayApi = (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
+    overlayApi?.onOpenUrl?.(({ url } = {}) => browserShell.openUrlHandoff?.(url));
+  }
 
   if (!isMiniShell && ['ios', 'android', 'pwa-installed'].includes(target)) {
     mountMobileUpdatePrompt({
@@ -164,7 +172,11 @@ function mountMiniShellChrome() {
     + `<button id="yayra-mini-expand" title="Open full browser" style="${buttonCss}">⤢</button>`
     + `<button id="yayra-mini-hide" title="Hide (click the bubble to bring back)" style="${buttonCss}">✕</button>`;
   document.body.prepend(bar);
-  document.getElementById('yayra-mini-expand')?.addEventListener('click', () => overlay?.openFullFromMini?.());
+  document.getElementById('yayra-mini-expand')?.addEventListener('click', () => {
+    // Hand the CURRENT site over so the full browser continues it.
+    const currentUrl = window.__yayraShell?.getActiveTab?.()?.url || null;
+    overlay?.openFullFromMini?.(currentUrl);
+  });
   document.getElementById('yayra-mini-hide')?.addEventListener('click', () => overlay?.closeMini?.());
 }
 

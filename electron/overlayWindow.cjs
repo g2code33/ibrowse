@@ -162,11 +162,16 @@ function createOverlayBridge({
         if (!isOnTop) assertTopmost(win);
       });
       win.on('show', () => assertTopmost(win));
+      // The instant the user clicks INTO another app is exactly when the
+      // WM is most likely to promote that app over us - reassert on the
+      // spot instead of waiting for the heartbeat.
+      win.on('blur', () => assertTopmost(win));
     }
     if (typeof setInterval !== 'function') return null;
-    // 1.5s heartbeat: fast enough that newly-opened/focused apps never
-    // keep the bubble buried for a noticeable moment, still a no-op cost.
-    const timer = setInterval(() => assertTopmost(win), 1500);
+    // 800ms heartbeat: newly-opened/focused apps never keep the bubble
+    // or mini panel buried for a noticeable moment; re-asserting an
+    // already-topmost window is a no-op for the OS, so this is free.
+    const timer = setInterval(() => assertTopmost(win), 800);
     if (timer && typeof timer.unref === 'function') timer.unref();
     return timer;
   }
@@ -835,6 +840,10 @@ function createOverlayBridge({
     try {
       if (typeof overlayWin.setBounds === 'function') {
         overlayWin.setBounds({ x: target.x, y: target.y, width: size, height: size });
+        // Belt-and-suspenders: a few WMs quietly drop client-initiated
+        // ConfigureRequests issued through one API but honor the other.
+        // Issuing both is idempotent where the first already worked.
+        if (typeof overlayWin.setPosition === 'function') overlayWin.setPosition(target.x, target.y);
       } else {
         overlayWin.setPosition(target.x, target.y);
       }
@@ -1410,9 +1419,24 @@ function createOverlayBridge({
   ipcMain.on('yayra:overlay-mini-close', () => {
     if (miniWin && !miniWin.isDestroyed()) miniWin.hide();
   });
-  ipcMain.on('yayra:overlay-mini-open-full', () => {
+  ipcMain.on('yayra:overlay-mini-open-full', (_event, payload = {}) => {
     if (miniWin && !miniWin.isDestroyed()) miniWin.hide();
-    restoreMainWindow();
+    const win = restoreMainWindow();
+    // Hand the mini's CURRENT site over to the full browser, so "open
+    // full browser" continues exactly where the user was - not a blank
+    // main window. Internal yayra:// pages hand over too.
+    const url = typeof payload.url === 'string' && /^(https?:|yayra:)/i.test(payload.url) ? payload.url : null;
+    if (!url || !win || win.isDestroyed?.()) return;
+    try {
+      const deliver = () => {
+        try { win.webContents.send('yayra:open-url', { url }); } catch { /* window closed */ }
+      };
+      if (typeof win.webContents?.isLoading === 'function' && win.webContents.isLoading()) {
+        win.webContents.once('did-finish-load', deliver);
+      } else {
+        deliver();
+      }
+    } catch { /* best effort - the main window is open either way */ }
   });
   // "Minimize to bubble" from the main window: hide the whole OS window;
   // the native bubble (always present) is the way back in.

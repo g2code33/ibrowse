@@ -171,6 +171,21 @@ function registerDesktopUpdateHandlers({
     return { status: 'install_started', method: 'reveal', note: note || null };
   }
 
+  /**
+   * app.quit() can be silently blocked (a wedged renderer, a dialog, a
+   * window vetoing close) - and the floating bubble keeps Yayra resident
+   * by design. After an install/relaunch has been committed, the OLD
+   * process MUST die, or the user keeps "running the previous version"
+   * no matter how many times they update. Guarded: test fakes without
+   * exit() simply skip the hard fallback.
+   */
+  function forceExitSoon() {
+    if (typeof appImpl?.exit !== 'function') return;
+    setTimeoutImpl(() => {
+      try { appImpl.exit(0); } catch { /* already gone */ }
+    }, Math.max(quitDelayMs, 1500));
+  }
+
   const handleInstall = async (event, { path: stagedPath, version } = {}) => {
     if (!stagedPath) {
       // Legacy no-payload call (old renderer builds): nothing is staged,
@@ -214,6 +229,10 @@ function registerDesktopUpdateHandlers({
         if (spawnFailed) return;
         logger(`${UPDATE_LOG_PREFIX} quitting so the installer can replace the app`);
         try { appImpl.quit?.(); } catch { /* already quitting */ }
+        // The floating bubble/tray keep Yayra resident by design - if
+        // ANYTHING blocks the graceful quit, force the exit so the user
+        // is never left running the old version after an install.
+        forceExitSoon();
       }, quitDelayMs);
       return { status: 'install_started', method: 'os-installer', willQuit: true };
     }
@@ -242,6 +261,10 @@ function registerDesktopUpdateHandlers({
               setTimeoutImpl(() => {
                 try { appImpl.relaunch?.(); } catch { /* best effort */ }
                 try { appImpl.quit?.(); } catch { /* already quitting */ }
+                // The resident bubble/tray process is exactly what kept
+                // users "on the previous version" after an install -
+                // never let it survive a completed update.
+                forceExitSoon();
               }, relaunchDelayMs);
             } else {
               // 126/127 = the user dismissed the PolicyKit password prompt.
@@ -299,6 +322,7 @@ function registerDesktopUpdateHandlers({
           if (spawnFailed) return;
           logger(`${UPDATE_LOG_PREFIX} AppImage replaced - handing over to the new version`);
           try { appImpl.quit?.(); } catch { /* already quitting */ }
+          forceExitSoon();
         }, quitDelayMs);
         return { status: 'install_started', method: 'self-replace', willQuit: true };
       }

@@ -152,7 +152,14 @@ const api = {
     minimizeMainWindow: () => ipcRenderer.send('yayra:overlay-minimize-main'),
     // Used by the floating mini-shell window's own slim chrome.
     closeMini: () => ipcRenderer.send('yayra:overlay-mini-close'),
-    openFullFromMini: () => ipcRenderer.send('yayra:overlay-mini-open-full'),
+    // Carries the mini's current site so the full browser continues it.
+    openFullFromMini: (url = null) => ipcRenderer.send('yayra:overlay-mini-open-full', { url }),
+    // Main window: receive "open this url" handoffs (e.g. from mini).
+    onOpenUrl: (callback) => {
+      const listener = (_event, payload) => callback(payload || {});
+      ipcRenderer.on('yayra:open-url', listener);
+      return () => ipcRenderer.removeListener('yayra:open-url', listener);
+    },
     // Keep the native bubble's double-tap radial in lockstep with the
     // in-app customizable action wheel (items are {id,title,url,type}).
     setWheelItems: (items) => ipcRenderer.invoke('yayra:overlay-set-wheel-items', items),

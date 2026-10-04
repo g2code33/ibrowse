@@ -22,17 +22,27 @@
  * @param {() => void} opts.onOpenMain
  * @param {() => void} opts.onOpenMini
  */
-function createCapsLockChords({ keycodes, onOpenMain, onOpenMini, logger = console } = {}) {
+function createCapsLockChords({ keycodes, onOpenMain, onOpenMini, onToggleMiniHide, logger = console } = {}) {
   if (!keycodes || !keycodes.capsLock || !keycodes.y || !keycodes.r) {
     throw new Error('createCapsLockChords requires {capsLock, y, r} keycodes');
   }
-  const state = { capsHeld: false };
+  const state = { capsHeld: false, escHeld: false };
 
   function handleKeydown(event) {
     if (!event) return null;
     if (event.keycode === keycodes.capsLock) {
       state.capsHeld = true;
       return null;
+    }
+    if (keycodes.escape && event.keycode === keycodes.escape) {
+      state.escHeld = true;
+      return null;
+    }
+    // Esc+F1: hide/show yayra mini (the ONLY keyboard way to hide it -
+    // it otherwise stays overlaid above every app by design).
+    if (keycodes.f1 && event.keycode === keycodes.f1 && state.escHeld) {
+      try { onToggleMiniHide?.(); } catch (err) { logger.error?.('[yayra:hotkeys] mini hide failed', err); }
+      return 'toggle-mini-hide';
     }
     if (!state.capsHeld) return null;
     if (event.keycode === keycodes.y && !event.shiftKey) {
@@ -47,7 +57,9 @@ function createCapsLockChords({ keycodes, onOpenMain, onOpenMini, logger = conso
   }
 
   function handleKeyup(event) {
-    if (event && event.keycode === keycodes.capsLock) state.capsHeld = false;
+    if (!event) return;
+    if (event.keycode === keycodes.capsLock) state.capsHeld = false;
+    if (keycodes.escape && event.keycode === keycodes.escape) state.escHeld = false;
   }
 
   let hooked = null;
@@ -77,7 +89,7 @@ function createCapsLockChords({ keycodes, onOpenMain, onOpenMini, logger = conso
  * broken builds degrade to "no global hotkeys" with a log line, never a
  * crash) and bind the chords.
  */
-function startGlobalHotkeys({ onOpenMain, onOpenMini, logger = console } = {}) {
+function startGlobalHotkeys({ onOpenMain, onOpenMini, onToggleMiniHide, logger = console } = {}) {
   let uio;
   try {
     uio = require('uiohook-napi');
@@ -87,13 +99,20 @@ function startGlobalHotkeys({ onOpenMain, onOpenMini, logger = console } = {}) {
   }
   const { uIOhook, UiohookKey } = uio;
   const chords = createCapsLockChords({
-    keycodes: { capsLock: UiohookKey.CapsLock, y: UiohookKey.Y, r: UiohookKey.R },
+    keycodes: {
+      capsLock: UiohookKey.CapsLock,
+      y: UiohookKey.Y,
+      r: UiohookKey.R,
+      escape: UiohookKey.Escape,
+      f1: UiohookKey.F1
+    },
     onOpenMain,
     onOpenMini,
+    onToggleMiniHide,
     logger
   });
   if (!chords.attach(uIOhook)) return null;
-  logger.log?.('[yayra:hotkeys] CapsLock+Y (main) and CapsLock+Shift+R (yayra mini) active system-wide');
+  logger.log?.('[yayra:hotkeys] CapsLock+Y (main), CapsLock+Shift+R (yayra mini) and Esc+F1 (hide mini) active system-wide');
   return chords;
 }
 

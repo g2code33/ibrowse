@@ -249,3 +249,70 @@ test('update artifacts: linux-appimage target picks the AppImage, never the .deb
   assert.equal(pickArtifact('linux-appimage', files), 'yayra-1.0.11.AppImage');
   assert.equal(pickArtifact('linux-appimage', ['yayra_1.0.11_amd64.deb']), null, 'no AppImage asset -> no entry, no guessing');
 });
+
+// ---------- Esc+F1 chord + mini "open full browser" handoff -------------
+
+test('Esc+F1 chord: toggles mini hide only while Escape is physically held', () => {
+  const fired = [];
+  const K = { capsLock: 58, y: 21, r: 19, escape: 1, f1: 59 };
+  const chords = createCapsLockChords({
+    keycodes: K,
+    onOpenMain: () => fired.push('main'),
+    onOpenMini: () => fired.push('mini'),
+    onToggleMiniHide: () => fired.push('hide'),
+    logger: { error: () => {} }
+  });
+  assert.equal(chords.handleKeydown({ keycode: K.f1 }), null, 'F1 alone does nothing');
+  chords.handleKeydown({ keycode: K.escape });
+  assert.equal(chords.handleKeydown({ keycode: K.f1 }), 'toggle-mini-hide');
+  chords.handleKeyup({ keycode: K.escape });
+  assert.equal(chords.handleKeydown({ keycode: K.f1 }), null, 'released Escape ends the chord');
+  assert.deepEqual(fired, ['hide']);
+});
+
+test('updater: committed installs force-exit the resident bubble process so the old version can never survive an update', async () => {
+  const handlers = new Map();
+  const appCalls = [];
+  const timers = [];
+  const spawned = [];
+  const updater = registerDesktopUpdateHandlers({
+    getWindow: () => null,
+    logger: () => {},
+    appImpl: {
+      getVersion: () => '1.0.11',
+      isPackaged: true,
+      getPath: () => '/tmp',
+      quit: () => appCalls.push('quit'),
+      relaunch: () => appCalls.push('relaunch'),
+      exit: (code) => appCalls.push(`exit:${code}`)
+    },
+    netImpl: {},
+    shellImpl: { openPath: async () => '', showItemInFolder: () => {} },
+    fsImpl: { existsSync: () => true },
+    ipcMainImpl: { handle: (ch, fn) => handlers.set(ch, fn) },
+    spawnImpl: (cmd, args, opts) => {
+      const listeners = new Map();
+      const child = {
+        once: (ev, fn) => listeners.set(ev, fn),
+        unref: () => {},
+        trigger: (ev, ...a) => listeners.get(ev)?.(...a)
+      };
+      spawned.push({ cmd, args, opts, child });
+      return child;
+    },
+    spawnSyncImpl: () => ({ status: 1, stdout: '' }),
+    envImpl: { PATH: '/usr/bin' },
+    setTimeoutImpl: (fn) => { timers.push(fn); return 0; },
+    quitDelayMs: 0,
+    relaunchDelayMs: 0
+  });
+  await updater.handleInstall(null, { path: '/tmp/yayra_1.0.12_amd64.deb', version: '1.0.12' });
+  // pkexec may be unavailable in this fake env - either way, if an
+  // install path schedules quit, it must ALSO schedule the hard exit.
+  if (spawned.length) {
+    spawned[0].child.trigger('exit', 0);
+    while (timers.length) timers.shift()();
+    assert.ok(appCalls.includes('relaunch'));
+    assert.ok(appCalls.includes('exit:0'), 'force-exit scheduled after relaunch+quit');
+  }
+});

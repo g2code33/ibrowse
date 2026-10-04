@@ -3173,22 +3173,35 @@ export class BrowserShell {
         newTabPage.appendChild(continueCard);
       }
 
-      // Recent History Quick List
+      // Recent History: a proper card (same design language as the
+      // continue-tabs card) - click a row to open it, or copy its link.
       if (this.state.historyItems.length > 0) {
         const recentHist = document.createElement('div');
-        recentHist.className = 'fb-newtab-history';
+        recentHist.className = 'fb-continue-card fb-newtab-history';
         recentHist.innerHTML = `
-          <h3 class="fb-newtab-section-title">${this.state.isMobile ? 'Suggestions' : 'Recent History'}</h3>
-          <div class="fb-history-quicklist">
-            ${this.state.historyItems.slice(0, 5).map((h) => `
-              <div class="fb-history-quick-item" data-url="${h.url}">
-                <span class="fb-history-quick-title">${h.title || h.url}</span>
-                <span class="fb-history-quick-url">${h.url}</span>
-              </div>
-            `).join('')}
-          </div>
+          <div class="fb-continue-card-head">${this.state.isMobile ? 'Suggestions' : 'Recent history'}</div>
+          ${this.state.historyItems.slice(0, 5).map((h) => {
+            let host = h.url;
+            try { host = new URL(h.url).hostname; } catch { /* keep url */ }
+            const safeUrl = String(h.url).replace(/"/g, '&quot;');
+            return `
+            <div class="fb-continue-item fb-history-quick-item" data-url="${safeUrl}" role="button" tabindex="0" title="${safeUrl}">
+              <img class="fb-continue-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+              <span class="fb-continue-text">
+                <span class="fb-continue-title">${String(h.title || h.url).replace(/</g, '&lt;')}</span>
+                <span class="fb-continue-meta">${host}</span>
+              </span>
+              <button class="fb-history-copy-btn" data-url="${safeUrl}" title="Copy link">${Icons.copy}</button>
+            </div>`;
+          }).join('')}
         `;
 
+        recentHist.querySelectorAll('.fb-history-copy-btn').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.copyLinkToClipboard(btn.dataset.url);
+          });
+        });
         recentHist.querySelectorAll('.fb-history-quick-item').forEach((item) => {
           item.addEventListener('click', () => {
             this.navigateActiveTab(item.dataset.url);
@@ -9342,6 +9355,48 @@ export class BrowserShell {
     this.reload();
     if (!this.nativeWebview && /^https?:\/\//i.test(String(activeTab.url || ''))) {
       this.showTransientNotice('Reloaded. Full per-site cache clearing needs the Yayra desktop app.');
+    }
+  }
+
+  /**
+   * "Open full browser" handoff from yayra mini (or any overlay
+   * surface): continue the SAME site here. A pristine new-tab is
+   * reused; otherwise the url opens in a fresh tab - never clobbering
+   * a page the user already has open in main.
+   */
+  openUrlHandoff(url) {
+    const target = String(url || '');
+    if (!/^(https?:\/\/|yayra:\/\/)/i.test(target)) return false;
+    const active = this.getActiveTab();
+    const pristine = active && active.url === 'yayra://newtab' && !active.isPrivate;
+    if (!pristine) this.createNewTab();
+    this.navigateActiveTab(target);
+    return true;
+  }
+
+  /** Copy a link (newtab cards' copy buttons) with an honest notice. */
+  async copyLinkToClipboard(url) {
+    const text = String(url || '');
+    if (!text) return;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        this.showTransientNotice('Link copied.');
+        return;
+      }
+    } catch { /* fall through to execCommand */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand && document.execCommand('copy');
+      ta.remove();
+      this.showTransientNotice(ok ? 'Link copied.' : 'Could not copy the link on this platform.');
+    } catch {
+      this.showTransientNotice('Could not copy the link on this platform.');
     }
   }
 

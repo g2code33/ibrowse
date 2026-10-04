@@ -51,6 +51,14 @@ protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { sta
 // wayland) would have picked native Wayland.
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
+  // The hint alone can still lose to a distro/env override (e.g.
+  // ELECTRON_OZONE_PLATFORM_HINT=wayland or a desktop file passing
+  // --ozone-platform=wayland) - and on native Wayland the compositor
+  // refuses BOTH programmatic window moves and always-on-top, which is
+  // exactly "the bubble cannot be moved and does not overlay apps".
+  // Hard-force the x11 backend (XWayland on Wayland sessions; every
+  // Ubuntu/GNOME Wayland session ships XWayland).
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
 if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.commandLine.appendSwitch('headless');
@@ -245,6 +253,15 @@ app.whenReady().then(async () => {
       },
       onOpenMini: () => {
         if (overlayBridge && typeof overlayBridge.toggleMiniPanel === 'function') overlayBridge.toggleMiniPanel();
+      },
+      // Esc+F1: hide (or bring back) an EXISTING yayra mini - the only
+      // keyboard escape hatch, since mini deliberately overlays all apps
+      // until the user hides it.
+      onToggleMiniHide: () => {
+        const mini = overlayBridge?.getMiniWindow?.();
+        if (mini && !mini.isDestroyed?.() && typeof overlayBridge.toggleMiniPanel === 'function') {
+          overlayBridge.toggleMiniPanel();
+        }
       },
       logger: console
     });
