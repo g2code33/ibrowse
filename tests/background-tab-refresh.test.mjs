@@ -136,3 +136,20 @@ test('title-updated patches the tab label in place instead of re-rendering every
   assert.equal(tab.title, 'Fresh Title');
   delete globalThis.window.yayra;
 });
+
+test('reload button: X (stop) appears the INSTANT a reload is requested on the native engine', async () => {
+  const reloads = [];
+  const shell = await makeShell(reloads);
+  const tab = shell.getActiveTab();
+  tab.url = 'https://example.com/';
+  shell._nativeWebviewTabIds.add(tab.id);
+
+  shell.reload();
+  assert.equal(tab.isLoading, true, 'optimistic X - no waiting for the loading-start roundtrip');
+  assert.deepEqual(reloads, [tab.id], 'real native reload issued');
+
+  // loading-stop flips it back to the refresh sign.
+  shell.updateTabLoading(tab.id, false);
+  assert.equal(tab.isLoading, false);
+  delete globalThis.window.yayra;
+});

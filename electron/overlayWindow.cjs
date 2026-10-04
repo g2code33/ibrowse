@@ -233,6 +233,26 @@ function createOverlayBridge({
       } else if (fsImpl.existsSync(file)) {
         fsImpl.unlinkSync(file);
       }
+      // Kill COMPETING autostart entries (any filename) that launch the
+      // raw binary directly: those boot a native-Wayland instance at
+      // login - frozen bubble - which then hogs the single-instance
+      // lock. Only entries going through the wrapper (or an explicit
+      // --ozone-platform) may survive.
+      try {
+        if (typeof fsImpl.readdirSync === 'function') {
+          const dir = path.dirname(file);
+          for (const name of fsImpl.readdirSync(dir)) {
+            if (!String(name).endsWith('.desktop')) continue;
+            const full = path.join(dir, name);
+            if (full === file) continue;
+            let text = '';
+            try { text = String(fsImpl.readFileSync(full, 'utf8')); } catch { continue; }
+            if (text.includes('/opt/yayra/yayra') && !text.includes('--ozone-platform=')) {
+              try { fsImpl.unlinkSync(full); logger?.warn?.(`[yayra:overlay] removed competing raw-binary autostart entry: ${name}`); } catch { /* best effort */ }
+            }
+          }
+        }
+      } catch { /* cleanup is best-effort */ }
     } catch (err) {
       logger?.warn?.(`[yayra:overlay] could not write Linux autostart entry: ${err?.message || err}`);
     }

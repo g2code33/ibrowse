@@ -9401,9 +9401,13 @@ export class BrowserShell {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
     if (this.nativeWebview && this._nativeWebviewTabIds.has(activeTab.id)) {
-      // Real reload on the native engine; loading-start/loading-stop events
-      // flow back through handleNativeWebviewEvent and drive the UI.
-      this.nativeWebview.reload(activeTab.id).catch(() => {});
+      // The X (stop) must appear the INSTANT the reload is requested -
+      // not a roundtrip later when loading-start comes back from the
+      // native engine. loading-stop flips it back to the refresh sign.
+      this.updateTabLoading(activeTab.id, true);
+      this.nativeWebview.reload(activeTab.id).catch(() => {
+        this.updateTabLoading(activeTab.id, false);
+      });
       return;
     }
     activeTab.isLoading = true;

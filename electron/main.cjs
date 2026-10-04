@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const http = require('node:http');
+const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
@@ -168,7 +169,16 @@ if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
 // bubble.
 // (Skipped while relaunching for x11: this process is already exiting
 // and must not grab the lock the relaunched instance needs.)
-const isPrimaryInstance = relaunchingForX11 ? false : app.requestSingleInstanceLock();
+// The duplicate launch carries ITS display environment to the resident
+// instance: a resident stranded on native Wayland (autostart can fire
+// before $DISPLAY exists at login) uses it to HEAL itself - see the
+// second-instance handler below.
+const isPrimaryInstance = relaunchingForX11
+  ? false
+  : app.requestSingleInstanceLock({
+    display: typeof process.env.DISPLAY === 'string' ? process.env.DISPLAY.trim() : '',
+    wayland: typeof process.env.WAYLAND_DISPLAY === 'string' ? process.env.WAYLAND_DISPLAY.trim() : ''
+  });
 if (relaunchingForX11) {
   // app.exit() already scheduled - nothing else to set up.
 } else if (!isPrimaryInstance) {
@@ -177,7 +187,33 @@ if (relaunchingForX11) {
   console.log('[yayra] another Yayra process already holds the single-instance lock - signaled it to come to the front and exiting this duplicate. If no window appeared, the resident process is stuck: run `pkill -9 -f yayra` and launch again.');
   app.quit();
 } else {
-  app.on('second-instance', (_event, argv) => {
+  app.on('second-instance', (_event, argv, _workingDir, additionalData) => {
+    // SELF-HEAL: if THIS resident instance is stuck on native Wayland
+    // (bubble frozen, not on top - e.g. autostart ran before XWayland
+    // exported $DISPLAY at login) and the user just launched Yayra from
+    // an environment that HAS a display, hand the session over to a
+    // fresh x11 instance instead of focusing the broken one. This makes
+    // a launcher-icon click FIX a broken bubble instead of surfacing it.
+    try {
+      const selfForcedX11 = process.argv.some((a) => typeof a === 'string' && a.startsWith('--ozone-platform='))
+        || app.commandLine.hasSwitch('ozone-platform');
+      const selfOnWayland = process.platform === 'linux' && !selfForcedX11
+        && (process.env.WAYLAND_DISPLAY || '').trim() !== '';
+      const newDisplay = typeof additionalData?.display === 'string' ? additionalData.display.trim() : '';
+      if (selfOnWayland && newDisplay !== '') {
+        let launcher = '/usr/bin/yayra';
+        try { if (!fs.existsSync(launcher)) launcher = process.execPath; } catch { launcher = process.execPath; }
+        const handover = spawn('/bin/sh', ['-c', `sleep 1; exec "${launcher}" --ozone-platform=x11`], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, DISPLAY: newDisplay }
+        });
+        handover.unref();
+        console.log('[yayra] this resident instance is stuck on native wayland - handing over to a fresh x11 instance (bubble will work there)');
+        app.exit(0);
+        return;
+      }
+    } catch { /* healing is best-effort - normal focusing below */ }
     // An installed site-app shortcut was launched while Yayra is already
     // running: open THAT site's app window, not the browser.
     const appUrl = parseAppModeUrl(argv || []);

@@ -87,3 +87,15 @@ test('CONFIRMED: overlay window keeps every topmost/move mechanism', () => {
   assert.ok(overlayCjs.includes('Move bubble (follows your cursor - click it to drop)'), 'Move entry in the right-click menu');
   assert.ok(overlayCjs.includes('stopBubbleMoveMode({ persist: true })'), 'click-to-drop persists the new spot');
 });
+
+test('CONFIRMED: a stranded native-Wayland resident HEALS itself when the user launches again', () => {
+  assert.ok(mainCjs.includes('app.requestSingleInstanceLock({'), 'duplicate launches carry their display environment');
+  assert.ok(mainCjs.includes("additionalData?.display"), 'resident reads the healthy display from the new launch');
+  assert.ok(mainCjs.includes('handing over to a fresh x11 instance'), 'handover is logged');
+  assert.ok(mainCjs.includes("exec \"${launcher}\" --ozone-platform=x11"), 'handover instance is explicitly x11');
+});
+
+test('CONFIRMED: competing raw-binary autostart entries are removed (any filename)', () => {
+  assert.ok(overlayCjs.includes('removed competing raw-binary autostart entry'), 'cleanup exists');
+  assert.ok(overlayCjs.includes("!text.includes('--ozone-platform=')"), 'wrapper/explicit-backend entries survive');
+});
