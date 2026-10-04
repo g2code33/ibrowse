@@ -321,12 +321,18 @@ test('PasskeyService: sync never touches a WebAuthn (web-build) record', async (
   assert.ok(await svc.getRegisteredPasskey(), 'WebAuthn record untouched');
 });
 
-test('PasskeyService: a stale verify self-heals - record cleared so the UI can offer re-creation', async () => {
+test('PasskeyService: a stale verify self-heals - REPAIRED when the device ceremony works, cleared only when it cannot', async () => {
+  // Device records are re-created through the OS ceremony (P29: "verify
+  // must not REMOVE my passkey") - see tests/passkey-system-auth.test.mjs
+  // for the full repair matrix. Here: when repair is impossible (the
+  // bridge cannot register either), the stale record is still dropped so
+  // the UI can offer re-creation instead of a dead "Passkey active" card.
   const storage = makeServiceStorage();
   const svc = new PasskeyService({
     storage,
     nativeBridge: {
       ...makeNativeBridgeFake(),
+      register: async () => ({ ok: false, reason: 'keychain-unavailable' }),
       verify: async () => ({ ok: false, reason: 'no-passkey-registered' })
     }
   });
@@ -334,7 +340,7 @@ test('PasskeyService: a stale verify self-heals - record cleared so the UI can o
 
   const result = await svc.verifyPasskey();
   assert.deepEqual(result, { success: false, reason: 'no-passkey-registered' });
-  assert.equal(await svc.getRegisteredPasskey(), null, 'stale record dropped by the failed verify');
+  assert.equal(await svc.getRegisteredPasskey(), null, 'stale record dropped when repair is impossible');
 });
 
 /* ------------------------- Shell: per-profile windows ------------------------- */

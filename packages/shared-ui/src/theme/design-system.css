@@ -5102,3 +5102,137 @@ html {
 .fb-ai-form .fb-ai-input {
   flex: 1;
 }
+
+/* -------------------------------------------------------------
+ * Post-update splash: the first open after a new version installs
+ * plays a quick celebration - the spherical Yayra orb pops in,
+ * slowly spins with a breathing glow while two rings ripple out,
+ * and the freshly installed version number rises under it.
+ * Auto-dismisses in ~2.6s; clicking anywhere on it closes it early.
+ * ----------------------------------------------------------- */
+.fb-update-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at center, rgba(13, 17, 28, 0.88) 0%, rgba(8, 10, 16, 0.96) 100%);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  cursor: pointer;
+  animation: fb-splash-fade-in 0.35s ease-out both;
+}
+
+.fb-update-splash.fb-update-splash-leave {
+  animation: fb-splash-fade-out 0.45s ease-in both;
+}
+
+.fb-update-splash-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
+.fb-update-splash-orb {
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation:
+    fb-splash-orb-pop 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    fb-splash-orb-spin 2.4s ease-in-out 0.55s both,
+    fb-splash-orb-glow 1.6s ease-in-out 0.4s infinite alternate;
+}
+
+.fb-update-splash-orb svg,
+.fb-update-splash-orb img {
+  width: 100%;
+  height: 100%;
+}
+
+.fb-update-splash-ring {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  width: 120px;
+  height: 120px;
+  margin: -60px 0 0 -60px;
+  border: 2px solid rgba(96, 165, 250, 0.55);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: fb-splash-ring 1.4s ease-out 0.5s both;
+}
+
+.fb-update-splash-ring-2 {
+  border-color: rgba(167, 139, 250, 0.45);
+  animation-delay: 0.75s;
+}
+
+.fb-update-splash-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  animation: fb-splash-text-rise 0.6s ease-out 0.55s both;
+}
+
+.fb-update-splash-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #f3f4f6;
+  letter-spacing: 0.02em;
+}
+
+.fb-update-splash-version {
+  font-size: 1.6rem;
+  font-weight: 800;
+  background: linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.fb-update-splash-from {
+  font-size: 0.78rem;
+  color: rgba(156, 163, 175, 0.9);
+}
+
+@keyframes fb-splash-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fb-splash-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes fb-splash-orb-pop {
+  0% { transform: scale(0.2); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes fb-splash-orb-spin {
+  from { rotate: 0deg; }
+  to { rotate: 360deg; }
+}
+
+@keyframes fb-splash-orb-glow {
+  from { filter: drop-shadow(0 0 14px rgba(96, 165, 250, 0.45)); }
+  to { filter: drop-shadow(0 0 34px rgba(167, 139, 250, 0.8)); }
+}
+
+@keyframes fb-splash-ring {
+  0% { transform: scale(0.9); opacity: 0.9; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+
+@keyframes fb-splash-text-rise {
+  from { transform: translateY(14px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}

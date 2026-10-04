@@ -113,6 +113,13 @@ function createOverlayBridge({
   // main process never polls the cursor (see beginBubbleDrag for why).
   let dragActive = false;
   let dragOffset = { x: 0, y: 0 };
+  // Cursor-poll drag ASSIST (see beginBubbleDrag): delta-based, only takes
+  // over when the renderer's pointermove stream goes quiet mid-drag.
+  let dragAssistTimer = null;
+  let dragStartCursor = null;
+  let dragStartWinPos = null;
+  let lastRendererDragAt = 0;
+  let lastDragTopmostAt = 0;
   // AssistiveTouch-style radial menu state: double-tap expands the bubble
   // window into a ring of circular action buttons (Yayra AI, mini, full
   // browser, lock, hide, quit) and remembers the bounds to shrink back to.
@@ -511,7 +518,14 @@ function createOverlayBridge({
     if (overlayWin && !overlayWin.isDestroyed()) return overlayWin;
 
     const size = settings.size || 64;
-    const pos = settings.position || defaultPosition();
+    // Clamp the restored position: a monitor change/resolution switch can
+    // leave the saved spot outside every screen - the bubble must NEVER
+    // come back invisible ("left the computer screen").
+    const pos = clampToVisibleArea(
+      (settings.position || defaultPosition()).x,
+      (settings.position || defaultPosition()).y,
+      size
+    );
 
     overlayWin = new BrowserWindow({
       width: size,
@@ -730,6 +744,70 @@ function createOverlayBridge({
   // driven entirely by the RENDERER's own pointermove screen coordinates
   // (the same event stream that demonstrably works - taps use it), and
   // the window only starts moving after real movement, never on a press.
+  /**
+   * Keep the bubble ON the screen: clamp a target position so the whole
+   * bubble stays inside the work area of the display it is on (multi-
+   * monitor aware via getDisplayNearestPoint). The bubble must never
+   * leave the screen unless the user explicitly hides it.
+   */
+  function clampToVisibleArea(x, y, size) {
+    const rx = Math.round(Number(x)) || 0;
+    const ry = Math.round(Number(y)) || 0;
+    const s = Math.max(1, Math.round(Number(size)) || 64);
+    try {
+      let area = null;
+      if (typeof screen.getDisplayNearestPoint === 'function') {
+        const display = screen.getDisplayNearestPoint({ x: rx + Math.round(s / 2), y: ry + Math.round(s / 2) });
+        if (display && display.workArea) area = display.workArea;
+      }
+      if (!area) {
+        const wa = screen.getPrimaryDisplay().workAreaSize;
+        area = { x: 0, y: 0, width: wa.width, height: wa.height };
+      }
+      return {
+        x: Math.min(Math.max(area.x, rx), area.x + Math.max(0, area.width - s)),
+        y: Math.min(Math.max(area.y, ry), area.y + Math.max(0, area.height - s))
+      };
+    } catch {
+      return { x: rx, y: ry };
+    }
+  }
+
+  /**
+   * Move the bubble window. setBounds (full rect, one atomic configure)
+   * is more reliable than setPosition for fixed-size frameless windows on
+   * several Linux WMs; fall back to setPosition for environments (and
+   * older test fakes) without it. Re-asserts topmost on a throttle: some
+   * WMs quietly demote z-order during programmatic moves.
+   */
+  function positionBubbleAt(x, y) {
+    if (!overlayWin || overlayWin.isDestroyed()) return false;
+    const size = overlayStore.load().size || 64;
+    const target = clampToVisibleArea(x, y, size);
+    try {
+      if (typeof overlayWin.setBounds === 'function') {
+        overlayWin.setBounds({ x: target.x, y: target.y, width: size, height: size });
+      } else {
+        overlayWin.setPosition(target.x, target.y);
+      }
+      const now = Date.now();
+      if (now - lastDragTopmostAt > 300) {
+        lastDragTopmostAt = now;
+        assertTopmost(overlayWin);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function stopDragAssist() {
+    if (dragAssistTimer) clearInterval(dragAssistTimer);
+    dragAssistTimer = null;
+    dragStartCursor = null;
+    dragStartWinPos = null;
+  }
+
   function beginBubbleDrag(offset) {
     if (!overlayWin || overlayWin.isDestroyed()) return false;
     if (radialOpen) return false; // the expanded menu never drags
@@ -739,6 +817,46 @@ function createOverlayBridge({
       y: Math.round(Number(offset?.y)) || 0
     };
     dragActive = true;
+    lastRendererDragAt = Date.now();
+
+    // DRAG ASSIST: on some machines the renderer's pointermove stream dies
+    // the moment the window starts moving under the cursor - the original
+    // "bubble cannot be moved around" bug. While a drag is active, the
+    // main process also follows the OS cursor, DELTA-based (window start
+    // position + cursor movement since the drag began), which is immune
+    // to the absolute coordinate-space mismatches that sank the old
+    // poll-on-pointerdown approach (no teleports - a press alone still
+    // never moves the window, because this only runs after the renderer
+    // reported real movement past the tap slop). The renderer stream
+    // stays the primary driver; the poll only steps in when that stream
+    // has gone quiet mid-drag, and a long total silence safety-releases
+    // the drag so the bubble can never get stuck to the cursor.
+    stopDragAssist();
+    try {
+      if (typeof screen.getCursorScreenPoint === 'function' && typeof overlayWin.getPosition === 'function') {
+        const cursor = screen.getCursorScreenPoint();
+        const [wx, wy] = overlayWin.getPosition();
+        if (cursor && Number.isFinite(cursor.x) && Number.isFinite(cursor.y)) {
+          dragStartCursor = { x: cursor.x, y: cursor.y };
+          dragStartWinPos = { x: wx, y: wy };
+          dragAssistTimer = setInterval(() => {
+            if (!dragActive || !overlayWin || overlayWin.isDestroyed()) { stopDragAssist(); return; }
+            const sinceRenderer = Date.now() - lastRendererDragAt;
+            if (sinceRenderer > 2500) { endBubbleDrag(); return; } // lost pointerup safety
+            if (sinceRenderer < 120) return; // renderer stream is driving fine
+            try {
+              const cur = screen.getCursorScreenPoint();
+              if (!cur || !Number.isFinite(cur.x) || !Number.isFinite(cur.y)) return;
+              positionBubbleAt(
+                dragStartWinPos.x + (cur.x - dragStartCursor.x),
+                dragStartWinPos.y + (cur.y - dragStartCursor.y)
+              );
+            } catch { /* cursor unavailable this tick */ }
+          }, 16);
+          if (typeof dragAssistTimer.unref === 'function') dragAssistTimer.unref();
+        }
+      }
+    } catch { /* assist is optional - renderer stream still works */ }
     return true;
   }
 
@@ -747,17 +865,15 @@ function createOverlayBridge({
     const sx = Math.round(Number(point?.x));
     const sy = Math.round(Number(point?.y));
     if (!Number.isFinite(sx) || !Number.isFinite(sy)) return false;
-    try {
-      overlayWin.setPosition(sx - dragOffset.x, sy - dragOffset.y);
-      return true;
-    } catch {
-      dragActive = false;
-      return false;
-    }
+    lastRendererDragAt = Date.now();
+    const moved = positionBubbleAt(sx - dragOffset.x, sy - dragOffset.y);
+    if (!moved) dragActive = false;
+    return moved;
   }
 
   function endBubbleDrag({ persist = true } = {}) {
     dragActive = false;
+    stopDragAssist();
     if (!persist) return;
     try {
       if (overlayWin && !overlayWin.isDestroyed()) {
@@ -1190,6 +1306,24 @@ function createOverlayBridge({
     }
   });
 
+  // Monitor layout changed (display unplugged, resolution switched):
+  // pull the bubble back inside a visible work area immediately - it must
+  // never end up stranded outside every screen.
+  if (screen && typeof screen.on === 'function') {
+    const reclampBubble = () => {
+      try {
+        if (!overlayWin || overlayWin.isDestroyed() || radialOpen) return;
+        const [x, y] = overlayWin.getPosition();
+        const size = overlayStore.load().size || 64;
+        const clamped = clampToVisibleArea(x, y, size);
+        if (clamped.x !== x || clamped.y !== y) positionBubbleAt(clamped.x, clamped.y);
+      } catch { /* display race - next event will fix it */ }
+    };
+    screen.on('display-metrics-changed', reclampBubble);
+    screen.on('display-removed', reclampBubble);
+    screen.on('display-added', reclampBubble);
+  }
+
   return {
     ensureOverlayWindow,
     destroyOverlayWindow,
@@ -1211,6 +1345,8 @@ function createOverlayBridge({
     beginBubbleDrag,
     moveBubbleDrag,
     endBubbleDrag,
+    clampToVisibleArea,
+    positionBubbleAt,
     captureScreenshot,
     openRadialMenu,
     closeRadialMenu,

@@ -211,10 +211,19 @@ export class PasskeyService {
         if (!res || !res.ok) {
           const reason = (res && res.reason) || 'verification-failed';
           if (reason === 'no-passkey-registered') {
-            // The device-side record is gone (app data cleared, file
-            // removed) while the renderer still held one - self-heal by
-            // dropping the stale record so the UI offers "Create passkey"
-            // again instead of a dead "Passkey active" card.
+            // The device-side record is gone (file corrupted/removed)
+            // while the renderer still holds one. Old behavior deleted
+            // the renderer record too - the user experienced that as
+            // "Verify now REMOVED my passkey". Device-lock records can
+            // be re-created safely (the proof is the live OS ceremony,
+            // not the stored blob), so REPAIR first and only fall back
+            // to dropping the record when repair is impossible (PIN
+            // records - the verifier cannot be rebuilt without trusting
+            // whatever PIN was just typed).
+            if (stored.method && stored.method !== 'pin') {
+              const repaired = await this._repairDeviceRecord(stored);
+              if (repaired) return repaired;
+            }
             await this._delete(STORAGE_KEY);
           }
           return { success: false, reason };
@@ -243,6 +252,32 @@ export class PasskeyService {
       return { success: true };
     } catch (err) {
       return { success: false, reason: errorReason(err) };
+    }
+  }
+
+  /**
+   * Re-create a lost device-lock record and re-run the ceremony. The
+   * re-registration itself runs the OS confirmation (Touch ID / system
+   * password prompt), so this never grants access without the user
+   * proving themselves. Returns a { success, repaired } result on
+   * success, or null when the repair could not complete.
+   */
+  async _repairDeviceRecord(stored) {
+    try {
+      const res = await this.nativeBridge.register(stored.accountLabel || 'Yayra user', { method: 'device' });
+      if (!res || !res.ok || !res.passkey) return null;
+      const passkey = {
+        credentialId: res.passkey.credentialId,
+        accountLabel: stored.accountLabel || 'Yayra user',
+        rpId: null,
+        method: res.passkey.method || stored.method || 'os-keychain',
+        createdAt: stored.createdAt || res.passkey.createdAt || Date.now(),
+        lastVerifiedAt: Date.now()
+      };
+      await this._set(STORAGE_KEY, passkey);
+      return { success: true, repaired: true };
+    } catch {
+      return null;
     }
   }
 

@@ -36,10 +36,12 @@
  */
 
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 
 const FILE_NAME = 'yayra-device-passkey.json';
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MS = 60 * 1000;
+const SYSTEM_AUTH_TIMEOUT_MS = 90 * 1000;
 
 function createPasskeyBridge({
   ipcMain,
@@ -50,6 +52,8 @@ function createPasskeyBridge({
   systemPreferencesImpl = null,
   platform = process.platform,
   randomBytesImpl = (n) => crypto.randomBytes(n),
+  // Real system-password confirmation on Linux (PolicyKit GUI prompt).
+  spawnImpl = spawn,
   // Phone QR approval session manager (electron/phoneApproval.cjs).
   // Optional: without it the phone option reports itself unavailable.
   phoneApproval = null,
@@ -85,18 +89,98 @@ function createPasskeyBridge({
     }
   }
 
-  function readRecord() {
+  /* -------------- REAL system-password prompt (Linux) -------------- */
+  // "System lock" on Linux used to be a SILENT safeStorage decrypt - the
+  // user was never asked for anything, which read as "not working at
+  // all". pkexec (PolicyKit) shows the genuine system password dialog;
+  // exit 0 means the OS user authenticated, 126/127 means they dismissed
+  // the prompt. This is the same elevation path the updater uses for
+  // .deb installs, so it is known-good on the target machines.
+
+  function findPkexec() {
+    const candidates = ['/usr/bin/pkexec', '/bin/pkexec', '/usr/local/bin/pkexec'];
+    for (const candidate of candidates) {
+      try { if (fs.existsSync(candidate)) return candidate; } catch { /* keep looking */ }
+    }
+    return null;
+  }
+
+  function systemAuthAvailable() {
+    return platform === 'linux' && Boolean(findPkexec());
+  }
+
+  function promptSystemAuthIfAvailable() {
+    if (!systemAuthAvailable()) return Promise.resolve({ ok: true, prompted: false });
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+      let child;
+      try {
+        child = spawnImpl(findPkexec(), ['/bin/true'], { stdio: 'ignore' });
+      } catch (err) {
+        done({ ok: false, prompted: false, reason: 'system-auth-unavailable', detail: String(err?.message || err) });
+        return;
+      }
+      const timer = setTimeout(() => {
+        try { child.kill?.(); } catch { /* best effort */ }
+        done({ ok: false, prompted: true, reason: 'user-declined-or-timeout' });
+      }, SYSTEM_AUTH_TIMEOUT_MS);
+      if (typeof timer?.unref === 'function') timer.unref();
+      child.once?.('error', (err) => {
+        clearTimeout(timer);
+        done({ ok: false, prompted: false, reason: 'system-auth-unavailable', detail: String(err?.message || err) });
+      });
+      child.once?.('exit', (code) => {
+        clearTimeout(timer);
+        if (code === 0) done({ ok: true, prompted: true });
+        else done({ ok: false, prompted: true, reason: 'user-declined-or-timeout' });
+      });
+    });
+  }
+
+  /* --------------- durable record storage (+ backup) --------------- */
+  // "Verify now removed my passkey": a corrupted/missing record file made
+  // verify report no-passkey-registered, and the renderer then dropped
+  // its own copy too. The record is now written atomically (temp file +
+  // rename where the fs supports it) WITH a .bak twin, and reads fall
+  // back to the backup - a half-written main file no longer destroys the
+  // registration.
+
+  const backupPath = `${filePath}.bak`;
+
+  function parseRecordFile(p) {
     try {
-      if (!fs.existsSync(filePath)) return null;
-      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (!fs.existsSync(p)) return null;
+      return JSON.parse(fs.readFileSync(p, 'utf8'));
     } catch {
       return null;
     }
   }
 
+  function readRecord() {
+    const main = parseRecordFile(filePath);
+    if (main) return main;
+    const backup = parseRecordFile(backupPath);
+    if (backup) {
+      // Self-heal the main file from the surviving backup.
+      try { fs.writeFileSync(filePath, JSON.stringify(backup)); } catch { /* read-only fs - backup still serves */ }
+      logger?.warn?.('[yayra:passkey] main record file was missing/corrupt - restored from backup');
+      return backup;
+    }
+    return null;
+  }
+
   function writeRecord(record) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(record));
+    const payload = JSON.stringify(record);
+    if (typeof fs.renameSync === 'function') {
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, payload);
+      fs.renameSync(tmpPath, filePath);
+    } else {
+      fs.writeFileSync(filePath, payload);
+    }
+    try { fs.writeFileSync(backupPath, payload); } catch { /* backup is best-effort */ }
   }
 
   /* ---------------------- 6-digit PIN fallback ---------------------- */
@@ -146,7 +230,11 @@ function createPasskeyBridge({
   }
 
   function method() {
-    return touchIdAvailable() ? 'touch-id' : 'os-keychain';
+    if (touchIdAvailable()) return 'touch-id';
+    // Linux with PolicyKit: verification is a REAL system-password
+    // prompt, not just keychain decryption - name it honestly.
+    if (systemAuthAvailable()) return 'system-lock';
+    return 'os-keychain';
   }
 
   /**
@@ -179,7 +267,9 @@ function createPasskeyBridge({
       // The fallback ladder, so the UI can offer exactly what this
       // device really supports instead of a dead button.
       methods: {
-        deviceLock: encryptionAvailable(),
+        // System lock works via the OS keychain OR a real PolicyKit
+        // password prompt (Linux) - either one makes the option live.
+        deviceLock: encryptionAvailable() || systemAuthAvailable(),
         touchId: touchIdAvailable(),
         pin: true,
         phone: Boolean(phoneApproval)
@@ -226,20 +316,40 @@ function createPasskeyBridge({
         return { ok: false, reason: 'device-storage-failed' };
       }
     }
-    if (!encryptionAvailable()) return { ok: false, reason: 'keychain-unavailable' };
+    // 'device' (system lock): needs the OS keychain OR a real system
+    // password prompt (Linux PolicyKit). With neither, the UI falls back
+    // to the PIN/phone rungs of the ladder.
+    if (!encryptionAvailable() && !systemAuthAvailable()) {
+      return { ok: false, reason: 'keychain-unavailable' };
+    }
     const gate = await promptTouchIdIfAvailable('register a Yayra device passkey');
     if (!gate.ok) return { ok: false, reason: gate.reason };
+    if (!gate.prompted) {
+      // No Touch ID on this device: creating a system-lock passkey must
+      // CONFIRM the system password where a real prompt exists.
+      const sysGate = await promptSystemAuthIfAvailable();
+      if (!sysGate.ok && sysGate.prompted) return { ok: false, reason: sysGate.reason };
+    }
     try {
-      const secret = randomBytesImpl(32).toString('base64');
-      const encrypted = safeStorageImpl.encryptString(secret);
-      return persistWithReadBack({
+      const base = {
         credentialId: `device-${Date.now()}-${randomBytesImpl(6).toString('hex')}`,
         label: String(label),
         createdAt: Date.now(),
-        method: method(),
-        secretHash: crypto.createHash('sha256').update(secret).digest('hex'),
-        encryptedSecret: Buffer.from(encrypted).toString('base64')
-      });
+        method: method()
+      };
+      if (encryptionAvailable()) {
+        const secret = randomBytesImpl(32).toString('base64');
+        const encrypted = safeStorageImpl.encryptString(secret);
+        return persistWithReadBack({
+          ...base,
+          secretHash: crypto.createHash('sha256').update(secret).digest('hex'),
+          encryptedSecret: Buffer.from(encrypted).toString('base64')
+        });
+      }
+      // No keychain, but a real system-password prompt exists (verified
+      // above): the record carries no secret - every verify re-runs the
+      // live OS authentication, which is the actual proof.
+      return persistWithReadBack(base);
     } catch (err) {
       logger?.error?.(`[yayra:passkey] register failed: ${err?.message || err}`);
       return { ok: false, reason: 'keychain-unavailable' };
@@ -250,15 +360,47 @@ function createPasskeyBridge({
     const record = readRecord();
     if (!record) return { ok: false, reason: 'no-passkey-registered' };
     if (record.method === 'pin') return verifyPin(record, pin);
-    if (!encryptionAvailable()) return { ok: false, reason: 'keychain-unavailable' };
+
+    // macOS: Touch ID prompt where the hardware has it.
     const gate = await promptTouchIdIfAvailable('unlock your Yayra vault');
     if (!gate.ok) return { ok: false, reason: gate.reason };
+
+    // Linux: REAL system-password confirmation via PolicyKit. Succeeding
+    // here IS the authentication ("confirm your system" - the user sees
+    // and answers the OS dialog); declining it fails the ceremony.
+    let systemProved = false;
+    if (!gate.prompted) {
+      const sysGate = await promptSystemAuthIfAvailable();
+      if (!sysGate.ok && sysGate.prompted) return { ok: false, reason: sysGate.reason };
+      systemProved = Boolean(sysGate.ok && sysGate.prompted);
+    }
+
+    if (!record.encryptedSecret) {
+      // System-auth-only record (registered without a keychain): the
+      // live prompt above is the whole ceremony.
+      if (systemProved || gate.prompted) return { ok: true };
+      return { ok: false, reason: systemAuthAvailable() ? 'verification-failed' : 'system-auth-unavailable' };
+    }
+
+    if (!encryptionAvailable()) {
+      // Keychain gone since registration (e.g. keyring service removed).
+      // A successful live system prompt still proves the user.
+      if (systemProved) return { ok: true };
+      return { ok: false, reason: 'keychain-unavailable' };
+    }
     try {
       const secret = safeStorageImpl.decryptString(Buffer.from(record.encryptedSecret, 'base64'));
       const matches = crypto.createHash('sha256').update(secret).digest('hex') === record.secretHash;
-      return matches ? { ok: true } : { ok: false, reason: 'verification-failed' };
+      if (matches) return { ok: true };
+      // Decrypt succeeded but the hash does not line up: the record was
+      // tampered with - fail regardless of the live prompt.
+      return { ok: false, reason: 'verification-failed' };
     } catch (err) {
       logger?.error?.(`[yayra:passkey] verify failed: ${err?.message || err}`);
+      // The OS keyring could not decrypt (changed/reset keyring) - but a
+      // live system-password prompt that the user just passed is stronger
+      // proof than the stale ciphertext, so honour it.
+      if (systemProved) return { ok: true };
       return { ok: false, reason: 'verification-failed' };
     }
   }
@@ -285,6 +427,7 @@ function createPasskeyBridge({
   async function handleRemove() {
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch { /* best effort */ }
       return { ok: true };
     } catch (err) {
       return { ok: false, reason: String(err?.message || err) };

@@ -76,6 +76,7 @@ function describePasskeyReason(reason) {
     case 'wrong-pin': return 'wrong PIN';
     case 'pin-locked': return 'too many wrong PIN attempts - PIN entry is locked for a minute';
     case 'verification-cancelled': return 'the verification was cancelled';
+    case 'system-auth-unavailable': return 'the system password prompt is unavailable on this device';
     case 'no-lan': return 'phone approval needs your PC to be on a Wi-Fi/LAN network the phone can reach';
     default: return reason || 'unknown error';
   }
@@ -830,6 +831,64 @@ export class BrowserShell {
       window.addEventListener('resize', this.boundResizeHandler);
       window.addEventListener('keydown', this.boundKeyHandler);
     }
+
+    // First open on a NEW version (i.e. right after an update installed):
+    // celebrate with the quick Yayra-orb animation + the freshly
+    // installed version number.
+    this.maybeShowUpdateSplash();
+  }
+
+  /**
+   * Compare the running version against the one recorded last run; when
+   * it moved forward, the update that was installed gets its moment. The
+   * marker updates every launch, so the splash shows exactly once per
+   * new version - honest: no stored previous version (first install) =
+   * no "updated" claim.
+   */
+  maybeShowUpdateSplash() {
+    if (typeof localStorage === 'undefined') return false;
+    const current = this.state.updateState?.installedVersion;
+    if (!current) return false;
+    let previous = null;
+    try {
+      previous = localStorage.getItem('yayra:last-run-version');
+      localStorage.setItem('yayra:last-run-version', current);
+    } catch {
+      return false;
+    }
+    if (!previous || previous === current) return false;
+    this.showUpdateSplash(current, previous);
+    return true;
+  }
+
+  /** The animation itself: spinning/glowing Yayra orb + installed version. */
+  showUpdateSplash(version, previousVersion = null) {
+    if (typeof document === 'undefined' || !document.body) return;
+    // Never stack two splashes (e.g. re-init in the same session).
+    document.querySelector('.fb-update-splash')?.remove();
+    const splash = document.createElement('div');
+    splash.className = 'fb-update-splash';
+    splash.setAttribute('role', 'status');
+    splash.setAttribute('aria-label', `Yayra updated to version ${version}`);
+    splash.innerHTML = `
+      <div class="fb-update-splash-stage">
+        <span class="fb-update-splash-ring"></span>
+        <span class="fb-update-splash-ring fb-update-splash-ring-2"></span>
+        <div class="fb-update-splash-orb">${Icons.officialOrb}</div>
+        <div class="fb-update-splash-text">
+          <strong class="fb-update-splash-title">Yayra updated</strong>
+          <span class="fb-update-splash-version">v${version}</span>
+          ${previousVersion ? `<span class="fb-update-splash-from">from v${previousVersion}</span>` : ''}
+        </div>
+      </div>`;
+    const dismiss = () => {
+      splash.classList.add('fb-update-splash-leave');
+      setTimeout(() => { try { splash.remove(); } catch { /* already gone */ } }, 450);
+    };
+    splash.addEventListener('click', dismiss);
+    document.body.appendChild(splash);
+    // Quick by design: ~2.6s on screen, then it fades itself away.
+    setTimeout(dismiss, 2600);
   }
 
   getActiveTab() {
@@ -2529,7 +2588,7 @@ export class BrowserShell {
         title: 'Choose how to protect your vault',
         description: touchId
           ? 'System lock uses Touch ID and your Mac\u2019s Keychain. The 6-digit PIN works on any device - 5 wrong tries locks it for a minute.'
-          : 'System lock ties the passkey to your PC login (unlocking your computer is the authentication). The 6-digit PIN works on any device - 5 wrong tries locks it for a minute.',
+          : 'System lock asks you to confirm your computer\u2019s own password (the one you log in with) whenever the vault needs unlocking. The 6-digit PIN works on any device - 5 wrong tries locks it for a minute.',
         buttons: [
           { action: 'device', label: touchId ? 'Use Touch ID + system lock (recommended)' : 'Use system lock (recommended)', primary: true },
           { action: 'pin', label: 'Create a 6-digit PIN instead' },
@@ -2705,7 +2764,15 @@ export class BrowserShell {
     const result = await this._performPasskeyCeremony();
     if (result.success) {
       this._vaultUnlockedAt = Date.now();
-      this.showTransientNotice('Passkey verified.');
+      if (result.repaired) {
+        // The device record had to be re-created (lost/corrupted file) -
+        // the user re-proved themselves via the OS ceremony, so the
+        // passkey is intact rather than "removed".
+        this.state.passkeyInfo = await this.passkeyService.getRegisteredPasskey();
+        this.showTransientNotice('Passkey verified - the device record was repaired automatically.');
+      } else {
+        this.showTransientNotice('Passkey verified.');
+      }
       this.render();
       return true;
     }

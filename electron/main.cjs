@@ -38,6 +38,17 @@ let lastLoadError = null;
 const isAutostartLaunch = process.argv.includes('--yayra-autostart');
 
 protocol.registerSchemesAsPrivileged([{ scheme: CUSTOM_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
+
+// Linux: the floating bubble DEPENDS on programmatic window positioning
+// (drag) and always-on-top stacking - both of which native Wayland
+// windows simply do not get (the compositor refuses external positioning
+// and ignores the above hint). Running through XWayland (x11 backend)
+// keeps every bubble behavior working on Wayland desktops too, so pin
+// the hint even when the environment (ELECTRON_OZONE_PLATFORM_HINT=auto/
+// wayland) would have picked native Wayland.
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('ozone-platform-hint', 'x11');
+}
 if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.commandLine.appendSwitch('headless');
   app.disableHardwareAcceleration();

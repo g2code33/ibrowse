@@ -497,3 +497,69 @@ test('right-click menu: clicking anywhere ELSE dismisses it - focusable only for
   bubble.emitOnce('blur'); // listener was removed in the callback
   assert.equal(menu2.closeCalls, 0, 'no ghost close after the menu already closed');
 });
+
+/* -------------- stay-on-screen clamping + cursor drag assist -------------- */
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('drag: the bubble can NEVER be dragged off the screen - positions clamp to the work area', () => {
+  const { bridge, instances } = makeHarness();
+  bridge.ensureOverlayWindow();
+  const win = instances[0];
+
+  bridge.beginBubbleDrag({ x: 32, y: 32 });
+  // Way past the bottom-right corner of the 1920x1080 work area.
+  bridge.moveBubbleDrag({ x: 5000, y: 5000 });
+  assert.deepEqual(win.getPosition(), [1920 - 64, 1080 - 64], 'clamped to the far corner, bubble fully visible');
+  // Way past the top-left.
+  bridge.moveBubbleDrag({ x: -500, y: -500 });
+  assert.deepEqual(win.getPosition(), [0, 0], 'clamped to the origin');
+  bridge.endBubbleDrag();
+});
+
+test('restore: a saved position outside every screen is pulled back on-screen at startup', () => {
+  const { bridge, overlayStore, instances } = makeHarness();
+  overlayStore.save({ position: { x: 5000, y: -200 } }); // monitor was unplugged
+  bridge.ensureOverlayWindow();
+  const win = instances[0];
+  assert.equal(win.opts.x, 1920 - 64, 'x clamped into the work area');
+  assert.equal(win.opts.y, 0, 'y clamped into the work area');
+});
+
+test('drag assist: when the renderer pointermove stream dies mid-drag, the cursor poll keeps the bubble moving (delta-based)', async () => {
+  const { bridge, instances, screenState } = makeHarness({ cursor: { x: 500, y: 300 } });
+  bridge.ensureOverlayWindow();
+  const win = instances[0];
+  const [startX, startY] = win.getPosition();
+
+  bridge.beginBubbleDrag({ x: 32, y: 32 });
+  // No pointerdown teleport: beginning the drag must not move the window.
+  assert.deepEqual(win.getPosition(), [startX, startY], 'press/drag-start alone never moves the window');
+
+  // The renderer stream goes silent; the user keeps dragging the mouse.
+  screenState.cursor = { x: 440, y: 260 }; // delta (-60, -40)
+  await delay(350); // assist takes over after ~120ms of silence
+  assert.deepEqual(win.getPosition(), [startX - 60, startY - 40],
+    'the bubble followed the OS cursor by exactly the cursor delta');
+
+  bridge.endBubbleDrag();
+  screenState.cursor = { x: 100, y: 100 };
+  await delay(120);
+  assert.deepEqual(win.getPosition(), [startX - 60, startY - 40], 'after the drag ends the poll is OFF');
+});
+
+test('drag assist: renderer events stay the primary driver while they flow', async () => {
+  const { bridge, instances, screenState } = makeHarness({ cursor: { x: 500, y: 300 } });
+  bridge.ensureOverlayWindow();
+  const win = instances[0];
+
+  bridge.beginBubbleDrag({ x: 10, y: 10 });
+  bridge.moveBubbleDrag({ x: 700, y: 500 });
+  assert.deepEqual(win.getPosition(), [690, 490], 'renderer coordinates position the window directly');
+  // Cursor fake says something totally different, but the renderer just
+  // reported - the assist must NOT fight it.
+  screenState.cursor = { x: 50, y: 50 };
+  await delay(60);
+  assert.deepEqual(win.getPosition(), [690, 490], 'no poll interference inside the renderer-fresh window');
+  bridge.endBubbleDrag();
+});
