@@ -86,6 +86,40 @@ process.on('uncaughtException', (err) => {
     if (app.isReady()) dialog.showErrorBox('Yayra hit an unexpected error', String(err && err.stack ? err.stack : err));
   } catch { /* headless / too early */ }
 });
+
+// GPU self-heal: on some Linux driver/XWayland combos Chromium's GPU
+// process segfault-loops ("GPU process exited unexpectedly:
+// exit_code=139", vaInitialize failures) - windows get created but
+// NOTHING ever paints, which looks exactly like "the app is not opening
+// at all". When we see the GPU process crash repeatedly, we persist a
+// flag and relaunch ourselves into software rendering, which always
+// paints. Delete the flag file (or unset it in a future launch) to
+// retry hardware acceleration after a driver upgrade.
+const softwareRenderFlagPath = () => path.join(app.getPath('userData'), 'force-software-render');
+let softwareRenderActive = false;
+try {
+  softwareRenderActive = process.env.YAYRA_SOFTWARE_RENDER === '1' || fs.existsSync(softwareRenderFlagPath());
+} catch { /* fs unavailable - stay on the default path */ }
+if (softwareRenderActive) {
+  app.disableHardwareAcceleration();
+  console.warn(`[yayra] software rendering active (the GPU process crashed on this machine before). Delete ${softwareRenderFlagPath()} to retry hardware acceleration.`);
+}
+let gpuCrashCount = 0;
+app.on('child-process-gone', (_event, details) => {
+  if (!details || details.type !== 'GPU') return;
+  if (details.reason !== 'crashed' && details.reason !== 'abnormal-exit' && details.reason !== 'killed') return;
+  gpuCrashCount += 1;
+  console.error(`[yayra] GPU process ${details.reason} (#${gpuCrashCount}, exit code ${details.exitCode})`);
+  if (gpuCrashCount < 2 || softwareRenderActive) return;
+  softwareRenderActive = true; // never schedule the relaunch twice
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(softwareRenderFlagPath(), `GPU process crash-looped on ${new Date().toISOString()}; Yayra switched to software rendering. Delete this file to retry hardware acceleration.\n`);
+  } catch { /* flag not persisted - this relaunch still fixes the session */ }
+  console.error('[yayra] GPU is crash-looping - relaunching with software rendering so the app can actually paint');
+  app.relaunch();
+  app.exit(0);
+});
 if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
   app.commandLine.appendSwitch('headless');
   app.disableHardwareAcceleration();
