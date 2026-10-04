@@ -673,6 +673,39 @@ html {
   gap: 8px;
 }
 
+/* Persistent "Update available" chip - shown whenever an update is ready
+   (found by a manual or background check) until it is applied. */
+.fb-update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 14px;
+  background: var(--fb-accent-primary);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  animation: fb-update-chip-pop 0.25s ease;
+}
+
+.fb-update-chip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.fb-update-chip:hover {
+  filter: brightness(1.12);
+}
+
+@keyframes fb-update-chip-pop {
+  from { transform: scale(0.85); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
 .fb-menu-btn {
   width: 32px;
   height: 32px;
@@ -2085,25 +2118,25 @@ html {
   padding-bottom: 0;
 }
 
-/* Persistent Floating Bubble */
+/* Persistent Floating Bubble - the bubble IS the app logo itself on every
+   platform: no circular backdrop, border or glass plate behind it (matches
+   the Electron native overlay bubble, which is also logo-only). */
 .yayra-floating-bubble-persistent {
   position: fixed;
   z-index: 99999;
   width: 58px;
   height: 58px;
-  border-radius: 50%;
-  background: rgba(13, 23, 54, 0.88);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1.5px solid rgba(255, 255, 255, 0.25);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.4);
+  background: transparent;
+  border: none;
+  box-shadow: none;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: grab;
   user-select: none;
   touch-action: none;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s ease, filter 0.15s ease;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.45));
 }
 
 .yayra-floating-bubble-persistent:active {

@@ -45,8 +45,63 @@ test('Native engine ABSENT (web/PWA fallback): external navigation still renders
   shell.navigateActiveTab('https://example.com/');
   const el = shell.render(container);
 
-  assert.ok(el.querySelector('iframe'), 'falls back to an <iframe> when no native bridge is present');
+  // The iframe lives in the persistent web-frame layer (a sibling of the
+  // shell inside the container) so chrome re-renders never reload it -
+  // query the container, not the shell element.
+  assert.ok(container.querySelector('iframe'), 'falls back to an <iframe> when no native bridge is present');
+  assert.ok(el.querySelector('.fb-web-frame-slot'), 'viewport renders the slot the frame layer tracks');
   assert.equal(el.querySelector('.fb-native-webview-slot'), null);
+});
+
+test('Web/PWA no-blink fix: re-rendering chrome REUSES the same <iframe> element and never resets its src', async () => {
+  delete globalThis.window.yayra;
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, platform: 'linux', isMobile: false });
+  await shell.initialize();
+  shell.navigateActiveTab('https://example.com/');
+  shell.render(container);
+
+  const frame = shell.webFrames.get(shell.getActiveTab().id);
+  assert.ok(frame && frame.iframe, 'pooled frame exists for the active tab');
+  const firstIframe = frame.iframe;
+  const srcAfterFirstRender = firstIframe.src;
+
+  // Simulate the exact user-visible bug: opening the Yayra menu (and the
+  // update-check status flip) re-render the whole chrome.
+  shell.state.isSideDrawerOpen = true;
+  shell.render();
+  shell.state.isSideDrawerOpen = false;
+  shell.state.updateState = { ...shell.state.updateState, status: 'checking' };
+  shell.render();
+
+  const frameAfter = shell.webFrames.get(shell.getActiveTab().id);
+  assert.equal(frameAfter.iframe, firstIframe, 'same iframe element across chrome re-renders (recreating it = full page reload / white flash)');
+  assert.equal(frameAfter.iframe.src, srcAfterFirstRender, 'src untouched when the URL did not change');
+  assert.equal(frameAfter.iframe.parentElement.parentElement, shell.webFrameLayer, 'frame stays in the persistent layer, never reparented into the rebuilt viewport');
+
+  // Navigating the tab to a NEW url is the only thing allowed to set src.
+  shell.navigateActiveTab('https://example.org/');
+  const frameNav = shell.webFrames.get(shell.getActiveTab().id);
+  assert.equal(frameNav.iframe, firstIframe, 'still the same element after navigation');
+  assert.ok(String(frameNav.iframe.src).includes('example.org'), 'src updates on real navigation');
+});
+
+test('Web/PWA frame layer: hidden on internal pages, pruned when tabs close', async () => {
+  delete globalThis.window.yayra;
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, platform: 'linux', isMobile: false });
+  await shell.initialize();
+  shell.navigateActiveTab('https://example.com/');
+  shell.render(container);
+  assert.equal(shell.webFrameLayer.style.display, 'block', 'layer visible while an external page is active');
+
+  const externalTabId = shell.getActiveTab().id;
+  shell.openInternalPage('yayra://settings');
+  assert.equal(shell.webFrameLayer.style.display, 'none', 'layer hidden when the active page is internal');
+  assert.ok(shell.webFrames.has(externalTabId), 'frame for the tab is kept (back/forward must not reload)');
+
+  shell.closeTab(externalTabId);
+  assert.equal(shell.webFrames.has(externalTabId), false, 'frame removed when its tab closes');
 });
 
 test('Native engine PRESENT (Electron desktop): external navigation NEVER creates an <iframe> and drives the native bridge instead', async () => {

@@ -275,6 +275,14 @@ export class BrowserShell {
     this.omniboxInput = null;
     this.viewportElement = null;
     this.bubbleOverlay = null;
+    // Persistent web-frame layer (web/PWA): survives re-renders so embedded
+    // pages never reload when the chrome re-renders. See ensureWebFrameLayer().
+    this.webFrameLayer = null;
+    this.webFrames = new Map();
+    this.activeWebFrameSlot = null;
+    this.activeWebFrameTabId = null;
+    this.lastRenderTarget = null;
+    this._updateCheckTimer = null;
 
     this.boundResizeHandler = () => this.handleViewportResize();
     this.boundKeyHandler = (e) => this.handleGlobalKeyDown(e);
@@ -328,6 +336,7 @@ export class BrowserShell {
       setTimeout(() => {
         this.checkForUpdates(false);
       }, 1200);
+      this.startBackgroundUpdateChecks();
     }
 
     // When the theme preference is "system", follow live OS light/dark
@@ -665,7 +674,23 @@ export class BrowserShell {
     const target = container || this.container || (this.rootElement && this.rootElement.parentElement);
     if (!target) return null;
 
-    target.innerHTML = '';
+    this.lastRenderTarget = target;
+
+    // CRITICAL (web/PWA no-blink fix): the persistent web-frame layer holds
+    // the live <iframe> for each external tab. It must SURVIVE re-renders -
+    // recreating (or even reparenting) an <iframe> forces the embedded page
+    // to fully reload, which users saw as a white flash of the whole page
+    // every time any piece of chrome re-rendered (opening the Yayra menu,
+    // pressing "Check for updates", toggling a dropdown...). So instead of
+    // wiping the container wholesale, every child EXCEPT the frame layer is
+    // removed and rebuilt as before.
+    if (this.webFrameLayer && this.webFrameLayer.parentElement === target) {
+      for (const child of [...(target.children || [])]) {
+        if (child !== this.webFrameLayer) child.remove();
+      }
+    } else {
+      target.innerHTML = '';
+    }
     const activeTab = this.getActiveTab();
     const isPrivate = activeTab?.isPrivate;
 
@@ -746,7 +771,159 @@ export class BrowserShell {
     // Maintain persistent assistive bubble in the DOM
     this.ensurePersistentAssistiveBubble();
 
+    // Position/show/hide the persistent web-frame layer so the live iframe
+    // lines up exactly with the viewport slot rendered above. A second pass
+    // on the next animation frame catches post-layout geometry.
+    this.syncWebFrameLayer();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this.syncWebFrameLayer());
+    }
+
     return shell;
+  }
+
+  /* -------------------------------------------------------------
+   * PERSISTENT WEB-FRAME LAYER (WEB/PWA - NO-RELOAD RENDERING)
+   * -----------------------------------------------------------
+   * On web/PWA builds external pages render in an <iframe>. Browsers
+   * reload an iframe whenever it is recreated OR reparented, so the frames
+   * live in a fixed-position layer that is a SIBLING of the re-rendered
+   * shell (never torn down by render()) and the viewport only renders a
+   * transparent slot whose on-screen rectangle the layer copies. Yayra's
+   * own chrome (drawer z-600000, dropdowns/modals z-1000+, bubble z-99999)
+   * all stack far above the layer's z-index of 10, so overlays still
+   * paint over the page exactly as before. This mirrors the Electron
+   * native-WebContentsView architecture (see attachNativeWebviewSlot),
+   * which is why Electron never had the reload bug.
+   * ----------------------------------------------------------- */
+  ensureWebFrameLayer() {
+    if (typeof document === 'undefined') return null;
+    const target = this.lastRenderTarget || this.container || (this.rootElement && this.rootElement.parentElement);
+    if (!target) return null;
+    if (!this.webFrameLayer || this.webFrameLayer.parentElement !== target) {
+      if (this.webFrameLayer) this.webFrameLayer.remove();
+      const layer = document.createElement('div');
+      layer.className = 'fb-web-frame-layer';
+      layer.style.cssText = 'position:fixed; left:0; top:0; width:0; height:0; z-index:10; display:none; overflow:hidden; background:transparent;';
+      target.appendChild(layer);
+      this.webFrameLayer = layer;
+      this.webFrames = new Map();
+    }
+    return this.webFrameLayer;
+  }
+
+  // Returns true when the pooled persistent frame was mounted for this tab;
+  // false means the caller must fall back to the classic one-shot
+  // createWebContentFrame() path (native engine, auth handoff, known
+  // frame-blocked hosts, zoomed viewports, non-DOM test environments).
+  mountPooledWebFrame(webViewContainer, tab) {
+    if (typeof document === 'undefined') return false;
+    if (this.nativeWebview) return false;
+    if (this.isSystemBrowserAuthHost(tab.url)) return false;
+    if (this.isKnownFrameBlockedUrl(tab.url)) return false;
+    if (this.state.zoomLevel !== 100) return false;
+    const layer = this.ensureWebFrameLayer();
+    if (!layer) return false;
+
+    const slot = document.createElement('div');
+    slot.className = 'fb-web-frame-slot';
+    slot.style.cssText = 'flex:1; width:100%; height:100%; min-height:0;';
+    slot.setAttribute('data-tab-id', tab.id);
+    webViewContainer.appendChild(slot);
+    this.activeWebFrameSlot = slot;
+    this.activeWebFrameTabId = tab.id;
+
+    let frame = this.webFrames.get(tab.id);
+    if (!frame) {
+      const host = document.createElement('div');
+      host.className = 'fb-web-frame-host';
+      host.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; display:flex;';
+      const iframe = document.createElement('iframe');
+      iframe.className = 'fb-webview-frame';
+      iframe.style.cssText = 'flex:1; border:none; width:100%; height:100%; background:transparent;';
+      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
+      iframe.setAttribute('allow', 'fullscreen');
+      frame = { host, iframe, url: null, tabId: tab.id, blockedFallbackShown: false };
+      iframe.addEventListener('load', () => {
+        this.updateTabLoading(tab.id, false);
+        // Same best-effort blocked-framing net as createWebContentFrame():
+        // a site that refuses framing never actually replaces the frame's
+        // initial same-origin document.
+        const loadedUrl = frame.url;
+        setTimeout(() => {
+          try {
+            const frameDoc = iframe.contentDocument || iframe.contentWindow?.document;
+            const blocked = !!frameDoc && (!frameDoc.location || frameDoc.location.href === 'about:blank');
+            if (blocked && !frame.blockedFallbackShown && frame.url === loadedUrl) {
+              frame.blockedFallbackShown = true;
+              host.appendChild(this.buildFrameBlockedFallback(loadedUrl));
+            }
+          } catch (_err) {
+            // Cross-origin document present - navigation succeeded.
+          }
+        }, 450);
+      });
+      host.appendChild(iframe);
+      layer.appendChild(host);
+      this.webFrames.set(tab.id, frame);
+    }
+
+    // Only touch src when the tab's URL actually changed - re-renders with
+    // an unchanged URL must NEVER reset the iframe (that's the reload bug).
+    if (frame.url !== tab.url) {
+      frame.url = tab.url;
+      frame.blockedFallbackShown = false;
+      const stale = frame.host.querySelector ? frame.host.querySelector('.fb-frame-blocked-fallback') : null;
+      if (stale) stale.remove();
+      frame.iframe.src = tab.url;
+    }
+    return true;
+  }
+
+  syncWebFrameLayer() {
+    const layer = this.webFrameLayer;
+    if (!layer) return;
+
+    // Drop frames for tabs that no longer exist.
+    if (this.webFrames) {
+      for (const [tabId, frame] of Array.from(this.webFrames.entries())) {
+        if (!this.state.tabs.some((t) => t.id === tabId)) {
+          frame.host.remove();
+          this.webFrames.delete(tabId);
+        }
+      }
+    }
+
+    const slot = this.activeWebFrameSlot;
+    const activeId = this.activeWebFrameTabId;
+    const showing = Boolean(
+      slot &&
+      activeId &&
+      this.webFrames &&
+      this.webFrames.has(activeId) &&
+      !this.state.isMinimizedToBubble &&
+      (slot.isConnected !== false)
+    );
+
+    if (!showing) {
+      layer.style.display = 'none';
+      return;
+    }
+
+    layer.style.display = 'block';
+    for (const [tabId, frame] of this.webFrames.entries()) {
+      frame.host.style.display = tabId === activeId ? 'flex' : 'none';
+    }
+
+    if (typeof slot.getBoundingClientRect === 'function') {
+      const rect = slot.getBoundingClientRect();
+      if (rect && (rect.width > 0 || rect.height > 0)) {
+        layer.style.left = `${rect.left}px`;
+        layer.style.top = `${rect.top}px`;
+        layer.style.width = `${rect.width}px`;
+        layer.style.height = `${rect.height}px`;
+      }
+    }
   }
 
   /* -------------------------------------------------------------
@@ -978,6 +1155,26 @@ export class BrowserShell {
     // 4. Action Buttons (Downloads, Extensions, Mode Switcher, 3-Dot Menu)
     const toolbarActions = document.createElement('div');
     toolbarActions.className = 'fb-toolbar-actions';
+
+    // Persistent "Update available" chip: background update checks (see
+    // startBackgroundUpdateChecks) can discover a release at any time, and
+    // the one-per-session confirm dialog is easy to dismiss - this chip
+    // stays visible until the update is actually applied.
+    if (this.state.updateState.status === 'ready') {
+      const updateChip = document.createElement('button');
+      updateChip.className = 'fb-update-chip';
+      updateChip.setAttribute(
+        'title',
+        `Update Yayra to v${this.state.updateState.availableVersion || 'latest'} - click to install`
+      );
+      updateChip.setAttribute('aria-label', 'Install available update');
+      updateChip.innerHTML = `${Icons.download}<span class="fb-update-chip-label">Update</span>`;
+      updateChip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.applyUpdate();
+      });
+      toolbarActions.appendChild(updateChip);
+    }
 
     // Requirement 10: Downloads Button (Transparent, Compact, Matching Star Size)
     const dlBtn = document.createElement('button');
@@ -1283,6 +1480,10 @@ export class BrowserShell {
    * VIEWPORT CONTENT ROUTER (IN-TAB INTERNAL PAGES OR WEBVIEW)
    * ----------------------------------------------------------- */
   renderViewportContent(viewport, activeTab) {
+    // Assume no external pooled frame is on screen until the external
+    // branch below proves otherwise - internal pages must hide the layer.
+    this.activeWebFrameSlot = null;
+    this.activeWebFrameTabId = null;
     if (!activeTab) return;
 
     // Page Loading Progress Bar
@@ -1336,15 +1537,23 @@ export class BrowserShell {
         webViewContainer.style.height = `${(100 / this.state.zoomLevel) * 100}%`;
       }
 
-      const { wrapper } = this.createWebContentFrame(activeTab.url, {
-        frameClassName: 'fb-webview-frame',
-        onLoaded: () => this.updateTabLoading(activeTab.id, false),
-        tabId: activeTab.id,
-        isPrivate: activeTab.isPrivate,
-        allowNative: true
-      });
+      // Web/PWA: reuse the persistent pooled iframe for this tab so chrome
+      // re-renders never reload the page (no more white flash when opening
+      // the menu or checking for updates). Falls back to the classic
+      // one-shot frame for the native engine, auth handoff, known
+      // frame-blocked hosts and zoomed viewports.
+      const pooled = this.mountPooledWebFrame(webViewContainer, activeTab);
+      if (!pooled) {
+        const { wrapper } = this.createWebContentFrame(activeTab.url, {
+          frameClassName: 'fb-webview-frame',
+          onLoaded: () => this.updateTabLoading(activeTab.id, false),
+          tabId: activeTab.id,
+          isPrivate: activeTab.isPrivate,
+          allowNative: true
+        });
 
-      webViewContainer.appendChild(wrapper);
+        webViewContainer.appendChild(wrapper);
+      }
       viewport.appendChild(webViewContainer);
     }
   }
@@ -4207,6 +4416,39 @@ export class BrowserShell {
     root.appendChild(dropdown);
   }
 
+  /* -------------------------------------------------------------
+   * BACKGROUND UPDATE CHECKS
+   * -----------------------------------------------------------
+   * Beyond the single check shortly after startup, Yayra now re-checks on
+   * a timer (config-driven: updates config checkIntervalMinutes, default
+   * 12h, clamped to a 15-minute floor) so long-running sessions learn
+   * about new releases without the user ever opening the menu. When a
+   * background check finds an update, checkForUpdates() already alerts
+   * the user: promptUpdateReady() shows the one-per-session confirm
+   * dialog, and the toolbar renders a persistent "Update" chip that stays
+   * until the update is applied.
+   * ----------------------------------------------------------- */
+  startBackgroundUpdateChecks() {
+    if (this._updateCheckTimer || typeof setInterval !== 'function') return;
+    if (!this.updateService || typeof this.updateService.check !== 'function') return;
+    const configured = Number(this.updateService?.config?.checkIntervalMinutes);
+    const minutes = Math.max(15, Number.isFinite(configured) && configured > 0 ? configured : 720);
+    this._updateCheckTimer = setInterval(() => {
+      this.checkForUpdates(false);
+    }, minutes * 60 * 1000);
+    // Never keep a Node test process alive because of this timer.
+    if (this._updateCheckTimer && typeof this._updateCheckTimer.unref === 'function') {
+      this._updateCheckTimer.unref();
+    }
+  }
+
+  stopBackgroundUpdateChecks() {
+    if (this._updateCheckTimer) {
+      clearInterval(this._updateCheckTimer);
+      this._updateCheckTimer = null;
+    }
+  }
+
   async checkForUpdates(manual = false) {
     if (this.state.updateState.status === 'checking') return;
     this.state.updateState = { ...this.state.updateState, status: 'checking' };
@@ -5778,7 +6020,9 @@ export class BrowserShell {
     const hasLoadingTab = this.state.tabs.some((t) => t.isLoading);
     const bubbleOpacity = this.state.settings.bubbleOpacity || 0.88;
     const bubbleSize = Math.max(40, Math.min(120, Number(this.state.settings.bubbleSizePx) || 64));
-    const logoSize = Math.round(bubbleSize * 0.58);
+    // The logo IS the bubble (no circular plate behind it), so it fills
+    // the hit area edge-to-edge instead of sitting inside a backdrop.
+    const logoSize = bubbleSize;
     bubble.style.opacity = String(bubbleOpacity);
     bubble.style.width = `${bubbleSize}px`;
     bubble.style.height = `${bubbleSize}px`;
@@ -5801,12 +6045,18 @@ export class BrowserShell {
     const overlay = document.createElement('div');
     overlay.id = 'yayra-floating-bubble-overlay';
     overlay.className = 'yayra-floating-bubble-overlay';
+    // Pin the restore control just above the persistent assistive bubble
+    // (bottom-right) instead of letting it fall into document flow.
+    overlay.style.cssText = 'position:fixed; right:24px; bottom:104px; z-index:99998;';
+    // Logo-only, exactly like the persistent bubble: no circular plate,
+    // border or glass background behind the brand mark on ANY platform.
     overlay.innerHTML = `
-      <div class="yayra-floating-bubble yayra-floating-orb" role="button" aria-label="Restore Yayra Browser" tabindex="0">
-        <div style="width:36px; height:36px; display:flex; align-items:center; justify-content:center;">
+      <div class="yayra-floating-bubble yayra-floating-orb" role="button" aria-label="Restore Yayra Browser" tabindex="0"
+        style="position:relative; width:56px; height:56px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; cursor:pointer; filter:drop-shadow(0 6px 14px rgba(0,0,0,0.45));">
+        <div style="width:56px; height:56px; display:flex; align-items:center; justify-content:center; pointer-events:none;">
           ${Icons.officialOrb}
         </div>
-        <span class="yayra-bubble-badge">${this.state.tabs.length}</span>
+        <span class="yayra-bubble-badge" style="position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; padding:0 4px; font-size:10px; border-radius:9px; background:var(--fb-accent-primary); color:#ffffff; font-weight:700; display:flex; align-items:center; justify-content:center;">${this.state.tabs.length}</span>
       </div>
     `;
     overlay.addEventListener('click', () => {
@@ -6519,6 +6769,14 @@ export class BrowserShell {
     if (isMobile !== this.state.isMobile) {
       this.state.isMobile = isMobile;
       this.render();
+    } else {
+      // Window resized without a layout-mode change: the chrome DOM is
+      // untouched but the viewport slot moved/resized, so re-align the
+      // persistent web-frame layer to it.
+      this.syncWebFrameLayer();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => this.syncWebFrameLayer());
+      }
     }
   }
 
@@ -6603,6 +6861,14 @@ export class BrowserShell {
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.boundResizeHandler);
       window.removeEventListener('keydown', this.boundKeyHandler);
+    }
+    this.stopBackgroundUpdateChecks();
+    if (this.webFrameLayer) {
+      this.webFrameLayer.remove();
+      this.webFrameLayer = null;
+      this.webFrames = new Map();
+      this.activeWebFrameSlot = null;
+      this.activeWebFrameTabId = null;
     }
     if (this._unsubscribeNativeWebview) {
       this._unsubscribeNativeWebview();
