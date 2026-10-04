@@ -173,11 +173,22 @@ test('desktop update pipeline: confirming an available update downloads via the 
 
     await shell.checkForUpdates(true);
     // The in-app update card offers "Download & install now" / "Later" -
-    // accept it, which kicks off the async desktop pipeline; let it settle.
+    // accept it, which kicks off the async desktop download; let it settle.
     const card = container.querySelector('.fb-update-prompt-card');
     assert.ok(card, 'update card rendered for the available update');
     assert.match(String(card.querySelector('.fb-update-prompt-now').textContent), /Download/i, 'desktop pipeline wording');
     card.querySelector('.fb-update-prompt-now').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Staged (downloaded + verified) now ASKS when to install: now, when
+    // opened again, or later - choose "Install & restart now".
+    assert.equal(downloadCalls.length, 1, 'download already ran');
+    assert.equal(installCalls.length, 0, 'install must NOT run behind the user\u2019s back');
+    const installCard = container.querySelector('.fb-update-install-card');
+    assert.ok(installCard, 'install choice card rendered after staging');
+    assert.ok(installCard.querySelector('.fb-update-install-next-launch'), 'offers install-on-next-launch');
+    assert.ok(installCard.querySelector('.fb-update-install-later'), 'offers later/manual');
+    installCard.querySelector('.fb-update-install-now').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     assert.equal(downloadCalls.length, 1, 'main-process download started');

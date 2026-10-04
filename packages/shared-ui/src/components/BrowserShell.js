@@ -260,6 +260,12 @@ export class BrowserShell {
       updatePromptShown: false,
       // In-app "Update available" card: { version, notes, desktopPipeline }
       updatePrompt: null,
+      // Post-download install choice card: { path, version }
+      updateInstallPrompt: null,
+      // "Close Yayra?" prompt (close all / just close / keep all tabs)
+      closePrompt: false,
+      // "Reopen recent tabs?" offer after a plain close: [{url,title}]
+      recentTabsOffer: null,
       // Real "Sign in with Google" app-level identity (Electron desktop only
       // for now - see electron/googleAuth.cjs + electron/authBridge.cjs).
       // This is unrelated to, and does not attempt, signing in to Google
@@ -644,6 +650,12 @@ export class BrowserShell {
   }
 
   async initialize() {
+    // Honour last session's close choice (keep all tabs -> reopen them;
+    // just close -> offer them) and any "install update when opened
+    // again" scheduled last run. Both are consumed exactly once.
+    this.restoreCloseSession();
+    this.processPendingInstallOnLaunch().catch(() => {});
+
     if (this.settingsRepo) {
       try {
         const stored = await this.settingsRepo.getSettings();
@@ -837,6 +849,21 @@ export class BrowserShell {
     // "Update available - now or later?" card (auto background checks)
     if (this.state.updatePrompt) {
       this.renderUpdatePromptCard(shell);
+    }
+
+    // "Update downloaded - install now / next launch / later" card
+    if (this.state.updateInstallPrompt) {
+      this.renderUpdateInstallPromptCard(shell);
+    }
+
+    // "Close Yayra?" prompt (close all tabs / just close / keep all tabs)
+    if (this.state.closePrompt) {
+      this.renderClosePromptModal(shell);
+    }
+
+    // "Reopen recent tabs?" offer after a plain close last session
+    if (this.state.recentTabsOffer && this.state.recentTabsOffer.length) {
+      this.renderRecentTabsOffer(shell);
     }
 
     // Find in Page Toolbar
@@ -1151,7 +1178,7 @@ export class BrowserShell {
       const buttons = [
         { cls: 'fb-wc-minimize', title: 'Minimize', icon: '<svg viewBox="0 0 12 12" width="12" height="12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>', action: () => winControls.minimize() },
         { cls: 'fb-wc-maximize', title: 'Maximize / Restore', icon: '<svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg>', action: () => winControls.toggleMaximize() },
-        { cls: 'fb-wc-close', title: 'Close window', icon: '<svg viewBox="0 0 12 12" width="12" height="12" stroke="currentColor" stroke-width="1.2"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="2.5" x2="2.5" y2="9.5"/></svg>', action: () => winControls.close() }
+        { cls: 'fb-wc-close', title: 'Close window', icon: '<svg viewBox="0 0 12 12" width="12" height="12" stroke="currentColor" stroke-width="1.2"><line x1="2.5" y1="2.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="2.5" x2="2.5" y2="9.5"/></svg>', action: () => this.requestAppClose() }
       ];
       for (const { cls, title, icon, action } of buttons) {
         const btn = document.createElement('button');
@@ -2717,6 +2744,9 @@ export class BrowserShell {
         <button class="fb-settings-nav-item ${activeCat === 'extensions' ? 'active' : ''}" data-cat="extensions" data-category="extensions">
           ${Icons.shield} <span>Extensions & Shields</span>
         </button>
+        <button class="fb-settings-nav-item ${activeCat === 'updates' ? 'active' : ''}" data-cat="updates" data-category="updates">
+          ${Icons.download} <span>Yayra Updates</span>
+        </button>
         <button class="fb-settings-nav-item ${activeCat === 'about' ? 'active' : ''}" data-cat="about" data-category="about">
           ${Icons.info} <span>About Yayra</span>
         </button>
@@ -2919,6 +2949,13 @@ export class BrowserShell {
           </section>
 
           <!-- About -->
+          <!-- Yayra Updates -->
+          <section class="fb-settings-group-card" id="sec-updates" style="${activeCat === 'updates' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
+            <h3 class="fb-settings-group-title">${Icons.download} Yayra Updates</h3>
+            ${this.renderUpdatesSettingsHtml()}
+          </section>
+
+          <!-- About -->
           <section class="fb-settings-group-card" id="sec-about" style="${activeCat === 'about' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
             <h3 class="fb-settings-group-title">${Icons.info} About Yayra</h3>
             <p>Version ${this.state.updateState.installedVersion || 'unknown'} • Fast, Private Floating Browser with Glassmorphism Overlay.</p>
@@ -2937,6 +2974,9 @@ export class BrowserShell {
         this.render();
       });
     });
+
+    // Yayra Updates section actions
+    this.bindUpdatesSettingsActions(page);
 
     // Search filter
     const searchInput = page.querySelector('#fb-in-settings-search') || page.querySelector('#fb-settings-search-input');
@@ -4558,6 +4598,156 @@ export class BrowserShell {
     }
   }
 
+  /* -------------------------------------------------------------
+   * CLOSE PROMPT & SESSION HANDOVER
+   * -----------------------------------------------------------
+   * Closing the app while real tabs are open asks what to do:
+   *  - "Close all tabs & close"  -> next launch starts fresh;
+   *  - "Just close"              -> next launch OFFERS the recent tabs;
+   *  - "Keep all tabs & close"   -> next launch REOPENS every tab.
+   * The choice is stored in localStorage ('yayra:close-session') and
+   * consumed exactly once by the next launch (restoreCloseSession()).
+   * ----------------------------------------------------------- */
+  requestAppClose() {
+    const realTabs = this.state.tabs.filter((t) => !t.isPrivate && t.url && t.url !== 'yayra://newtab');
+    if (!realTabs.length || typeof document === 'undefined') {
+      try { this.windowControls?.close(); } catch { /* already closing */ }
+      return;
+    }
+    this.state.closePrompt = true;
+    this.render();
+  }
+
+  closeWithSessionMode(mode) {
+    this.state.closePrompt = false;
+    const tabs = mode === 'fresh'
+      ? []
+      : this.state.tabs
+        .filter((t) => !t.isPrivate && t.url && t.url !== 'yayra://newtab')
+        .map((t) => ({ url: t.url, title: t.title || '' }));
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('yayra:close-session', JSON.stringify({ mode, tabs, savedAt: new Date().toISOString() }));
+      } catch { /* storage unavailable - closing still works */ }
+    }
+    try { this.windowControls?.close(); } catch { /* already closing */ }
+    // Web/PWA builds have no native window to close - at least dismiss
+    // the prompt so the choice is still honoured on the next visit.
+    this.render();
+  }
+
+  /** Consume the previous session's close choice (once, at launch). */
+  restoreCloseSession() {
+    if (typeof localStorage === 'undefined') return;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('yayra:close-session') || 'null'); } catch { saved = null; }
+    if (!saved) return;
+    try { localStorage.removeItem('yayra:close-session'); } catch { /* ignore */ }
+    const tabs = Array.isArray(saved.tabs) ? saved.tabs.filter((t) => t && t.url) : [];
+    if (!tabs.length) return;
+    // A deep link (explicit initialUrl) always wins the first tab - the
+    // saved session is downgraded to an offer instead of a takeover.
+    if (saved.mode === 'restore' && this.options?.initialUrl) saved.mode = 'recent';
+    if (saved.mode === 'restore') {
+      // Reopen every tab automatically, exactly as they were.
+      this.state.tabs = tabs.map((t, i) => ({
+        id: `tab-${Date.now()}-${i}`,
+        title: t.title || 'New Tab',
+        url: t.url,
+        isSecure: String(t.url).startsWith('https://'),
+        canGoBack: false,
+        canGoForward: false,
+        isLoading: false,
+        isPrivate: false,
+        favicon: null
+      }));
+      this.state.activeTabId = this.state.tabs[0].id;
+      this.state.urlInputValue = this.getDisplayUrl(this.state.tabs[0].url);
+    } else if (saved.mode === 'recent') {
+      // Plain close: offer the recent tabs instead of forcing them open.
+      this.state.recentTabsOffer = tabs;
+    }
+  }
+
+  acceptRecentTabsOffer() {
+    const tabs = this.state.recentTabsOffer || [];
+    this.state.recentTabsOffer = null;
+    if (!tabs.length) { this.render(); return; }
+    const restored = tabs.map((t, i) => ({
+      id: `tab-${Date.now()}-${i}`,
+      title: t.title || 'New Tab',
+      url: t.url,
+      isSecure: String(t.url).startsWith('https://'),
+      canGoBack: false,
+      canGoForward: false,
+      isLoading: false,
+      isPrivate: false,
+      favicon: null
+    }));
+    // Replace a lone pristine new-tab; otherwise append after current tabs.
+    const onlyPristine = this.state.tabs.length === 1 && this.state.tabs[0].url === 'yayra://newtab';
+    this.state.tabs = onlyPristine ? restored : [...this.state.tabs, ...restored];
+    this.state.activeTabId = restored[0].id;
+    this.state.urlInputValue = this.getDisplayUrl(restored[0].url);
+    this.render();
+  }
+
+  dismissRecentTabsOffer() {
+    this.state.recentTabsOffer = null;
+    this.render();
+  }
+
+  renderClosePromptModal(root) {
+    const scrim = document.createElement('div');
+    scrim.className = 'fb-close-prompt-scrim';
+    scrim.addEventListener('click', () => {
+      this.state.closePrompt = false;
+      this.render();
+    });
+    root.appendChild(scrim);
+
+    const realCount = this.state.tabs.filter((t) => !t.isPrivate && t.url && t.url !== 'yayra://newtab').length;
+    const modal = document.createElement('div');
+    modal.className = 'fb-close-prompt-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-label', 'Close Yayra');
+    modal.innerHTML = `
+      <strong class="fb-close-prompt-title">Close Yayra?</strong>
+      <p class="fb-close-prompt-text">You have ${realCount} open tab${realCount === 1 ? '' : 's'}. What should happen to ${realCount === 1 ? 'it' : 'them'}?</p>
+      <div class="fb-close-prompt-actions">
+        <button class="fb-btn fb-btn-primary fb-close-keep-tabs">Keep all tabs &amp; close <small>reopens them automatically next time</small></button>
+        <button class="fb-btn fb-btn-secondary fb-close-just-close">Just close <small>offers your recent tabs next time</small></button>
+        <button class="fb-btn fb-btn-secondary fb-close-all-tabs">Close all tabs &amp; close <small>starts fresh next time</small></button>
+        <button class="fb-btn fb-btn-secondary fb-close-cancel">Cancel</button>
+      </div>
+    `;
+    modal.querySelector('.fb-close-keep-tabs')?.addEventListener('click', () => this.closeWithSessionMode('restore'));
+    modal.querySelector('.fb-close-just-close')?.addEventListener('click', () => this.closeWithSessionMode('recent'));
+    modal.querySelector('.fb-close-all-tabs')?.addEventListener('click', () => this.closeWithSessionMode('fresh'));
+    modal.querySelector('.fb-close-cancel')?.addEventListener('click', () => {
+      this.state.closePrompt = false;
+      this.render();
+    });
+    root.appendChild(modal);
+  }
+
+  renderRecentTabsOffer(root) {
+    const tabs = this.state.recentTabsOffer || [];
+    const card = document.createElement('div');
+    card.className = 'fb-recent-tabs-offer';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Reopen recent tabs');
+    card.innerHTML = `
+      <span class="fb-recent-tabs-icon">${Icons.history}</span>
+      <span class="fb-recent-tabs-text"><strong>Pick up where you left off?</strong><small>${tabs.length} recent tab${tabs.length === 1 ? '' : 's'} from your last session</small></span>
+      <button class="fb-btn fb-btn-primary fb-recent-tabs-reopen">Reopen</button>
+      <button class="fb-btn fb-btn-secondary fb-recent-tabs-dismiss">Dismiss</button>
+    `;
+    card.querySelector('.fb-recent-tabs-reopen')?.addEventListener('click', () => this.acceptRecentTabsOffer());
+    card.querySelector('.fb-recent-tabs-dismiss')?.addEventListener('click', () => this.dismissRecentTabsOffer());
+    root.appendChild(card);
+  }
+
   profileAvatarHtml(profile, size = 28) {
     const initial = String((profile && (profile.name || profile.email)) || '?').charAt(0).toUpperCase();
     const color = (profile && profile.color) || '#3b82f6';
@@ -4929,6 +5119,72 @@ export class BrowserShell {
     root.appendChild(card);
   }
 
+  /** Read (without consuming) a scheduled "install on next launch". */
+  getScheduledInstall() {
+    if (typeof localStorage === 'undefined') return null;
+    try { return JSON.parse(localStorage.getItem('yayra:pending-update-install') || 'null'); } catch { return null; }
+  }
+
+  /**
+   * Settings -> "Yayra Updates": the full manual home of the update
+   * pipeline. Everything the prompts offer lives here too - check,
+   * download, install now, install on next launch - so "Later" is never
+   * a dead end. Also reachable from the menu's update section.
+   */
+  renderUpdatesSettingsHtml() {
+    const u = this.state.updateState || {};
+    const scheduled = this.getScheduledInstall();
+    const desktopPipeline = Boolean(this.desktopUpdatesBridge);
+    const configured = Number(this.updateService?.config?.checkIntervalMinutes);
+    const intervalMin = Math.max(15, Number.isFinite(configured) && configured > 0 ? configured : 720);
+    const intervalLabel = intervalMin % 60 === 0 ? `${intervalMin / 60} hour${intervalMin === 60 ? '' : 's'}` : `${intervalMin} minutes`;
+
+    const statusLabel = u.status === 'checking' ? 'Checking for updates…'
+      : u.status === 'downloading' ? `Downloading v${u.availableVersion || ''}… ${typeof u.progressPercent === 'number' ? `${u.progressPercent}%` : ''}`
+      : u.status === 'staged' ? `v${u.availableVersion || ''} downloaded & verified - ready to install`
+      : u.status === 'ready' ? `v${u.availableVersion || ''} is available`
+      : u.status === 'installing' ? 'Installer running…'
+      : u.status === 'error' ? `Problem: ${u.notes || 'update check failed'}`
+      : `You're up to date${u.installedVersion ? ` (v${u.installedVersion})` : ''}`;
+
+    return `
+      <div class="fb-updates-settings">
+        <div class="fb-updates-status-row">
+          <span class="fb-status-orb ${u.status === 'error' ? '' : u.status === 'checking' || u.status === 'downloading' ? 'pulse' : 'green'}" ${u.status === 'error' ? 'style="background:#ef4444;"' : ''}></span>
+          <div>
+            <strong>${statusLabel}</strong>
+            <p style="margin:2px 0 0; font-size:0.78rem; color:var(--fb-text-muted);">Installed: v${u.installedVersion || 'unknown'} &#183; Auto-checks every ${intervalLabel} while Yayra is open.</p>
+          </div>
+        </div>
+        ${scheduled ? `
+          <div class="fb-updates-scheduled-row">
+            <span>${Icons.hourglass}</span>
+            <span style="flex:1;">Scheduled: install v${scheduled.version || 'update'} the next time Yayra opens.</span>
+            <button class="fb-btn fb-btn-secondary fb-up-cancel-scheduled">Cancel</button>
+          </div>` : ''}
+        <div class="fb-updates-actions">
+          <button class="fb-btn fb-btn-secondary fb-up-check">Check for updates now</button>
+          ${u.status === 'ready' ? `<button class="fb-btn fb-btn-primary fb-up-download">${desktopPipeline && u.download?.url ? `Download v${u.availableVersion || 'update'} (verified)` : `Update now to v${u.availableVersion || 'latest'}`}</button>` : ''}
+          ${u.status === 'staged' ? `
+            <button class="fb-btn fb-btn-primary fb-up-install-now">Install &amp; restart now</button>
+            <button class="fb-btn fb-btn-secondary fb-up-install-next">Install when Yayra opens again</button>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  bindUpdatesSettingsActions(page) {
+    page.querySelector('.fb-up-check')?.addEventListener('click', () => this.checkForUpdates(true));
+    page.querySelector('.fb-up-download')?.addEventListener('click', () => this.applyUpdate());
+    page.querySelector('.fb-up-install-now')?.addEventListener('click', () => this.installDesktopUpdateNow());
+    page.querySelector('.fb-up-install-next')?.addEventListener('click', () => this.deferInstallToNextLaunch());
+    page.querySelector('.fb-up-cancel-scheduled')?.addEventListener('click', () => {
+      this.clearPendingInstall();
+      this.render();
+      this.showTransientNotice('Scheduled install cancelled - the update stays downloaded.');
+    });
+  }
+
   applyUpdate() {
     // Electron desktop with a real download descriptor: download the
     // artifact in the main process, verify sha256 + byte length, then hand
@@ -4993,22 +5249,122 @@ export class BrowserShell {
     }
 
     this.state.updateState = { ...this.state.updateState, status: 'staged', stagedPath: result.path, progressPercent: 100 };
-    this.render();
     this.showTransientNotice(`Update v${availableVersion || ''} downloaded and verified.`);
 
+    // The download is staged and verified - now ASK instead of installing
+    // behind the user's back: install & restart now, install when Yayra
+    // is opened again, or later (manually, from Settings -> Yayra Updates
+    // or the menu's update section).
+    this.state.updateInstallPrompt = { path: result.path, version: availableVersion || null };
+    this.render();
+  }
+
+  /** Install the staged (already verified) update right now. */
+  async installDesktopUpdateNow() {
+    const bridge = this.desktopUpdatesBridge;
+    const path = this.state.updateInstallPrompt?.path || this.state.updateState.stagedPath;
+    this.state.updateInstallPrompt = null;
+    this.clearPendingInstall();
+    this.render();
+    if (!bridge || !path) return;
     let install;
     try {
-      install = await bridge.install({ path: result.path });
+      install = await bridge.install({ path });
     } catch (err) {
       install = { status: 'error', reason: String(err?.message || err) };
     }
     if (install?.status === 'install_started') {
       this.showTransientNotice(install.method === 'os-installer'
-        ? 'Installer launched - follow the system prompts, then reopen Yayra.'
+        ? 'Installer launched - Yayra will close so it can restart on the new version.'
         : 'Update file revealed - replace your current install with it.');
+      // "Install & RESTART now": get out of the installer's way so it can
+      // replace the running app, which then reopens on the new version.
+      if (install.method === 'os-installer' && this.windowControls && typeof setTimeout === 'function') {
+        setTimeout(() => { try { this.windowControls.close(); } catch { /* already closing */ } }, 1500);
+      }
     } else {
       this.showTransientNotice(`Could not launch the installer: ${install?.reason || 'unknown error'}.`);
     }
+  }
+
+  /** Remember to install the staged update on the NEXT app launch. */
+  deferInstallToNextLaunch() {
+    const prompt = this.state.updateInstallPrompt || {};
+    const path = prompt.path || this.state.updateState.stagedPath;
+    this.state.updateInstallPrompt = null;
+    if (path && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('yayra:pending-update-install', JSON.stringify({
+          path,
+          version: prompt.version || this.state.updateState.availableVersion || null,
+          savedAt: new Date().toISOString()
+        }));
+      } catch { /* storage unavailable - fall back to manual install */ }
+    }
+    this.render();
+    this.showTransientNotice('Got it - Yayra will install this update the next time it opens.');
+  }
+
+  /** Dismiss the install choice - everything stays available manually. */
+  dismissInstallPrompt() {
+    this.state.updateInstallPrompt = null;
+    this.render();
+    this.showTransientNotice('Update stays downloaded - install anytime from Settings → Yayra Updates.');
+  }
+
+  clearPendingInstall() {
+    if (typeof localStorage !== 'undefined') {
+      try { localStorage.removeItem('yayra:pending-update-install'); } catch { /* ignore */ }
+    }
+  }
+
+  /** Honour a "install when opened again" choice from the previous run. */
+  async processPendingInstallOnLaunch() {
+    if (typeof localStorage === 'undefined') return;
+    let pending = null;
+    try { pending = JSON.parse(localStorage.getItem('yayra:pending-update-install') || 'null'); } catch { pending = null; }
+    if (!pending || !pending.path) return;
+    this.clearPendingInstall();
+    const bridge = this.desktopUpdatesBridge;
+    if (!bridge) return;
+    let install;
+    try {
+      install = await bridge.install({ path: pending.path });
+    } catch (err) {
+      install = { status: 'error', reason: String(err?.message || err) };
+    }
+    if (install?.status === 'install_started') {
+      this.showTransientNotice(`Installing the update you scheduled (v${pending.version || ''}) - follow the system prompts.`);
+    } else {
+      this.showTransientNotice(`Scheduled update could not start: ${install?.reason || 'unknown error'}. Install it from Settings → Yayra Updates.`);
+    }
+  }
+
+  renderUpdateInstallPromptCard(root) {
+    const prompt = this.state.updateInstallPrompt;
+    if (!prompt) return;
+    const card = document.createElement('div');
+    card.className = 'fb-update-prompt-card fb-update-install-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Update downloaded');
+    card.innerHTML = `
+      <div class="fb-update-prompt-head">
+        <span class="fb-update-prompt-icon">${Icons.check}</span>
+        <div>
+          <strong class="fb-update-prompt-title">Update downloaded &amp; verified</strong>
+          <p class="fb-update-prompt-text">Yayra v${prompt.version || 'latest'} is ready to install. When should it happen?</p>
+        </div>
+      </div>
+      <div class="fb-update-install-actions">
+        <button class="fb-btn fb-btn-primary fb-update-install-now">Install &amp; restart now</button>
+        <button class="fb-btn fb-btn-secondary fb-update-install-next-launch">Install when Yayra opens again</button>
+        <button class="fb-btn fb-btn-secondary fb-update-install-later">Later - I'll do it manually</button>
+      </div>
+    `;
+    card.querySelector('.fb-update-install-now')?.addEventListener('click', () => this.installDesktopUpdateNow());
+    card.querySelector('.fb-update-install-next-launch')?.addEventListener('click', () => this.deferInstallToNextLaunch());
+    card.querySelector('.fb-update-install-later')?.addEventListener('click', () => this.dismissInstallPrompt());
+    root.appendChild(card);
   }
 
   /**
@@ -5110,6 +5466,7 @@ export class BrowserShell {
               <button class="fb-btn-action fb-check-updates-btn" title="Check for updates">${Icons.refresh}</button>
             </div>
           `}
+          <button class="fb-drawer-item fb-update-options-btn" title="Open Yayra Updates settings">${Icons.download} <span>Update options</span></button>
         </div>
 
         <!-- 2. Primary Tabs/Windows -->
@@ -5277,6 +5634,14 @@ export class BrowserShell {
     // Update Action Button
     drawer.querySelector('.fb-check-updates-btn')?.addEventListener('click', () => {
       this.checkForUpdates(true);
+    });
+
+    // Full update controls live in Settings -> Yayra Updates.
+    drawer.querySelector('.fb-update-options-btn')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.state.settingsActiveCategory = 'updates';
+      this.state.activeSettingsCategory = 'updates';
+      this.openInternalPage('yayra://settings');
     });
 
     drawer.querySelector('.fb-update-ready-btn')?.addEventListener('click', () => {

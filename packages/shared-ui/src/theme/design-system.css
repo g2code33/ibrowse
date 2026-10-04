@@ -3173,6 +3173,148 @@ html {
   gap: 8px;
 }
 
+.fb-update-install-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-update-install-actions .fb-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Settings -> Yayra Updates */
+.fb-updates-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fb-updates-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.fb-updates-scheduled-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  font-size: 0.82rem;
+}
+
+.fb-updates-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* "Close Yayra?" prompt */
+.fb-close-prompt-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 16, 0.55);
+  z-index: 600000;
+}
+
+.fb-close-prompt-modal {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+  padding: 20px;
+  z-index: 600001;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fb-slide-up 0.15s ease;
+}
+
+.fb-close-prompt-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.fb-close-prompt-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--fb-text-muted, #9aa4b2);
+}
+
+.fb-close-prompt-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.fb-close-prompt-actions .fb-btn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.fb-close-prompt-actions .fb-btn small {
+  font-size: 0.68rem;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+/* "Reopen recent tabs?" offer */
+.fb-recent-tabs-offer {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 12px 16px;
+  z-index: 500004;
+  max-width: calc(100vw - 32px);
+  animation: fb-slide-up 0.15s ease;
+}
+
+.fb-recent-tabs-icon {
+  display: inline-flex;
+  color: #60a5fa;
+  flex: 0 0 auto;
+}
+
+.fb-recent-tabs-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fb-recent-tabs-text strong {
+  font-size: 0.85rem;
+}
+
+.fb-recent-tabs-text small {
+  font-size: 0.72rem;
+  color: var(--fb-text-muted, #9aa4b2);
+}
+
 /* -------------------------------------------------------------
    TAB "TIME SIGN": animated hourglass in the icon slot while loading
    ------------------------------------------------------------- */
