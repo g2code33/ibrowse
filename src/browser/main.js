@@ -150,10 +150,27 @@ function mountMiniShellChrome() {
 }
 
 function getUpdateManifestUrl() {
-  if (typeof location !== 'undefined' && location.hostname === 'yayra.pages.dev') {
-    return 'https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json';
-  }
-  return '/updates/manifest.json';
+  const WORKER_MANIFEST = 'https://yayra-updates-api.g2code335.workers.dev/updates/manifest.json';
+  // Native shells MUST always ask the live update API: the copy bundled
+  // into the app (dist/updates/manifest.json) is frozen at build time, so
+  // checking against it can never discover a newer release.
+  //  - Electron loads the bundle from the custom yayra:// scheme and
+  //    exposes window.yayra via its preload.
+  //  - Capacitor Android serves from https://localhost and iOS from
+  //    capacitor://localhost, so hostname checks alone would misroute
+  //    them to the dead bundled copy.
+  if (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.()) return WORKER_MANIFEST;
+  if (typeof location !== 'undefined' && location.protocol === 'yayra:') return WORKER_MANIFEST;
+  if (typeof window !== 'undefined' && (window.yayra?.overlay || window.yayra?.updates || window.ibrowse?.overlay)) return WORKER_MANIFEST;
+  // Plain web/PWA: local dev previews check their own origin (the dev
+  // server serves a live manifest for the current version - see
+  // scripts/dev-server.mjs); every deployed host (pages.dev, custom
+  // domains) uses the Worker.
+  const host = typeof location !== 'undefined' ? location.hostname : '';
+  const isLocalDev = /^(localhost|127(?:\.\d{1,3}){3}|\[?::1\]?|0\.0\.0\.0)$/.test(host)
+    || host.endsWith('.e2b.app')
+    || /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host);
+  return isLocalDev ? '/updates/manifest.json' : WORKER_MANIFEST;
 }
 
 function detectTarget() {

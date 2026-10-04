@@ -1,4 +1,4 @@
-import { DEFAULT_UPDATE_CONFIG, compareSemver, mergeWithUpdateDefaults } from '../config/updates.js';
+import { DEFAULT_UPDATE_CONFIG, compareSemver, mergeWithUpdateDefaults, parseSemver } from '../config/updates.js';
 
 const LAST_GOOD_KEY = 'yayra:update:last-good-manifest';
 const STAGED_KEY = 'yayra:update:staged-download';
@@ -71,6 +71,21 @@ export class UpdateService {
     }
     if (manual) this.lastManualCheckAt = now;
     if (this.inFlight) return this.inFlight;
+    // A non-semver installed version (e.g. a build that injected "dev")
+    // used to throw inside the comparison AFTER the manifest fetch, where
+    // the catch reported it as "offline"/"could not reach the update
+    // server" - a lie that made the whole update system look broken. Fail
+    // fast with an honest reason instead.
+    try {
+      parseSemver(this.installedVersion);
+    } catch {
+      return this.#transition({
+        status: 'unknown',
+        target: this.target,
+        installedVersion: this.installedVersion,
+        reason: `invalid-installed-version:${this.installedVersion}`
+      }, 'error');
+    }
     if (!this.fetchImpl) {
       return this.#offlineState(new Error('fetch unavailable'));
     }

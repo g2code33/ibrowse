@@ -228,3 +228,58 @@ function jsonResponse(body) {
 function bytesResponse(bytes) {
   return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) };
 }
+
+// ---------------------------------------------------------------------------
+// Invalid installed version must be reported honestly - not as "offline".
+// A build that injected a non-semver version (the dev server used to inject
+// literally "dev") previously blew up INSIDE the comparison after a
+// successful manifest fetch, and the catch block reported "could not reach
+// the update server" even though the server was fine.
+// ---------------------------------------------------------------------------
+import { pickArtifact } from '../scripts/lib/update-artifacts.mjs';
+
+test('check() with a non-semver installed version reports invalid-installed-version, never a fake offline state', async () => {
+  let fetched = 0;
+  const service = new UpdateService({
+    target: 'pwa',
+    installedVersion: 'dev',
+    storage: new MemoryStorage(),
+    fetchImpl: async () => { fetched += 1; return jsonResponse({ schema: 1, latest: { pwa: '9.9.9' } }); }
+  });
+  const state = await service.check({ manual: true });
+  assert.equal(state.status, 'unknown');
+  assert.match(state.reason, /invalid-installed-version:dev/);
+  assert.equal(fetched, 0, 'does not waste a network round-trip on a version that can never compare');
+});
+
+// ---------------------------------------------------------------------------
+// Update manifest artifact selection (scripts/lib/update-artifacts.mjs).
+// The real 0.3.2 release manifest pointed Windows clients at elevate.exe
+// (electron-builder's UAC helper) and Linux clients at the signing public
+// key .pem, because generation took the alphabetically-first file of each
+// artifact folder. These tests pin the CORRECT choices.
+// ---------------------------------------------------------------------------
+test('pickArtifact chooses real installers and never keys/signatures/helpers', () => {
+  // Exact file sets from the v0.3.2 release artifact folders:
+  assert.equal(
+    pickArtifact('windows', ['SHA256SUMS.txt', 'build-info.json', 'elevate.exe', 'yayra-setup-0.3.2.exe', 'yayra-win-x64-0.3.2.exe', 'yayra.exe']),
+    'yayra-setup-0.3.2.exe',
+    'windows -> the NSIS setup, not elevate.exe'
+  );
+  assert.equal(
+    pickArtifact('linux', ['SHA256SUMS.txt', 'build-info.json', 'linux-signing-public-key.pem', 'yayra-0.3.2.AppImage', 'yayra-0.3.2.AppImage.sig', 'yayra_0.3.2_amd64.deb', 'yayra_0.3.2_amd64.deb.sig']),
+    'yayra_0.3.2_amd64.deb',
+    'linux -> the .deb, not the signing key or a .sig'
+  );
+  assert.equal(pickArtifact('pwa', ['SHA256SUMS.txt', 'build-info.json', 'yayra-pwa-0.3.2.tar.gz']), 'yayra-pwa-0.3.2.tar.gz');
+  assert.equal(pickArtifact('android', ['SHA256SUMS.txt', 'app-release.apk', 'build-info.json']), 'app-release.apk');
+  assert.equal(pickArtifact('ios', ['build-info.json', 'yayra-0.3.2.ipa']), 'yayra-0.3.2.ipa');
+});
+
+test('pickArtifact returns null (omit download) rather than guessing when no installable file exists', () => {
+  assert.equal(pickArtifact('windows', ['SHA256SUMS.txt', 'build-info.json', 'elevate.exe']), null, 'elevate.exe alone is never shippable');
+  assert.equal(pickArtifact('linux', ['linux-signing-public-key.pem', 'something.sig']), null);
+  assert.equal(pickArtifact('pwa', []), null);
+  // Fallback ranking: without a setup exe, the portable x64 build wins over a bare .exe.
+  assert.equal(pickArtifact('windows', ['yayra.exe', 'yayra-win-x64-0.3.2.exe']), 'yayra-win-x64-0.3.2.exe');
+});

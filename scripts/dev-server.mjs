@@ -10,6 +10,39 @@ const rootDir = path.resolve(__dirname, '..');
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
+// The dev app checks for updates against its own origin
+// (/updates/manifest.json - see getUpdateManifestUrl() in
+// src/browser/main.js). Serve a live manifest built from the CURRENT
+// package.json version so the in-app update system responds in dev:
+// normally that means "Yayra is up to date (vX.Y.Z)". To rehearse the
+// "update available" flow end-to-end, start the server with
+// YAYRA_DEV_UPDATE_LATEST=9.9.9 (any semver newer than package.json).
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
+function buildDevUpdateManifest() {
+  const latest = (process.env.YAYRA_DEV_UPDATE_LATEST || '').trim() || PKG_VERSION;
+  const targets = ['windows', 'linux', 'ios', 'android', 'pwa'];
+  const fill = (version) => Object.fromEntries(targets.map((t) => [t, version]));
+  return {
+    schema: 1,
+    channel: 'stable',
+    latest: fill(latest),
+    minSupported: fill('0.1.0'),
+    downloads: {},
+    notes: { en: latest === PKG_VERSION ? 'Dev preview manifest (live, generated per request).' : `Dev-simulated update to ${latest} (YAYRA_DEV_UPDATE_LATEST).` },
+    rollout: { percent: 100, allowlist: [] },
+    publishedAt: new Date().toISOString(),
+    ttlSeconds: 0
+  };
+}
+
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -40,17 +73,35 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (reqPath === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  if (reqPath === '/api/status') {    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({
       app: 'Yayra FloatBrowse',
-      version: '0.1.0',
+      version: PKG_VERSION,
       status: 'operational',
       ui: 'Browser-First (Chrome Desktop & Safari Mobile Layout)',
       desktopModes: ['circle-first', 'browser-first'],
       displaySession: process.env.WAYLAND_DISPLAY ? 'Wayland' : 'X11',
       time: new Date().toISOString()
     }));
+    return;
+  }
+
+  // In-app update checks: respond with a live manifest for the CURRENT
+  // dev version (see buildDevUpdateManifest above). Previously this path
+  // 404'd (the static fallback below maps to <repo>/updates/... which
+  // doesn't exist - the bundled copy lives under public/), so every dev
+  // update check landed in the "could not reach the update server" state.
+  if (reqPath === '/updates/manifest.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, max-age=0' });
+    res.end(JSON.stringify(buildDevUpdateManifest(), null, 2));
+    return;
+  }
+
+  // The update telemetry beacon (navigator.sendBeacon POSTs). Accept and
+  // discard so dev consoles stay free of 404 noise.
+  if (reqPath === '/telemetry/updates') {
+    res.writeHead(204);
+    res.end();
     return;
   }
 
@@ -111,6 +162,16 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, stats) => {
     if (err) {
+      // Production deployments serve public/ from the site root; mirror
+      // that here so root-relative assets (favicons, /auth pages, the
+      // bundled update manifest fallback, ...) resolve in dev too.
+      const publicPath = path.join(rootDir, 'public', reqPath);
+      if (publicPath.startsWith(path.join(rootDir, 'public')) && fs.existsSync(publicPath) && fs.statSync(publicPath).isFile()) {
+        const pubExt = path.extname(publicPath).toLowerCase();
+        res.writeHead(200, { 'Content-Type': MIME_TYPES[pubExt] || 'application/octet-stream', 'Cache-Control': 'no-store, max-age=0' });
+        fs.createReadStream(publicPath).pipe(res);
+        return;
+      }
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
@@ -137,7 +198,7 @@ function serveBrowserApp(res) {
   // an older service worker that cached the previous dev shell.
   const devToken = Date.now().toString(36);
   const html = `<!DOCTYPE html>
-<html lang="en" data-theme="dark" data-version="dev">
+<html lang="en" data-theme="dark" data-version="${PKG_VERSION}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">

@@ -45,6 +45,15 @@ await replaceFile(path.join(dist, 'auth', 'callback', 'index.html'), htmlReplace
 const info = { version, sha, builtAt };
 await writeFile(path.join(dist, 'version.json'), `${JSON.stringify(info, null, 2)}\n`);
 
+// Refresh the bundled update-manifest fallback to THIS build's version.
+// public/updates/manifest.json is a frozen 0.1.0 seed; without this step
+// every locally-served bundle carried that stale copy. (The release
+// pipeline re-generates dist/updates/manifest.json again afterwards with
+// real download entries - see .github/workflows/release.yml - and native
+// shells never read the bundled copy at all; they always query the live
+// update Worker. See getUpdateManifestUrl() in src/browser/main.js.)
+execFileSync(process.execPath, [path.join(root, 'scripts', 'generate-update-manifest.mjs'), 'dist/updates/manifest.json', '.artifacts-none'], { stdio: 'inherit' });
+
 let precache = (await listFiles(dist))
   .map((file) => `./${file}`)
   .filter((file) => file !== './sw.js' && file !== './precache-manifest.json')
