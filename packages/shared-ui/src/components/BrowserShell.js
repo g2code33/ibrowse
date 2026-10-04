@@ -19,6 +19,7 @@
 import { Icons } from '../icons/icons.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
 import { PasskeyService } from '../services/passkeyService.js';
+import { ProfileService } from '../services/profileService.js';
 import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract/src/extensions/ExtensionManager.js';
 
 /**
@@ -116,6 +117,12 @@ export class BrowserShell {
     // WebAuthn-backed passkey for the Yayra account: biometric/PIN gate
     // for revealing vault secrets + account security. DI for tests.
     this.passkeyService = options.passkeyService || new PasskeyService({ storage: this.storageAdapter });
+    // Browser profiles + the Chrome-style "keep your browsing separate"
+    // smart prompt. See packages/shared-ui/src/services/profileService.js.
+    this.profileService = options.profileService
+      || new ProfileService({ storage: typeof localStorage !== 'undefined' ? localStorage : null });
+    // One suggestion per account per session, even before "No thanks".
+    this._profileSignalsSeen = new Set();
     // Guards so a page is only auto-filled once per navigation target.
     this._autofilledFor = new Set();
     // Set after a successful passkey ceremony so one unlock covers the
@@ -157,6 +164,9 @@ export class BrowserShell {
       // True while the native Android system-wide bubble service is live
       // (YayraOverlayPlugin) - suppresses the duplicate in-page bubble.
       systemBubbleActive: false,
+      // Chrome-style "keep your browsing separate" card:
+      // { email, action: 'suggest-create'|'suggest-switch', profileId? }
+      profileSuggestion: null,
       isMobile: options.isMobile !== undefined ? options.isMobile : this.checkMobileViewport(),
       urlInputValue: initialTabs[0]?.url || 'yayra://newtab',
       activeModal: null, // 'menu', 'tab-switcher', 'sponsored-manager', etc.
@@ -327,6 +337,7 @@ export class BrowserShell {
         .then((session) => {
           if (session?.signedIn) {
             this.state.googleAccount = { status: 'signed-in', signedIn: true, profile: session.profile, error: null, savedAt: session.savedAt || null };
+            this.handleAccountSignal(session.profile?.email, { source: 'yayra-account' });
             this.render();
           }
         })
@@ -501,6 +512,7 @@ export class BrowserShell {
         break;
       case 'signed-in':
         this.state.googleAccount = { status: 'signed-in', signedIn: true, profile: evt.profile, error: null, savedAt: new Date().toISOString() };
+        this.handleAccountSignal(evt.profile?.email, { source: 'yayra-account' });
         break;
       case 'signed-out':
         this.state.googleAccount = { status: 'idle', signedIn: false, profile: null, error: null, savedAt: null };
@@ -813,6 +825,11 @@ export class BrowserShell {
     // Persistent Account Dropdown (top-right account button)
     if (this.state.isAccountMenuOpen) {
       this.renderAccountDropdown(shell);
+    }
+
+    // Chrome-style "Keep your browsing separate?" profile suggestion
+    if (this.state.profileSuggestion) {
+      this.renderProfileSuggestionCard(shell);
     }
 
     // Find in Page Toolbar
@@ -1311,22 +1328,27 @@ export class BrowserShell {
     // bubble is ALWAYS available and opening it never touches this window.
 
     // Persistent Top-Right Account Button (Yayra app-level "Sign in with
-    // Google" - see electron/authBridge.cjs). Lives here, next to the 3-dot
-    // menu, so it stays in the same place across every tab/page, not just
-    // inside Settings. Only rendered on builds that actually support it
-    // (Electron desktop) - see get authBridge() above.
-    if (this.authBridge) {
+    // Google" - see electron/authBridge.cjs - plus the browser-profile
+    // switcher). Lives here, next to the 3-dot menu, so it stays in the
+    // same place across every tab/page. Rendered on EVERY build now:
+    // Google sign-in is Electron-only, but profiles work everywhere.
+    {
       const account = this.state.googleAccount || { status: 'idle' };
+      const currentProfile = this.profileService ? this.profileService.current() : null;
       const acctBtn = document.createElement('button');
       acctBtn.className = `fb-action-btn fb-account-btn fb-toolbar-action-btn${account.status === 'signing-in' ? ' fb-account-btn-busy' : ''}`;
       acctBtn.setAttribute(
         'title',
         account.signedIn
           ? `Yayra account: ${account.profile?.name || account.profile?.email || 'Signed in'}`
-          : (account.status === 'signing-in' ? 'Signing in with Google…' : 'Yayra account')
+          : (account.status === 'signing-in'
+            ? 'Signing in with Google…'
+            : `Profile: ${currentProfile?.name || 'My profile'} - account & profiles`)
       );
       acctBtn.setAttribute('aria-label', 'Account');
-      acctBtn.innerHTML = this.renderAccountAvatarHtml(account.signedIn ? account.profile : null, 26);
+      acctBtn.innerHTML = account.signedIn
+        ? this.renderAccountAvatarHtml(account.profile, 26)
+        : (currentProfile ? this.profileAvatarHtml(currentProfile, 26) : this.renderAccountAvatarHtml(null, 26));
       acctBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.toggleAccountMenu();
@@ -1834,7 +1856,10 @@ export class BrowserShell {
       wrapper.appendChild(still);
     }
 
-    this.nativeWebview.ensure(tabId, url, isPrivate).then((result) => {
+    // Pass the active browsing profile so Electron places this view in
+    // that profile's own session partition (real cookie/login separation).
+    const activeProfileId = this.profileService ? this.profileService.current().id : 'default';
+    this.nativeWebview.ensure(tabId, url, isPrivate, activeProfileId).then((result) => {
       if (result && result.handedOffToSystemBrowser) {
         const tab = this.state.tabs.find((t) => t.id === tabId);
         if (tab) {
@@ -2134,6 +2159,9 @@ export class BrowserShell {
     try { origin = new URL(url).origin; } catch { return; }
     // Never offer to save Yayra's own internal pages.
     if (origin.startsWith('yayra://')) return;
+    // Smart profile separation: an email-shaped sign-in on a real page is
+    // the signal Chrome uses for "someone else is using this browser".
+    this.handleAccountSignal(username, { source: 'site-signin' });
     try {
       const offer = typeof this.passwordManager.shouldOfferToSave === 'function'
         ? await this.passwordManager.shouldOfferToSave({ origin, username, password, isPrivate: tab.isPrivate })
@@ -4425,6 +4453,145 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * PERSISTENT TOP-RIGHT ACCOUNT DROPDOWN
    * ----------------------------------------------------------- */
+  /* -------------------------------------------------------------
+   * BROWSER PROFILES - "KEEP YOUR BROWSING SEPARATE"
+   * -----------------------------------------------------------
+   * Chrome-style smart separation: when a sign-in happens with an
+   * account that is NOT the one this profile belongs to, Yayra offers a
+   * separate profile instead of silently mixing two people's cookies,
+   * logins and saved passwords. Decision table + no-nag memory live in
+   * profileService.js; on Electron each profile is a REAL separate
+   * Chromium session partition (electron/webviewBridge.cjs).
+   * ----------------------------------------------------------- */
+  handleAccountSignal(email, { source = 'unknown' } = {}) {
+    if (!this.profileService) return;
+    const key = String(email || '').trim().toLowerCase();
+    if (!key || this._profileSignalsSeen.has(key)) return;
+    const verdict = this.profileService.evaluateSignIn(email);
+    if (verdict.action === 'none') return;
+    this._profileSignalsSeen.add(key);
+    if (verdict.action === 'adopted') {
+      // First account on a fresh profile: silently bind, exactly like
+      // Chrome's first sign-in (no prompt, nothing to separate yet).
+      return;
+    }
+    this.state.profileSuggestion = {
+      email: key,
+      action: verdict.action,
+      profileId: verdict.profile ? verdict.profile.id : null,
+      source
+    };
+    this.render();
+  }
+
+  acceptProfileSuggestion() {
+    const suggestion = this.state.profileSuggestion;
+    if (!suggestion || !this.profileService) return;
+    let target = null;
+    if (suggestion.action === 'suggest-switch' && suggestion.profileId) {
+      target = this.profileService.switchTo(suggestion.profileId);
+    } else {
+      target = this.profileService.createProfile({ email: suggestion.email });
+      this.profileService.switchTo(target.id);
+    }
+    this.state.profileSuggestion = null;
+    this.applyProfileSwitch(target);
+  }
+
+  declineProfileSuggestion() {
+    const suggestion = this.state.profileSuggestion;
+    if (suggestion && this.profileService) {
+      // Remembered forever - this exact prompt never nags again.
+      this.profileService.dismissAccount(suggestion.email);
+    }
+    this.state.profileSuggestion = null;
+    this.render();
+  }
+
+  switchProfile(profileId) {
+    if (!this.profileService) return;
+    const current = this.profileService.current();
+    if (current && current.id === profileId) return;
+    const target = this.profileService.switchTo(profileId);
+    if (!target) return;
+    this.state.isAccountMenuOpen = false;
+    this.applyProfileSwitch(target);
+  }
+
+  // Tear down the old profile's live web surfaces and start the new one
+  // on a clean slate. On Electron the per-profile session partition only
+  // applies to NEWLY created native views, so every existing view must go.
+  applyProfileSwitch(profile) {
+    for (const tab of this.state.tabs) {
+      this.destroyNativeWebview(tab.id);
+    }
+    if (this.webFrames) {
+      for (const [tabId, frame] of Array.from(this.webFrames.entries())) {
+        frame.host.remove();
+        this.webFrames.delete(tabId);
+      }
+    }
+    this.state.tabs = [{
+      id: `tab-${Date.now()}`,
+      title: 'New Tab',
+      url: 'yayra://newtab',
+      isSecure: true,
+      canGoBack: false,
+      canGoForward: false,
+      isLoading: false,
+      isPrivate: false,
+      favicon: null
+    }];
+    this.state.activeTabId = this.state.tabs[0].id;
+    this.state.urlInputValue = '';
+    this.state.isBookmarked = false;
+    this.render();
+    if (profile) {
+      this.showTransientNotice(`Browsing as ${profile.name}${profile.email ? ` (${profile.email})` : ''} - separate from other profiles.`);
+    }
+  }
+
+  profileAvatarHtml(profile, size = 28) {
+    const initial = String((profile && (profile.name || profile.email)) || '?').charAt(0).toUpperCase();
+    const color = (profile && profile.color) || '#3b82f6';
+    return `<span class="fb-profile-avatar" style="width:${size}px; height:${size}px; background:${color}; font-size:${Math.round(size * 0.5)}px;">${initial}</span>`;
+  }
+
+  renderProfileSuggestionCard(root) {
+    const suggestion = this.state.profileSuggestion;
+    if (!suggestion || !this.profileService) return;
+    const current = this.profileService.current();
+    const isSwitch = suggestion.action === 'suggest-switch';
+    const targetProfile = isSwitch
+      ? this.profileService.list().find((p) => p.id === suggestion.profileId)
+      : null;
+
+    const card = document.createElement('div');
+    card.className = 'fb-profile-suggestion-card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Keep your browsing separate');
+    card.innerHTML = `
+      <div class="fb-profile-suggestion-avatars">
+        ${this.profileAvatarHtml(current, 34)}
+        ${this.profileAvatarHtml(targetProfile || { name: suggestion.email, color: '#10b981' }, 34)}
+      </div>
+      <strong class="fb-profile-suggestion-title">Keep your browsing separate?</strong>
+      <p class="fb-profile-suggestion-text">
+        <b>${current.name}</b>${current.email ? ` (${current.email})` : ''} is already using this profile.
+        ${isSwitch
+          ? `Switch to the existing profile for <b>${suggestion.email}</b> to keep cookies, logins and passwords separate.`
+          : `Create a separate profile for <b>${suggestion.email}</b> so their cookies, logins and passwords stay their own.`}
+      </p>
+      <div class="fb-profile-suggestion-actions">
+        <button class="fb-btn fb-btn-secondary fb-profile-suggestion-decline">No thanks</button>
+        <button class="fb-btn fb-btn-primary fb-profile-suggestion-accept">${isSwitch ? 'Switch profile' : 'Use separate profile'}</button>
+      </div>
+    `;
+    card.querySelector('.fb-profile-suggestion-accept')?.addEventListener('click', () => this.acceptProfileSuggestion());
+    card.querySelector('.fb-profile-suggestion-decline')?.addEventListener('click', () => this.declineProfileSuggestion());
+    root.appendChild(card);
+  }
+
   renderAccountDropdown(root) {
     this.appendDropdownScrim(root, () => {
       this.state.isAccountMenuOpen = false;
@@ -4460,6 +4627,30 @@ export class BrowserShell {
         </button>
       </div>`;
 
+    // Browser profiles section - shown in both branches. Each profile is
+    // its own browsing identity (own cookies/logins on Electron via a
+    // dedicated session partition - see electron/webviewBridge.cjs).
+    const profiles = this.profileService ? this.profileService.list() : [];
+    const currentProfileId = this.profileService ? this.profileService.current().id : null;
+    const profilesHtml = this.profileService ? `
+      <div class="fb-account-profiles">
+        <small class="fb-account-profiles-label">Browsing profiles</small>
+        ${profiles.map((p) => `
+          <button class="fb-profile-row${p.id === currentProfileId ? ' fb-profile-row-current' : ''}" data-profile-id="${p.id}" title="${p.id === currentProfileId ? 'Current profile' : `Switch to ${p.name}`}">
+            ${this.profileAvatarHtml(p, 26)}
+            <span class="fb-profile-row-text">
+              <strong>${p.name}</strong>
+              ${p.email ? `<small>${p.email}</small>` : ''}
+            </span>
+            ${p.id === currentProfileId ? `<span class="fb-profile-row-check">${Icons.check || '&#10003;'}</span>` : ''}
+          </button>
+        `).join('')}
+        <button class="fb-profile-row fb-profile-add-btn" title="Add a new browsing profile">
+          <span class="fb-profile-avatar fb-profile-avatar-add">+</span>
+          <span class="fb-profile-row-text"><strong>Add profile</strong></span>
+        </button>
+      </div>` : '';
+
     if (account.status === 'signed-in' && account.profile) {
       const { name, email } = account.profile;
       const sinceLabel = account.savedAt
@@ -4475,6 +4666,7 @@ export class BrowserShell {
         </div>
         ${sinceLabel ? `<p style="margin:0; padding:0 2px; font-size:0.75rem; color:var(--fb-text-muted);">Signed in since ${sinceLabel}</p>` : ''}
         ${vaultSummaryHtml}
+        ${profilesHtml}
         <div class="fb-account-dropdown-actions">
           <button class="fb-btn fb-btn-secondary fb-account-manage-btn" style="width:100%; justify-content:flex-start;">${Icons.externalLink} Manage Google Account</button>
           <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
@@ -4497,6 +4689,7 @@ export class BrowserShell {
         </div>
         ${errorNote}
         ${vaultSummaryHtml}
+        ${profilesHtml}
         <div class="fb-account-dropdown-actions">
           <button class="fb-btn fb-btn-primary fb-account-signin-btn" style="width:100%;" ${isSigningIn ? 'disabled' : ''}>${isSigningIn ? 'Signing in&hellip;' : 'Sign in with Google'}</button>
           <button class="fb-btn fb-btn-secondary fb-account-settings-btn" style="width:100%; justify-content:flex-start;">${Icons.info} Yayra account settings</button>
@@ -4523,6 +4716,23 @@ export class BrowserShell {
       this.state.activeSettingsCategory = 'account';
       this.openInternalPage('yayra://settings');
     });
+
+    // Profile switcher rows + "Add profile".
+    for (const row of dropdown.querySelectorAll('.fb-profile-row')) {
+      if (row.className.includes('fb-profile-add-btn')) {
+        row.addEventListener('click', () => {
+          const created = this.profileService.createProfile({});
+          this.profileService.switchTo(created.id);
+          this.state.isAccountMenuOpen = false;
+          this.applyProfileSwitch(created);
+        });
+      } else {
+        row.addEventListener('click', () => {
+          const id = row.getAttribute('data-profile-id');
+          if (id) this.switchProfile(id);
+        });
+      }
+    }
 
     root.appendChild(dropdown);
   }

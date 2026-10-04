@@ -2966,6 +2966,152 @@ html {
   font-size: 0.82rem;
 }
 
+/* -------------------------------------------------------------
+   BROWSER PROFILES (Chrome-style "keep your browsing separate")
+   ------------------------------------------------------------- */
+.fb-profile-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  line-height: 1;
+  user-select: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.fb-profile-avatar-add {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--fb-text-muted, #9aa4b2);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.fb-account-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fb-account-profiles-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fb-text-muted, #9aa4b2);
+  padding: 0 2px 4px;
+}
+
+.fb-profile-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fb-text, #e5e9f0);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.fb-profile-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fb-profile-row-current {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.fb-profile-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.fb-profile-row-text strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-profile-row-text small {
+  font-size: 0.72rem;
+  color: var(--fb-text-muted, #9aa4b2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-profile-row-check {
+  display: inline-flex;
+  color: #3b82f6;
+  flex: 0 0 auto;
+}
+
+.fb-profile-suggestion-card {
+  position: absolute;
+  top: 88px;
+  right: 16px;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 18px;
+  z-index: 500002;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fb-slide-up 0.15s ease;
+}
+
+.fb-profile-suggestion-avatars {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.fb-profile-suggestion-avatars .fb-profile-avatar + .fb-profile-avatar {
+  margin-left: -10px;
+  box-shadow: 0 0 0 2px #0f172a;
+}
+
+.fb-profile-suggestion-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.fb-profile-suggestion-text {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--fb-text-muted, #9aa4b2);
+}
+
+.fb-profile-suggestion-text b {
+  color: var(--fb-text, #e5e9f0);
+  font-weight: 600;
+}
+
+.fb-profile-suggestion-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 /* =============================================================
    4. TOOLBAR BRAND BESIDE SECURITY BADGE
    ============================================================= */

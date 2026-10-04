@@ -468,13 +468,24 @@ function createWebviewBridge({
     });
   }
 
-  function createView(key, tabId, isPrivate, hostWc, hostWin) {
+  // Browser profiles: each non-default profile gets its OWN persistent
+  // Chromium session partition, so cookies, logins, storage and caches are
+  // fully separated per person (the Chrome "profiles" model). The default
+  // profile keeps the legacy partition name so existing users' sessions
+  // survive the upgrade. Incognito stays per-tab and in-memory, unchanged.
+  function partitionForProfile(profileId) {
+    const id = String(profileId || 'default');
+    if (id === 'default') return 'persist:yayra-webview';
+    return `persist:yayra-profile-${id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  }
+
+  function createView(key, tabId, isPrivate, hostWc, hostWin, profileId = 'default') {
     const view = new WebContentsView({
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        partition: isPrivate ? `incognito-${tabId}` : 'persist:yayra-webview',
+        partition: isPrivate ? `incognito-${tabId}` : partitionForProfile(profileId),
         ...(autofillPreloadPath ? { preload: autofillPreloadPath } : {})
       }
     });
@@ -488,13 +499,13 @@ function createWebviewBridge({
     if (typeof view.setBackgroundColor === 'function') {
       try { view.setBackgroundColor('#101218'); } catch { /* older electron */ }
     }
-    const entry = { view, lastUrl: null, tabId, hostWc, hostWin, isPrivate: Boolean(isPrivate) };
+    const entry = { view, lastUrl: null, tabId, hostWc, hostWin, isPrivate: Boolean(isPrivate), profileId: String(profileId || 'default') };
     views.set(key, entry);
     attachListeners(key, entry);
     return entry;
   }
 
-  function ensureView(key, tabId, url, { isPrivate = false, hostWc = null, hostWin = null } = {}) {
+  function ensureView(key, tabId, url, { isPrivate = false, hostWc = null, hostWin = null, profileId = 'default' } = {}) {
     const win = (hostWin && !hostWin.isDestroyed?.()) ? hostWin : getMainWindow();
     if (!win || win.isDestroyed() || !tabId || !url) return { handedOffToSystemBrowser: false };
 
@@ -505,8 +516,14 @@ function createWebviewBridge({
     }
 
     let entry = views.get(key);
+    // A view created for another profile can't be reused - the partition
+    // is fixed at construction. Destroy and recreate in the right one.
+    if (entry && !entry.isPrivate && entry.profileId !== String(profileId || 'default')) {
+      destroyView(key);
+      entry = undefined;
+    }
     if (!entry) {
-      entry = createView(key, tabId, isPrivate, hostWc, win);
+      entry = createView(key, tabId, isPrivate, hostWc, win, profileId);
       win.contentView.addChildView(entry.view);
     }
 
@@ -635,9 +652,9 @@ function createWebviewBridge({
     }
   }
 
-  ipcMain.handle('yayra:webview-ensure', (event, { tabId, url, isPrivate } = {}) => {
+  ipcMain.handle('yayra:webview-ensure', (event, { tabId, url, isPrivate, profileId } = {}) => {
     const { hostWc, hostWin } = resolveHost(event);
-    return ensureView(viewKey(event, tabId), tabId, url, { isPrivate, hostWc, hostWin });
+    return ensureView(viewKey(event, tabId), tabId, url, { isPrivate, hostWc, hostWin, profileId });
   });
   ipcMain.handle('yayra:webview-set-bounds', (event, { tabId, bounds } = {}) => setBounds(viewKey(event, tabId), bounds));
   ipcMain.handle('yayra:webview-set-visible', (event, { tabId, visible, capture } = {}) => setVisible(viewKey(event, tabId), visible, { capture }));
