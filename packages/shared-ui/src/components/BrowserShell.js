@@ -66,6 +66,8 @@ function describePasskeyReason(reason) {
     case 'authenticator-already-registered': return 'a passkey already exists on this authenticator';
     case 'insecure-context': return 'passkeys require a secure (HTTPS) context';
     case 'no-passkey-registered': return 'no passkey is registered yet';
+    case 'keychain-unavailable': return 'the OS keychain is locked or unavailable on this device';
+    case 'verification-failed': return 'the device passkey could not be verified';
     default: return reason || 'unknown error';
   }
 }
@@ -114,13 +116,28 @@ export class BrowserShell {
 
     this.passwordManager = options.passwordManager || new PasswordManager(this.storageAdapter);
     this.extensionManager = options.extensionManager || new ExtensionManager(this.storageAdapter);
-    // WebAuthn-backed passkey for the Yayra account: biometric/PIN gate
-    // for revealing vault secrets + account security. DI for tests.
-    this.passkeyService = options.passkeyService || new PasskeyService({ storage: this.storageAdapter });
+    // Passkey for the Yayra account: biometric/PIN gate for revealing
+    // vault secrets + account security. Web/PWA uses real WebAuthn; the
+    // Electron desktop (custom yayra:// scheme, where Chromium refuses
+    // WebAuthn) uses the OS-keychain device-passkey bridge instead - see
+    // get passkeysBridge() + electron/passkeyBridge.cjs. DI for tests.
+    this.passkeyService = options.passkeyService
+      || new PasskeyService({ storage: this.storageAdapter, nativeBridge: this.passkeysBridge });
     // Browser profiles + the Chrome-style "keep your browsing separate"
     // smart prompt. See packages/shared-ui/src/services/profileService.js.
     this.profileService = options.profileService
       || new ProfileService({ storage: typeof localStorage !== 'undefined' ? localStorage : null });
+    // Per-profile windows boot with ?profile=<id> (Electron
+    // createProfileWindow / web window.open fallback): bind this window
+    // to that profile before anything renders, so "Add profile" opens a
+    // NEW window already living as the new profile while the original
+    // window keeps its own.
+    if (options.windowProfileId && this.profileService) {
+      try {
+        const exists = (this.profileService.list() || []).some((p) => p.id === options.windowProfileId);
+        if (exists) this.profileService.switchTo(options.windowProfileId);
+      } catch { /* unknown profile id - stay on the stored current one */ }
+    }
     // One suggestion per account per session, even before "No thanks".
     this._profileSignalsSeen = new Set();
     // Guards so a page is only auto-filled once per navigation target.
@@ -417,6 +434,26 @@ export class BrowserShell {
   get downloadsBridge() {
     if (typeof window === 'undefined') return null;
     return (window.yayra && window.yayra.downloads) || (window.ibrowse && window.ibrowse.downloads) || null;
+  }
+
+  // window.yayra.passkeys (exposed by electron/preload.cjs, backed by
+  // electron/passkeyBridge.cjs): OS-keychain device passkey for the
+  // Electron desktop, where Chromium refuses real WebAuthn on the custom
+  // yayra:// scheme. Web/PWA builds (real https origin) keep genuine
+  // WebAuthn and this getter returns null there.
+  get passkeysBridge() {
+    if (typeof window === 'undefined') return null;
+    const bridge = (window.yayra && window.yayra.passkeys) || (window.ibrowse && window.ibrowse.passkeys) || null;
+    return bridge && typeof bridge.register === 'function' ? bridge : null;
+  }
+
+  // window.yayra.profiles (electron/preload.cjs → yayra:open-profile-window
+  // in electron/main.cjs): opens a profile in its OWN new Yayra window,
+  // Chrome-style, while this window stays on its current profile.
+  get profileWindowsBridge() {
+    if (typeof window === 'undefined') return null;
+    const bridge = (window.yayra && window.yayra.profiles) || (window.ibrowse && window.ibrowse.profiles) || null;
+    return bridge && typeof bridge.openWindow === 'function' ? bridge : null;
   }
 
   // window.yayra.overlay (exposed by electron/preload.cjs, backed by
@@ -2335,7 +2372,7 @@ export class BrowserShell {
   async registerAccountPasskey() {
     if (!this.passkeyService) return;
     if (!this.passkeyService.isSupported()) {
-      this.showTransientNotice('Passkeys need a device with biometrics/PIN and a secure (HTTPS) context.');
+      this.showTransientNotice('Passkeys need a device with biometrics/PIN and a secure (HTTPS) context, or the Yayra desktop app (OS keychain).');
       return;
     }
     const profile = this.state.googleAccount?.signedIn ? this.state.googleAccount.profile : null;
@@ -3599,9 +3636,15 @@ export class BrowserShell {
           <h3 class="fb-settings-group-title">${Icons.shield} Account Passkey</h3>
           <p style="margin:0; font-size:0.82rem; color:var(--fb-text-secondary);">
             ${passkey
-              ? `Passkey active for <strong>${passkey.accountLabel || 'this device'}</strong> since ${new Date(passkey.createdAt).toLocaleDateString()}. Your device's biometrics/PIN protect this vault.`
+              ? `Passkey active for <strong>${passkey.accountLabel || 'this device'}</strong> since ${new Date(passkey.createdAt).toLocaleDateString()}. ${passkey.method
+                  ? (passkey.method === 'touch-id'
+                    ? 'Touch ID and your Mac\u2019s Keychain protect this vault.'
+                    : 'Your OS keychain (this device, this OS user) protects this vault.')
+                  : 'Your device\u2019s biometrics/PIN protect this vault.'}`
               : passkeySupported
-                ? 'Protect your Yayra account and vault with your device\u2019s biometrics or PIN. Works like Windows Hello / Touch ID in Chrome.'
+                ? (this.passkeysBridge
+                  ? 'Protect your Yayra account and vault with a device passkey bound to this computer\u2019s OS keychain (with Touch ID on supporting Macs). Only your OS user session can unlock it.'
+                  : 'Protect your Yayra account and vault with your device\u2019s biometrics or PIN. Works like Windows Hello / Touch ID in Chrome.')
                 : 'Passkeys need a secure (HTTPS) context and a device authenticator; this build/runtime does not expose one.'}
           </p>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -4552,12 +4595,19 @@ export class BrowserShell {
     if (!suggestion || !this.profileService) return;
     let target = null;
     if (suggestion.action === 'suggest-switch' && suggestion.profileId) {
-      target = this.profileService.switchTo(suggestion.profileId);
+      target = (this.profileService.list() || []).find((p) => p.id === suggestion.profileId) || null;
     } else {
       target = this.profileService.createProfile({ email: suggestion.email });
-      this.profileService.switchTo(target.id);
     }
     this.state.profileSuggestion = null;
+    // Chrome-style: the suggested profile opens in its OWN new window and
+    // this window keeps browsing as-is. In-place switch only as fallback.
+    if (target && this.openProfileWindow(target)) {
+      this.showTransientNotice(`Opened ${target.name} in its own window - this window keeps its current profile.`);
+      this.render();
+      return;
+    }
+    if (target) target = this.profileService.switchTo(target.id) || target;
     this.applyProfileSwitch(target);
   }
 
@@ -4571,14 +4621,51 @@ export class BrowserShell {
     this.render();
   }
 
+  /**
+   * Open `profile` in its OWN new Yayra window - Chrome's model: the
+   * window you clicked in STAYS on its current profile and the other
+   * profile gets a fresh window. Electron uses the real native
+   * window-per-profile bridge (yayra:open-profile-window); web/PWA falls
+   * back to window.open with a ?profile= boot param. Returns false when
+   * neither exists (tests, odd embeds) so callers keep the old in-place
+   * switch as a last resort.
+   */
+  openProfileWindow(profile) {
+    if (!profile || !profile.id) return false;
+    const bridge = this.profileWindowsBridge;
+    if (bridge) {
+      Promise.resolve(bridge.openWindow(profile.id)).catch(() => {});
+      return true;
+    }
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      let target = `?profile=${encodeURIComponent(profile.id)}`;
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('profile', profile.id);
+        target = url.toString();
+      } catch { /* relative ?profile= still resolves against this page */ }
+      // Click-initiated, same-origin open; popup blockers allow these.
+      window.open(target, '_blank');
+      return true;
+    }
+    return false;
+  }
+
   switchProfile(profileId) {
     if (!this.profileService) return;
     const current = this.profileService.current();
     if (current && current.id === profileId) return;
-    const target = this.profileService.switchTo(profileId);
-    if (!target) return;
     this.state.isAccountMenuOpen = false;
-    this.applyProfileSwitch(target);
+    const target = (this.profileService.list() || []).find((p) => p.id === profileId) || null;
+    if (target && this.openProfileWindow(target)) {
+      // New window carries the other profile; THIS window keeps its own.
+      this.showTransientNotice(`Opened ${target.name} in its own window - this window stays on ${current ? current.name : 'its profile'}.`);
+      this.render();
+      return;
+    }
+    const switched = this.profileService.switchTo(profileId);
+    if (!switched) return;
+    this.applyProfileSwitch(switched);
   }
 
   // Tear down the old profile's live web surfaces and start the new one
@@ -4935,8 +5022,16 @@ export class BrowserShell {
       if (row.className.includes('fb-profile-add-btn')) {
         row.addEventListener('click', () => {
           const created = this.profileService.createProfile({});
-          this.profileService.switchTo(created.id);
           this.state.isAccountMenuOpen = false;
+          // Chrome-style: the NEW profile opens in a NEW Yayra window;
+          // this window stays on its current profile. In-place switch
+          // only when no window capability exists at all.
+          if (this.openProfileWindow(created)) {
+            this.showTransientNotice(`${created.name} opened in a new window - this window stays on ${this.profileService.current().name}.`);
+            this.render();
+            return;
+          }
+          this.profileService.switchTo(created.id);
           this.applyProfileSwitch(created);
         });
       } else {

@@ -152,6 +152,16 @@ function createDownloadsBridge({
     sess.on('will-download', handleWillDownload);
   });
 
+  // Later-created sessions (e.g. per-profile partitions for profile
+  // windows) can join download tracking too; duplicates are guarded.
+  const attachedSessions = new WeakSet(sessions.filter(Boolean));
+  function attachSession(sess) {
+    if (!sess || attachedSessions.has(sess)) return false;
+    attachedSessions.add(sess);
+    sess.on('will-download', handleWillDownload);
+    return true;
+  }
+
   async function handleList() {
     return downloadsStore.load();
   }
@@ -292,6 +302,7 @@ function createDownloadsBridge({
 
   return {
     attachItem,
+    attachSession,
     handleWillDownload,
     handleList,
     handleClear,

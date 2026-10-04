@@ -1,0 +1,380 @@
+/**
+ * P22 - desktop passkeys + Chrome-style per-profile windows.
+ *
+ * 1) electron/passkeyBridge.cjs: Chromium refuses real WebAuthn on the
+ *    custom yayra:// scheme (users saw "passkeys require a secure (HTTPS)
+ *    context" in the desktop app), so the desktop uses an OS-keychain
+ *    device credential: random secret encrypted via safeStorage, with a
+ *    REAL Touch ID gate on supporting Macs. Covers register/verify/
+ *    status/remove, keychain-unavailable, and Touch ID decline.
+ *
+ * 2) PasskeyService native-bridge path: when the preload exposes
+ *    window.yayra.passkeys, the service routes register/verify/remove
+ *    through it instead of navigator.credentials, and isSupported() is
+ *    true even where WebAuthn is absent.
+ *
+ * 3) BrowserShell profile windows: "Add profile", switching from the
+ *    dropdown, and accepting the smart suggestion all open the OTHER
+ *    profile in a NEW window (bridge or window.open fallback) while THIS
+ *    window keeps its profile; without any window capability the old
+ *    in-place switch still happens (covered in profile-service.test.mjs).
+ *    Plus the ?profile= boot binding (windowProfileId ctor option).
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { setupDomShim } from './dom-shim.mjs';
+
+setupDomShim();
+
+import { createRequire } from 'node:module';
+import { PasskeyService } from '../packages/shared-ui/src/services/passkeyService.js';
+import { ProfileService, DEFAULT_PROFILE_ID } from '../packages/shared-ui/src/services/profileService.js';
+import { BrowserShell } from '../packages/shared-ui/src/components/BrowserShell.js';
+
+const require = createRequire(import.meta.url);
+const { createPasskeyBridge } = require('../electron/passkeyBridge.cjs');
+const { createDownloadsBridge } = require('../electron/downloadsBridge.cjs');
+
+class MemoryStorage {
+  constructor() { this.map = new Map(); }
+  getItem(key) { return this.map.has(key) ? this.map.get(key) : null; }
+  setItem(key, val) { this.map.set(key, String(val)); }
+  removeItem(key) { this.map.delete(key); }
+}
+
+/* ------------------------- passkeyBridge (main process) ------------------------- */
+
+function makeFakeFs() {
+  const files = new Map();
+  return {
+    files,
+    existsSync: (p) => files.has(p),
+    readFileSync: (p) => {
+      if (!files.has(p)) throw new Error('ENOENT');
+      return files.get(p);
+    },
+    writeFileSync: (p, data) => { files.set(p, String(data)); },
+    mkdirSync: () => {},
+    unlinkSync: (p) => { files.delete(p); }
+  };
+}
+
+const fakeSafeStorage = {
+  isEncryptionAvailable: () => true,
+  encryptString: (s) => Buffer.from(`enc:${s}`, 'utf8'),
+  decryptString: (buf) => Buffer.from(buf).toString('utf8').slice(4)
+};
+
+function makeBridge(overrides = {}) {
+  const fs = overrides.fs || makeFakeFs();
+  const bridge = createPasskeyBridge({
+    ipcMain: null,
+    fs,
+    path,
+    userDataDir: '/fake/userData',
+    safeStorageImpl: overrides.safeStorageImpl ?? fakeSafeStorage,
+    systemPreferencesImpl: overrides.systemPreferencesImpl ?? null,
+    platform: overrides.platform ?? 'linux',
+    logger: { error: () => {} }
+  });
+  return { bridge, fs };
+}
+
+test('passkeyBridge: register -> status -> verify -> remove round-trip', async () => {
+  const { bridge, fs } = makeBridge();
+
+  let status = await bridge.handleStatus();
+  assert.equal(status.available, true);
+  assert.equal(status.registered, false);
+  assert.equal(status.method, 'os-keychain');
+
+  const reg = await bridge.handleRegister(null, { label: 'ada@example.com' });
+  assert.equal(reg.ok, true);
+  assert.ok(reg.passkey.credentialId.startsWith('device-'));
+  assert.equal(reg.passkey.label, 'ada@example.com');
+  assert.equal(reg.passkey.method, 'os-keychain');
+  assert.ok(!('encryptedSecret' in reg.passkey), 'secret material never leaves the main process');
+
+  // The on-disk record only holds the ENCRYPTED secret + a hash.
+  const raw = JSON.parse(fs.files.get(bridge._filePath));
+  assert.ok(raw.encryptedSecret && raw.secretHash, 'encrypted secret + hash stored');
+  assert.ok(raw.encryptedSecret.length > 0 && !raw.encryptedSecret.includes(raw.secretHash));
+
+  status = await bridge.handleStatus();
+  assert.equal(status.registered, true);
+  assert.equal(status.passkey.label, 'ada@example.com');
+
+  const ver = await bridge.handleVerify();
+  assert.equal(ver.ok, true);
+
+  const rem = await bridge.handleRemove();
+  assert.equal(rem.ok, true);
+  assert.equal((await bridge.handleStatus()).registered, false);
+  assert.deepEqual(await bridge.handleVerify(), { ok: false, reason: 'no-passkey-registered' });
+});
+
+test('passkeyBridge: keychain unavailable is reported honestly', async () => {
+  const { bridge } = makeBridge({ safeStorageImpl: { isEncryptionAvailable: () => false } });
+  assert.equal((await bridge.handleStatus()).available, false);
+  assert.deepEqual(await bridge.handleRegister(null, {}), { ok: false, reason: 'keychain-unavailable' });
+});
+
+test('passkeyBridge: macOS Touch ID gates the ceremony and a decline cancels it', async () => {
+  const prompts = [];
+  let allow = true;
+  const systemPreferencesImpl = {
+    canPromptTouchID: () => true,
+    promptTouchID: async (reason) => {
+      prompts.push(reason);
+      if (!allow) throw new Error('User rejected Touch ID');
+    }
+  };
+  const { bridge } = makeBridge({ platform: 'darwin', systemPreferencesImpl });
+
+  assert.equal((await bridge.handleStatus()).method, 'touch-id');
+
+  const reg = await bridge.handleRegister(null, { label: 'mac user' });
+  assert.equal(reg.ok, true);
+  assert.equal(reg.passkey.method, 'touch-id');
+  assert.equal(prompts.length, 1, 'registration prompted Touch ID');
+
+  allow = false;
+  const ver = await bridge.handleVerify();
+  assert.deepEqual(ver, { ok: false, reason: 'user-declined-or-timeout' });
+  assert.equal(prompts.length, 2, 'verify prompted Touch ID too');
+
+  allow = true;
+  assert.equal((await bridge.handleVerify()).ok, true);
+});
+
+test('passkeyBridge: tampered record fails verification', async () => {
+  const { bridge, fs } = makeBridge();
+  await bridge.handleRegister(null, { label: 'x' });
+  const raw = JSON.parse(fs.files.get(bridge._filePath));
+  raw.secretHash = 'f'.repeat(64);
+  fs.files.set(bridge._filePath, JSON.stringify(raw));
+  assert.deepEqual(await bridge.handleVerify(), { ok: false, reason: 'verification-failed' });
+});
+
+/* ------------------------- PasskeyService native path ------------------------- */
+
+function makeNativeBridgeFake({ failRegister = null, failVerify = null } = {}) {
+  const calls = [];
+  return {
+    calls,
+    register: async (label) => {
+      calls.push(['register', label]);
+      if (failRegister) return { ok: false, reason: failRegister };
+      return { ok: true, passkey: { credentialId: 'device-1', label, createdAt: 1700000000000, method: 'os-keychain' } };
+    },
+    verify: async () => {
+      calls.push(['verify']);
+      return failVerify ? { ok: false, reason: failVerify } : { ok: true };
+    },
+    remove: async () => { calls.push(['remove']); return { ok: true }; },
+    status: async () => ({ available: true, registered: false })
+  };
+}
+
+function makeServiceStorage() {
+  const map = new Map();
+  return {
+    map,
+    get: async (k) => (map.has(k) ? map.get(k) : null),
+    set: async (k, v) => { map.set(k, v); },
+    delete: async (k) => { map.delete(k); }
+  };
+}
+
+test('PasskeyService: native bridge makes passkeys supported without WebAuthn', () => {
+  const svc = new PasskeyService({ storage: makeServiceStorage(), nativeBridge: makeNativeBridgeFake() });
+  assert.equal(svc.isSupported(), true, 'bridge present -> supported even with no navigator.credentials');
+  const webauthnOnly = new PasskeyService({ storage: makeServiceStorage() });
+  assert.equal(webauthnOnly.isSupported(), false, 'dom-shim has no WebAuthn -> unsupported without bridge');
+});
+
+test('PasskeyService: register routes through the bridge and persists an honest record', async () => {
+  const bridge = makeNativeBridgeFake();
+  const storage = makeServiceStorage();
+  const svc = new PasskeyService({ storage, nativeBridge: bridge });
+
+  const res = await svc.registerPasskey({ accountLabel: 'ada@example.com' });
+  assert.equal(res.success, true);
+  assert.equal(res.passkey.method, 'os-keychain', 'method recorded for honest UI copy');
+  assert.deepEqual(bridge.calls[0], ['register', 'ada@example.com']);
+
+  const stored = await svc.getRegisteredPasskey();
+  assert.equal(stored.credentialId, 'device-1');
+  assert.equal(stored.accountLabel, 'ada@example.com');
+});
+
+test('PasskeyService: bridge failures surface their reasons', async () => {
+  const svc = new PasskeyService({
+    storage: makeServiceStorage(),
+    nativeBridge: makeNativeBridgeFake({ failRegister: 'keychain-unavailable' })
+  });
+  assert.deepEqual(await svc.registerPasskey({}), { success: false, reason: 'keychain-unavailable' });
+
+  const bridge2 = makeNativeBridgeFake({ failVerify: 'user-declined-or-timeout' });
+  const storage2 = makeServiceStorage();
+  const svc2 = new PasskeyService({ storage: storage2, nativeBridge: bridge2 });
+  await svc2.registerPasskey({ accountLabel: 'x' });
+  assert.deepEqual(await svc2.verifyPasskey(), { success: false, reason: 'user-declined-or-timeout' });
+});
+
+test('PasskeyService: verify success stamps lastVerifiedAt; remove clears bridge AND record', async () => {
+  const bridge = makeNativeBridgeFake();
+  const storage = makeServiceStorage();
+  const svc = new PasskeyService({ storage, nativeBridge: bridge });
+  await svc.registerPasskey({ accountLabel: 'x' });
+
+  const ver = await svc.verifyPasskey();
+  assert.equal(ver.success, true);
+  assert.ok((await svc.getRegisteredPasskey()).lastVerifiedAt > 0);
+
+  await svc.removePasskey();
+  assert.equal(await svc.getRegisteredPasskey(), null);
+  assert.ok(bridge.calls.some(([m]) => m === 'remove'), 'OS-side credential removed too');
+});
+
+/* ------------------------- Shell: per-profile windows ------------------------- */
+
+function makeShell({ storage = new MemoryStorage(), options = {} } = {}) {
+  const container = document.createElement('div');
+  const profileService = new ProfileService({ storage });
+  const shell = new BrowserShell({ container, isMobile: false, profileService, ...options });
+  shell.render(container);
+  return { shell, container, profileService, storage };
+}
+
+function withProfileWindowBridge(fn) {
+  const opened = [];
+  globalThis.window.yayra = {
+    profiles: { openWindow: (id) => { opened.push(id); return Promise.resolve({ ok: true }); } }
+  };
+  try {
+    return fn(opened);
+  } finally {
+    delete globalThis.window.yayra;
+  }
+}
+
+test('Shell: "Add profile" opens the NEW profile in a NEW window; this window keeps its profile', () => {
+  withProfileWindowBridge((opened) => {
+    const { shell, container, profileService } = makeShell();
+    shell.state.tabs[0].url = 'https://example.com';
+    shell.state.isAccountMenuOpen = true;
+    shell.render(container);
+
+    container.querySelector('.fb-profile-add-btn').click();
+
+    assert.equal(profileService.list().length, 2, 'new profile created');
+    const created = profileService.list().find((p) => p.id !== DEFAULT_PROFILE_ID);
+    assert.deepEqual(opened, [created.id], 'new window opened FOR THE NEW profile');
+    assert.equal(profileService.current().id, DEFAULT_PROFILE_ID, 'THIS window stays on its profile');
+    assert.equal(shell.state.tabs[0].url, 'https://example.com', 'current tabs untouched');
+    assert.equal(shell.state.isAccountMenuOpen, false, 'menu closes');
+  });
+});
+
+test('Shell: clicking another profile row opens IT in a new window, current stays', () => {
+  withProfileWindowBridge((opened) => {
+    const { shell, container, profileService } = makeShell();
+    const work = profileService.createProfile({ name: 'Work' });
+    shell.state.tabs[0].url = 'https://example.com';
+    shell.state.isAccountMenuOpen = true;
+    shell.render(container);
+
+    const row = container.querySelectorAll('.fb-profile-row')
+      .find((r) => r.getAttribute('data-profile-id') === work.id);
+    row.click();
+
+    assert.deepEqual(opened, [work.id]);
+    assert.equal(profileService.current().id, DEFAULT_PROFILE_ID, 'no in-place switch');
+    assert.equal(shell.state.tabs[0].url, 'https://example.com', 'tabs survive');
+  });
+});
+
+test('Shell: accepting the "keep separate" suggestion opens a new window for it', () => {
+  withProfileWindowBridge((opened) => {
+    const { shell, profileService } = makeShell();
+    shell.handleAccountSignal('ada@example.com');
+    shell.handleAccountSignal('grace@example.com');
+    assert.ok(shell.state.profileSuggestion);
+    shell.state.tabs[0].url = 'https://mail.example.com';
+
+    shell.acceptProfileSuggestion();
+
+    assert.equal(shell.state.profileSuggestion, null);
+    assert.equal(profileService.list().length, 2, 'profile created for grace');
+    const grace = profileService.list().find((p) => p.email === 'grace@example.com');
+    assert.deepEqual(opened, [grace.id], 'grace opens in her own window');
+    assert.equal(profileService.current().email, 'ada@example.com', 'ada keeps this window');
+    assert.equal(shell.state.tabs[0].url, 'https://mail.example.com', 'ada keeps her tabs');
+  });
+});
+
+test('Shell: without a bridge, window.open fallback carries ?profile=<id>', () => {
+  const opens = [];
+  globalThis.window.open = (url) => { opens.push(url); return {}; };
+  try {
+    const { shell, container, profileService } = makeShell();
+    shell.state.isAccountMenuOpen = true;
+    shell.render(container);
+    container.querySelector('.fb-profile-add-btn').click();
+
+    const created = profileService.list().find((p) => p.id !== DEFAULT_PROFILE_ID);
+    assert.equal(opens.length, 1);
+    assert.ok(opens[0].includes(`profile=${encodeURIComponent(created.id)}`), `url carries the profile id: ${opens[0]}`);
+    assert.equal(profileService.current().id, DEFAULT_PROFILE_ID, 'opener window unaffected');
+  } finally {
+    delete globalThis.window.open;
+  }
+});
+
+test('Shell: windowProfileId boot option binds the new window to its profile', () => {
+  const storage = new MemoryStorage();
+  const seed = new ProfileService({ storage });
+  const work = seed.createProfile({ name: 'Work' });
+  assert.equal(seed.current().id, DEFAULT_PROFILE_ID, 'creating does not switch');
+
+  // The new window boots with ?profile=<work> -> binds to Work.
+  const { profileService } = makeShell({ storage, options: { windowProfileId: work.id } });
+  assert.equal(profileService.current().id, work.id);
+
+  // Unknown ids are ignored instead of corrupting state.
+  const { profileService: svc2 } = makeShell({ storage: new MemoryStorage(), options: { windowProfileId: 'nope' } });
+  assert.equal(svc2.current().id, DEFAULT_PROFILE_ID);
+});
+
+/* ------------------------- downloadsBridge.attachSession ------------------------- */
+
+test('downloadsBridge: profile-window sessions join download tracking exactly once', () => {
+  const listeners = [];
+  const makeSession = () => ({ on: (ev, fn) => listeners.push([ev, fn]) });
+  const base = makeSession();
+  const bridge = createDownloadsBridge({
+    ipcMain: { handle: () => {}, on: () => {} },
+    shell: {},
+    dialog: {},
+    path,
+    fs: { existsSync: () => false },
+    sessions: [base],
+    downloadsStore: {
+      load: () => ({ items: [] }),
+      addOrUpdateItem: () => {},
+      getDownloadRoot: () => '/tmp'
+    },
+    getMainWindow: () => null
+  });
+  assert.equal(listeners.length, 1, 'base session subscribed at creation');
+
+  const profileSession = makeSession();
+  assert.equal(bridge.attachSession(profileSession), true, 'new session attaches');
+  assert.equal(bridge.attachSession(profileSession), false, 'duplicate attach is a no-op');
+  assert.equal(bridge.attachSession(base), false, 'creation-time sessions never double-subscribe');
+  assert.equal(listeners.length, 2, 'exactly one will-download listener per session');
+  assert.equal(listeners[1][0], 'will-download');
+});

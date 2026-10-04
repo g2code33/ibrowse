@@ -97,9 +97,18 @@ function createPlatformAuthBridge() {
 }
 
 if (root) {
+  // Per-profile windows (Chrome-style "Add profile opens a new window")
+  // boot with ?profile=<id> - set by electron/main.cjs createProfileWindow
+  // or the web window.open fallback - so this window binds to that
+  // profile while the opener window keeps its own.
+  let windowProfileId = null;
+  try {
+    windowProfileId = new URLSearchParams(window.location.search).get('profile') || null;
+  } catch { /* no usable location (tests) */ }
   const browserShell = new BrowserShell({
     container: root,
     platform: target,
+    windowProfileId,
     // The mini panel is a ~420px-wide window: the compact (mobile) layout
     // is the right chrome for it, while still using the native per-tab
     // WebContentsView engine through the same preload bridge.

@@ -95,6 +95,21 @@ const api = {
       return () => ipcRenderer.removeListener(DOWNLOADS_EVENT_CHANNEL, listener);
     }
   },
+  // Device passkey for the desktop shell (see electron/passkeyBridge.cjs):
+  // Chromium refuses real WebAuthn on the custom yayra:// scheme, so the
+  // desktop uses an OS-keychain-bound credential (safeStorage; real Touch
+  // ID prompt on supporting Macs). Web/PWA builds keep genuine WebAuthn.
+  passkeys: {
+    status: () => ipcRenderer.invoke('yayra:passkey-status'),
+    register: (label) => ipcRenderer.invoke('yayra:passkey-register', { label }),
+    verify: () => ipcRenderer.invoke('yayra:passkey-verify'),
+    remove: () => ipcRenderer.invoke('yayra:passkey-remove')
+  },
+  // Chrome-style profiles: open a profile in its OWN new Yayra window
+  // while the current window stays on its profile.
+  profiles: {
+    openWindow: (profileId) => ipcRenderer.invoke('yayra:open-profile-window', { profileId })
+  },
   // System-wide floating overlay bubble settings (see
   // electron/overlayWindow.cjs). The overlay window itself is a completely
   // separate native window/renderer - this is just the Settings-facing

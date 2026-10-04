@@ -27,11 +27,18 @@
 const STORAGE_KEY = 'yayra-account-passkey-v1';
 
 export class PasskeyService {
-  constructor({ storage, credentialsApi, rpName = 'Yayra', rpId } = {}) {
+  constructor({ storage, credentialsApi, rpName = 'Yayra', rpId, nativeBridge = null } = {}) {
     this.storage = storage || null;
     this._credentialsApi = credentialsApi || null;
     this.rpName = rpName;
     this.rpId = rpId || (typeof location !== 'undefined' && location.hostname ? location.hostname : undefined);
+    // Electron desktop: the shell runs on the custom yayra:// scheme,
+    // which Chromium's WebAuthn refuses (no valid RP domain) - users saw
+    // "passkeys require a secure (HTTPS) context" on a perfectly trusted
+    // app. When the preload exposes the device-passkey bridge
+    // (electron/passkeyBridge.cjs: OS keychain via safeStorage + real
+    // Touch ID on supporting Macs), it takes precedence over WebAuthn.
+    this.nativeBridge = nativeBridge;
   }
 
   get credentialsApi() {
@@ -40,7 +47,12 @@ export class PasskeyService {
     return null;
   }
 
+  get usesNativeBridge() {
+    return Boolean(this.nativeBridge && typeof this.nativeBridge.register === 'function');
+  }
+
   isSupported() {
+    if (this.usesNativeBridge) return true;
     const api = this.credentialsApi;
     return Boolean(api && typeof api.create === 'function' && typeof api.get === 'function'
       && typeof globalThis.PublicKeyCredential !== 'undefined');
@@ -72,6 +84,26 @@ export class PasskeyService {
   async registerPasskey({ accountLabel = 'Yayra user', accountId } = {}) {
     if (!this.isSupported()) {
       return { success: false, reason: 'passkeys-unsupported' };
+    }
+    if (this.usesNativeBridge) {
+      try {
+        const res = await this.nativeBridge.register(accountLabel);
+        if (!res || !res.ok) {
+          return { success: false, reason: (res && res.reason) || 'creation-cancelled' };
+        }
+        const passkey = {
+          credentialId: res.passkey.credentialId,
+          accountLabel,
+          rpId: null,
+          method: res.passkey.method || 'os-keychain',
+          createdAt: res.passkey.createdAt || Date.now(),
+          lastVerifiedAt: null
+        };
+        await this._set(STORAGE_KEY, passkey);
+        return { success: true, passkey };
+      } catch (err) {
+        return { success: false, reason: errorReason(err) };
+      }
     }
     try {
       const challenge = randomBytes(32);
@@ -123,6 +155,18 @@ export class PasskeyService {
     if (!stored) {
       return { success: false, reason: 'no-passkey-registered' };
     }
+    if (this.usesNativeBridge) {
+      try {
+        const res = await this.nativeBridge.verify();
+        if (!res || !res.ok) {
+          return { success: false, reason: (res && res.reason) || 'verification-failed' };
+        }
+        await this._set(STORAGE_KEY, { ...stored, lastVerifiedAt: Date.now() });
+        return { success: true };
+      } catch (err) {
+        return { success: false, reason: errorReason(err) };
+      }
+    }
     try {
       const assertion = await this.credentialsApi.get({
         publicKey: {
@@ -145,6 +189,9 @@ export class PasskeyService {
   }
 
   async removePasskey() {
+    if (this.usesNativeBridge && typeof this.nativeBridge.remove === 'function') {
+      try { await this.nativeBridge.remove(); } catch { /* local record still cleared below */ }
+    }
     await this._delete(STORAGE_KEY);
     return { success: true };
   }

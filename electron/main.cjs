@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -10,6 +10,7 @@ const { signInWithGoogle } = require('./googleAuth.cjs');
 const { resolveGoogleClientId, resolveGoogleClientSecret } = require('./googleAuthConfig.cjs');
 const { createDownloadsStore } = require('./downloadsStore.cjs');
 const { createDownloadsBridge } = require('./downloadsBridge.cjs');
+const { createPasskeyBridge } = require('./passkeyBridge.cjs');
 const { createOverlayBridge } = require('./overlayWindow.cjs');
 const { createOverlayStore } = require('./overlayStore.cjs');
 const { createTrayController } = require('./tray.cjs');
@@ -17,6 +18,10 @@ const { createTrayController } = require('./tray.cjs');
 const CUSTOM_SCHEME = 'yayra';
 const DIST_DIR = path.join(__dirname, '..', 'dist');
 let mainWindow;
+let downloadsBridge = null;
+// Extra per-profile shell windows (Chrome-style: one window per profile,
+// the previous window stays). Tracked for cleanup only.
+const profileWindows = new Set();
 let overlayBridge = null;
 let webviewBridge = null;
 let trayController = null;
@@ -247,7 +252,7 @@ function registerIpcBridges() {
     userDataDir: app.getPath('userData'),
     defaultDownloadsDir: app.getPath('downloads')
   });
-  createDownloadsBridge({
+  downloadsBridge = createDownloadsBridge({
     ipcMain,
     shell,
     dialog,
@@ -256,6 +261,39 @@ function registerIpcBridges() {
     sessions: [session.fromPartition('persist:yayra-webview'), session.defaultSession],
     downloadsStore,
     getMainWindow: () => mainWindow
+  });
+
+  // Device passkey for the desktop shell: Chromium refuses real WebAuthn
+  // on the custom yayra:// scheme (no valid RP domain), so the desktop
+  // gets an OS-keychain-bound credential via safeStorage (+ a real Touch
+  // ID prompt on supporting Macs). See electron/passkeyBridge.cjs.
+  createPasskeyBridge({
+    ipcMain,
+    fs,
+    path,
+    userDataDir: app.getPath('userData'),
+    safeStorageImpl: safeStorage,
+    systemPreferencesImpl: systemPreferences
+  });
+
+  // Chrome-style profiles: "Add profile" / switching opens a NEW Yayra
+  // window for that profile while the current window stays on its own.
+  // Each profile window boots with ?profile=<id> so the renderer binds to
+  // the right identity, and its web-content partition joins download
+  // tracking the moment the window exists.
+  ipcMain.handle('yayra:open-profile-window', (_event, { profileId } = {}) => {
+    const id = String(profileId || 'default');
+    try {
+      if (id !== 'default') {
+        const partition = `persist:yayra-profile-${id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+        downloadsBridge?.attachSession?.(session.fromPartition(partition));
+      }
+      const win = createProfileWindow(id);
+      return { ok: Boolean(win) };
+    } catch (err) {
+      console.error(`[yayra] failed to open profile window: ${err?.message || err}`);
+      return { ok: false, error: String(err?.message || err) };
+    }
   });
 
   ipcMain.handle('yayra:get-launch-info', () => ({
@@ -270,6 +308,41 @@ function registerIpcBridges() {
     flags: process.argv.filter((arg) => arg.startsWith('--')),
     lastLoadError
   }));
+}
+
+/**
+ * A SECOND, independent shell window bound to a specific browser profile
+ * (Chrome's "open this profile in its own window" model). The existing
+ * window keeps its profile and tabs; this one boots with ?profile=<id>
+ * so the renderer binds to the requested identity and its tabs get that
+ * profile's own session partition (see electron/webviewBridge.cjs).
+ */
+function createProfileWindow(profileId) {
+  const win = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : { frame: false }),
+    backgroundColor: '#101218',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  profileWindows.add(win);
+  win.webContents.on('context-menu', (_event, params) => {
+    if (win.isDestroyed()) return;
+    const template = buildContextMenuTemplate({ params, wc: win.webContents, tabId: null, send: () => {}, clipboard });
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
+  const winContents = win.webContents;
+  win.on('closed', () => {
+    if (webviewBridge) webviewBridge.destroyForWebContents(winContents);
+    profileWindows.delete(win);
+  });
+  win.loadURL(`${CUSTOM_SCHEME}://app/index.html?profile=${encodeURIComponent(profileId)}`);
+  return win;
 }
 
 function createWindow() {
