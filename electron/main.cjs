@@ -97,6 +97,9 @@ if (process.env.YAYRA_SMOKE === '1' || process.env.IBROWSE_SMOKE === '1') {
 // bubble.
 const isPrimaryInstance = app.requestSingleInstanceLock();
 if (!isPrimaryInstance) {
+  // Exiting with NO output looks exactly like "the app is not opening
+  // at all" when the primary instance is wedged - say so out loud.
+  console.log('[yayra] another Yayra process already holds the single-instance lock - signaled it to come to the front and exiting this duplicate. If no window appeared, the resident process is stuck: run `pkill -9 -f yayra` and launch again.');
   app.quit();
 } else {
   app.on('second-instance', (_event, argv) => {
