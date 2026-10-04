@@ -176,6 +176,75 @@ export function createSettingsRepo(storage) {
   };
 }
 
+const SHORTCUTS_KEY = 'newtab-shortcuts';
+
+/**
+ * Chrome-style new-tab shortcut tiles: the user's own pinned sites
+ * ("Add shortcut" on the new tab page). Separate from bookmarks and
+ * from the automatic frequent-sites tiles. Capped at 12 like Chrome.
+ */
+export function createShortcutsRepo(storage) {
+  const sanitize = (items) => (Array.isArray(items) ? items : [])
+    .filter((s) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+    .map(({ id, title, url }) => ({ id: id || `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, title: String(title || url).slice(0, 60), url }))
+    .slice(0, 12);
+  return {
+    async getShortcuts() {
+      return sanitize((await storage.get(SHORTCUTS_KEY)) || []);
+    },
+    async addShortcut({ title = '', url } = {}) {
+      if (!url || !/^https?:\/\//i.test(String(url))) return null;
+      const items = sanitize((await storage.get(SHORTCUTS_KEY)) || []);
+      if (items.length >= 12) return null;
+      if (items.some((s) => s.url === url)) return items.find((s) => s.url === url);
+      const shortcut = { id: `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, title: String(title || url).slice(0, 60), url };
+      items.push(shortcut);
+      await storage.set(SHORTCUTS_KEY, items);
+      return shortcut;
+    },
+    async updateShortcut(id, { title, url } = {}) {
+      const items = sanitize((await storage.get(SHORTCUTS_KEY)) || []);
+      const target = items.find((s) => s.id === id);
+      if (!target) return null;
+      if (typeof title === 'string' && title.trim()) target.title = title.trim().slice(0, 60);
+      if (typeof url === 'string' && /^https?:\/\//i.test(url)) target.url = url;
+      await storage.set(SHORTCUTS_KEY, items);
+      return target;
+    },
+    async removeShortcut(id) {
+      const items = sanitize((await storage.get(SHORTCUTS_KEY)) || []);
+      await storage.set(SHORTCUTS_KEY, items.filter((s) => s.id !== id));
+    }
+  };
+}
+
+const LAST_SESSION_KEY = 'last-session-tabs';
+
+/**
+ * "Continue with these tabs": a rolling snapshot of the tabs currently
+ * open (non-private, real websites only). Closing a tab by hand removes
+ * it from the snapshot naturally, so whatever is left when the app
+ * exits = the tabs the user did NOT manually close - exactly what the
+ * next launch should offer to continue with.
+ */
+export function createSessionRepo(storage) {
+  const sanitize = (tabs) => (Array.isArray(tabs) ? tabs : [])
+    .filter((t) => t && typeof t.url === 'string' && /^https?:\/\//i.test(t.url))
+    .map(({ url, title }) => ({ url, title: String(title || url).slice(0, 120) }))
+    .slice(0, 20);
+  return {
+    async getLastSession() {
+      const snapshot = await storage.get(LAST_SESSION_KEY);
+      return snapshot && Array.isArray(snapshot.tabs)
+        ? { tabs: sanitize(snapshot.tabs), savedAt: Number(snapshot.savedAt) || null }
+        : { tabs: [], savedAt: null };
+    },
+    async saveSession(tabs) {
+      await storage.set(LAST_SESSION_KEY, { tabs: sanitize(tabs), savedAt: Date.now() });
+    }
+  };
+}
+
 const WHEEL_KEY = 'radial-wheel';
 
 /**

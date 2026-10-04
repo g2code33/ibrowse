@@ -4262,6 +4262,115 @@ html {
   color: var(--fb-text-secondary);
 }
 
+/* Chrome-style user shortcut tiles on the new tab page */
+.fb-user-shortcut {
+  position: relative;
+}
+
+.fb-shortcut-edit-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--fb-text-muted);
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.fb-user-shortcut:hover .fb-shortcut-edit-btn {
+  opacity: 1;
+}
+
+.fb-shortcut-edit-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--fb-text-primary);
+}
+
+.fb-add-shortcut-card .fb-add-shortcut-icon svg {
+  width: 20px;
+  height: 20px;
+  color: var(--fb-text-secondary);
+}
+
+/* "Continue with these tabs" card (Chrome's new-tab resume card) */
+.fb-continue-card {
+  width: 100%;
+  max-width: 680px;
+  margin: 8px 0 20px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-continue-card-head {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--fb-text-secondary);
+  margin-bottom: 4px;
+  padding-left: 4px;
+}
+
+.fb-continue-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  color: var(--fb-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.fb-continue-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(6, 182, 212, 0.3);
+}
+
+.fb-continue-favicon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.fb-continue-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.fb-continue-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-continue-meta {
+  font-size: 0.72rem;
+  color: var(--fb-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* =============================================================
    9. DOWNLOADS VIEW MODE TOGGLE & LOCATION BUTTON
    ============================================================= */

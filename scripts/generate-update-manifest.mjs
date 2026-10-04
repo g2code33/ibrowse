@@ -26,23 +26,33 @@ for (const recordPath of records) {
   // elevate.exe) and metadata; the old "take the first file" logic shipped
   // manifests that told Windows clients to install elevate.exe and Linux
   // clients to install the signing public key (.pem).
-  const file = pickArtifact(target, sums.keys());
-  if (file) {
+  const addDownload = async (downloadTarget, file) => {
+    if (!file) return;
     const sha256 = sums.get(file);
     const absolute = path.join(dir, file);
-    if (existsSync(absolute)) {
-      const info = await stat(absolute);
-      downloads[target] = { url: record.urlBase ? `${record.urlBase}/${file}` : `https://github.com/${releaseRepository}/releases/download/v${record.version}/${file}`, sha256, bytes: info.size };
-      // Detached artifact signature (scripts/sign-linux-artifacts.mjs writes
-      // `<artifact>.sig`, RSA-SHA256 over the artifact bytes). Embedding it
-      // base64 in the manifest lets UpdateService verify the download against
-      // a PINNED public key baked into the app - so even a compromised
-      // manifest host cannot push an artifact the release key never signed.
-      // See "signature verification" in src/services/updateService.js.
-      const sigFile = `${absolute}.sig`;
-      if (existsSync(sigFile)) {
-        downloads[target].sig = (await readFile(sigFile)).toString('base64');
-      }
+    if (!existsSync(absolute)) return;
+    const info = await stat(absolute);
+    downloads[downloadTarget] = { url: record.urlBase ? `${record.urlBase}/${file}` : `https://github.com/${releaseRepository}/releases/download/v${record.version}/${file}`, sha256, bytes: info.size };
+    // Detached artifact signature (scripts/sign-linux-artifacts.mjs writes
+    // `<artifact>.sig`, RSA-SHA256 over the artifact bytes). Embedding it
+    // base64 in the manifest lets UpdateService verify the download against
+    // a PINNED public key baked into the app - so even a compromised
+    // manifest host cannot push an artifact the release key never signed.
+    // See "signature verification" in src/services/updateService.js.
+    const sigFile = `${absolute}.sig`;
+    if (existsSync(sigFile)) {
+      downloads[downloadTarget].sig = (await readFile(sigFile)).toString('base64');
+    }
+  };
+  await addDownload(target, pickArtifact(target, sums.keys()));
+  // Linux ships TWO install formats: .deb (system installs) and AppImage
+  // (self-contained file). AppImage users must be served the AppImage so
+  // the in-app updater can self-replace it; see ARTIFACT_PATTERNS note.
+  if (target === 'linux') {
+    const appImageFile = pickArtifact('linux-appimage', sums.keys());
+    if (appImageFile) {
+      await addDownload('linux-appimage', appImageFile);
+      latest['linux-appimage'] = record.version;
     }
   }
 }

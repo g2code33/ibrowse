@@ -200,6 +200,26 @@ function buildBrowserUserAgent({ platform = process.platform, chromeVersion = pr
   return `Mozilla/5.0 (${platformToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 }
 
+/**
+ * Chrome reload-shortcut matrix for key events arriving INSIDE a web
+ * page (the embedded native view gets the keystrokes, not the shell):
+ *   Ctrl/Cmd+R, F5                     -> 'reload'
+ *   Ctrl/Cmd+Shift+R, Ctrl+F5, Shift+F5 -> 'hard-reload' (cache cleared)
+ * Returns null for everything else. Pure - unit tested directly.
+ */
+function reloadActionForInput(input = {}) {
+  if (!input || (input.type && input.type !== 'keyDown')) return null;
+  const key = String(input.key || '');
+  const primary = Boolean(input.control || input.meta);
+  if (key.toLowerCase() === 'r' && primary && !input.alt) {
+    return input.shift ? 'hard-reload' : 'reload';
+  }
+  if (key === 'F5' && !input.alt) {
+    return (primary || input.shift) ? 'hard-reload' : 'reload';
+  }
+  return null;
+}
+
 function hostnameOf(rawUrl) {
   try {
     return new URL(rawUrl).hostname.toLowerCase();
@@ -423,6 +443,22 @@ function createWebviewBridge({
         wc.executeJavaScript(buildWebAuthnWatchdogScript(), true).catch(() => {});
       }
     });
+    // Reload shortcuts pressed while the PAGE has focus (which is most
+    // of the time): the guest WebContents swallows keystrokes, so
+    // Ctrl+R / Ctrl+Shift+R / F5 / Ctrl+F5 must be caught here. Hard
+    // reloads genuinely clear this site's caches first (Chrome parity).
+    wc.on('before-input-event', (event, input) => {
+      const action = reloadActionForInput(input);
+      if (!action) return;
+      event.preventDefault();
+      if (action === 'hard-reload') {
+        hardReload(key).then((res) => {
+          sendTo(entry, 'hard-reloaded', { origin: (res && res.origin) || null });
+        }).catch(() => {});
+      } else {
+        wc.reload();
+      }
+    });
     wc.on('did-start-loading', () => sendTo(entry, 'loading-start'));
     wc.on('did-stop-loading', () => sendTo(entry, 'loading-stop'));
     wc.on('did-navigate', (_event, url) => {
@@ -632,6 +668,47 @@ function createWebviewBridge({
     withView(key, (view) => view.webContents.reload());
   }
 
+  /**
+   * Chrome's Ctrl+Shift+R / Ctrl+F5: genuinely drop this site's cached
+   * data (HTTP-cache bypass on the reload itself + compiled code caches
+   * + Cache Storage + service workers for the origin), then reload the
+   * page from the network. Cookies/logins are NOT touched - exactly how
+   * a Chrome hard reload behaves.
+   */
+  async function clearSiteCache(key) {
+    const entry = views.get(key);
+    const wc = entry && entry.view && entry.view.webContents;
+    if (!wc || wc.isDestroyed?.()) return { ok: false, reason: 'no-view' };
+    const rawUrl = entry.lastUrl || (typeof wc.getURL === 'function' ? wc.getURL() : null);
+    let origin = null;
+    try { origin = new URL(rawUrl).origin; } catch { /* internal/blank page */ }
+    if (!origin || !/^https?:/i.test(origin)) return { ok: false, reason: 'no-site' };
+    const ses = wc.session;
+    try {
+      if (ses && typeof ses.clearCodeCaches === 'function') {
+        await ses.clearCodeCaches({ urls: [origin] });
+      }
+      if (ses && typeof ses.clearStorageData === 'function') {
+        // Cache-like storages only - NOT cookies/localstorage, so the
+        // user stays signed in (Chrome hard-reload semantics).
+        await ses.clearStorageData({ origin, storages: ['cachestorage', 'serviceworkers', 'shadercache'] });
+      }
+      return { ok: true, origin };
+    } catch (err) {
+      return { ok: false, reason: String(err?.message || err) };
+    }
+  }
+
+  async function hardReload(key) {
+    const result = await clearSiteCache(key);
+    withView(key, (view) => {
+      const wc = view.webContents;
+      if (typeof wc.reloadIgnoringCache === 'function') wc.reloadIgnoringCache();
+      else wc.reload();
+    });
+    return result;
+  }
+
   function stop(key) {
     withView(key, (view) => view.webContents.stop());
   }
@@ -675,6 +752,8 @@ function createWebviewBridge({
   ipcMain.handle('yayra:webview-go-back', (event, { tabId } = {}) => goBack(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-go-forward', (event, { tabId } = {}) => goForward(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-reload', (event, { tabId } = {}) => reload(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-hard-reload', (event, { tabId } = {}) => hardReload(viewKey(event, tabId)));
+  ipcMain.handle('yayra:webview-clear-site-cache', (event, { tabId } = {}) => clearSiteCache(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-stop', (event, { tabId } = {}) => stop(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-destroy', (event, { tabId } = {}) => destroyView(viewKey(event, tabId)));
 
@@ -846,7 +925,7 @@ function createWebviewBridge({
     destroyAll,
     destroyForWebContents,
     // Exposed for tests and for main.cjs lifecycle hooks only.
-    _internal: { views, ensureView, setBounds, setVisible, capture, goBack, goForward, reload, stop, destroyView }
+    _internal: { views, ensureView, setBounds, setVisible, capture, goBack, goForward, reload, hardReload, clearSiteCache, stop, destroyView }
   };
 }
 
@@ -860,5 +939,6 @@ module.exports = {
   sanitizeBounds,
   buildBrowserUserAgent,
   buildContextMenuTemplate,
+  reloadActionForInput,
   createWebviewBridge
 };

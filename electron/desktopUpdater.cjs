@@ -12,7 +12,7 @@ const { app, ipcMain, net, shell } = electron;
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const UPDATE_LOG_PREFIX = '[updates]';
 const UPDATE_EVENT_CHANNEL = 'yayra:updates-event';
@@ -62,6 +62,7 @@ function registerDesktopUpdateHandlers({
   fsImpl = fs,
   ipcMainImpl = ipcMain,
   spawnImpl = spawn,
+  spawnSyncImpl = spawnSync,
   envImpl = process.env,
   setTimeoutImpl = setTimeout,
   quitDelayMs = 1500,
@@ -317,14 +318,68 @@ function registerDesktopUpdateHandlers({
     return revealFallback(stagedPath, null);
   };
 
+  /**
+   * How THIS running copy is installed, and which version is actually on
+   * disk right now. The disk version matters because a user can install
+   * an update OUTSIDE the app (terminal `dpkg -i`, software center)
+   * while the old Yayra process is still resident in the tray/bubble -
+   * the old process then keeps answering launches via the single-
+   * instance lock and the user keeps "running the previous version"
+   * forever. Comparing disk vs running version lets the UI show an
+   * honest Chrome-style "Relaunch to update" instead of re-prompting.
+   */
+  const handleInstallInfo = async () => {
+    const runningVersion = (typeof appImpl?.getVersion === 'function' && appImpl.getVersion()) || null;
+    const execPath = process.execPath || null;
+    const appImage = envImpl?.APPIMAGE || null;
+    const packaged = Boolean(appImpl?.isPackaged);
+    let installKind = 'dev';
+    if (appImage) installKind = 'appimage';
+    else if (packaged && process.platform === 'win32') installKind = 'windows';
+    else if (packaged && process.platform === 'darwin') installKind = 'macos';
+    else if (packaged && process.platform === 'linux') installKind = 'deb';
+    let diskVersion = null;
+    if (installKind === 'deb' && typeof spawnSyncImpl === 'function') {
+      try {
+        const res = spawnSyncImpl('dpkg-query', ['-W', '-f=${Version}', 'yayra'], { encoding: 'utf8', timeout: 4000 });
+        const out = String(res?.stdout || '').trim();
+        if (res && res.status === 0 && /^\d+\.\d+\.\d+/.test(out)) diskVersion = out;
+      } catch { /* dpkg not available - diskVersion stays unknown */ }
+    }
+    return {
+      ok: true,
+      runningVersion,
+      diskVersion,
+      installKind,
+      execPath,
+      appImage,
+      // True when a newer build is ALREADY installed on disk and a
+      // simple relaunch (no download) finishes the update.
+      relaunchWillUpdate: Boolean(diskVersion && runningVersion && diskVersion !== runningVersion)
+    };
+  };
+
+  const handleRelaunch = async () => {
+    logger(`${UPDATE_LOG_PREFIX} relaunch requested (apply on-disk version)`);
+    try {
+      appImpl.relaunch();
+      setTimeoutImpl(() => { try { appImpl.exit(0); } catch { /* already quitting */ } }, relaunchDelayMs);
+      return { status: 'relaunching' };
+    } catch (err) {
+      return { status: 'error', reason: String(err?.message || err) };
+    }
+  };
+
   ipcMainImpl.handle('yayra:updates-check', handleCheck);
   ipcMainImpl.handle('yayra:updates-download', handleDownload);
   ipcMainImpl.handle('yayra:updates-install', handleInstall);
+  ipcMainImpl.handle('yayra:updates-install-info', handleInstallInfo);
+  ipcMainImpl.handle('yayra:updates-relaunch', handleRelaunch);
   ipcMainImpl.handle('ibrowse:updates-check', handleCheck);
   ipcMainImpl.handle('ibrowse:updates-download', handleDownload);
   ipcMainImpl.handle('ibrowse:updates-install', handleInstall);
 
-  return { handleCheck, handleDownload, handleInstall };
+  return { handleCheck, handleDownload, handleInstall, handleInstallInfo, handleRelaunch };
 }
 
 function getStagingPath(version, target) {

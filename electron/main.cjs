@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer, webContents } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
 const { createWebviewBridge, buildContextMenuTemplate, buildBrowserUserAgent } = require('./webviewBridge.cjs');
 const { parseAppModeUrl, buildInstallPlan } = require('./appMode.cjs');
+const { startGlobalHotkeys } = require('./globalHotkeys.cjs');
 const { createAuthBridge } = require('./authBridge.cjs');
 const { createAuthStore } = require('./authStore.cjs');
 const { signInWithGoogle } = require('./googleAuth.cjs');
@@ -30,6 +31,7 @@ let downloadsBridge = null;
 const profileWindows = new Set();
 let overlayBridge = null;
 let webviewBridge = null;
+let globalHotkeys = null;
 let trayController = null;
 let lastLoadError = null;
 
@@ -229,7 +231,27 @@ app.whenReady().then(async () => {
     const trayVisible = trayController && trayController.getTray && trayController.getTray();
     if (!bubbleVisible && !trayVisible) createWindow();
   }
+
+  // System-wide CapsLock chords (real low-level keyboard hook - see
+  // electron/globalHotkeys.cjs for why globalShortcut can't do this):
+  //   CapsLock+Y        -> open/restore the main Yayra window
+  //   CapsLock+Shift+R  -> open yayra mini (the bubble's floating panel)
+  if (!isSmokeRun && !appModeLaunchUrl) {
+    globalHotkeys = startGlobalHotkeys({
+      onOpenMain: () => {
+        if (overlayBridge) overlayBridge.restoreMainWindow();
+        else if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+        else createWindow();
+      },
+      onOpenMini: () => {
+        if (overlayBridge && typeof overlayBridge.toggleMiniPanel === 'function') overlayBridge.toggleMiniPanel();
+      },
+      logger: console
+    });
+  }
 });
+
+app.on('will-quit', () => { try { globalHotkeys?.detach(); } catch { /* exiting */ } });
 
 function resolveBubbleLogoPath() {
   const candidates = [
@@ -306,6 +328,43 @@ function registerIpcBridges() {
     } catch (err) {
       console.error('[yayra] app metrics failed', err);
       return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // Settings/menu > Clear browsing data: REALLY clears Chromium's disk
+  // caches (and optionally cookies/site data) across every session Yayra
+  // uses - the default session, the default profile partition, and every
+  // live profile/incognito partition. Returns the real byte count freed.
+  ipcMain.handle('yayra:clear-browsing-data', async (_event, { cache = true, cookies = false } = {}) => {
+    try {
+      const sessions = new Set([session.defaultSession, session.fromPartition('persist:yayra-webview')]);
+      for (const wc of (typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [])) {
+        try { if (wc.session) sessions.add(wc.session); } catch { /* destroyed */ }
+      }
+      let clearedBytes = 0;
+      for (const ses of sessions) {
+        if (!ses) continue;
+        try {
+          if (cache) {
+            if (typeof ses.getCacheSize === 'function') {
+              try { clearedBytes += await ses.getCacheSize(); } catch { /* size is best-effort */ }
+            }
+            if (typeof ses.clearCache === 'function') await ses.clearCache();
+            if (typeof ses.clearCodeCaches === 'function') await ses.clearCodeCaches({});
+            if (typeof ses.clearStorageData === 'function') {
+              await ses.clearStorageData({ storages: ['cachestorage', 'shadercache'] });
+            }
+          }
+          if (cookies && typeof ses.clearStorageData === 'function') {
+            await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'websql'] });
+          }
+        } catch (err) {
+          console.error('[yayra] clear-browsing-data failed for a session', err);
+        }
+      }
+      return { ok: true, clearedBytes, sessions: sessions.size };
+    } catch (err) {
+      return { ok: false, reason: String(err?.message || err) };
     }
   });
 

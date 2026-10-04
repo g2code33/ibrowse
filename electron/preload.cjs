@@ -23,6 +23,12 @@ const api = {
     // See electron/desktopUpdater.cjs.
     download: (payload) => ipcRenderer.invoke('yayra:updates-download', payload),
     install: (payload) => ipcRenderer.invoke('yayra:updates-install', payload),
+    // How THIS running copy was installed (deb/appimage/windows/dev),
+    // plus the version actually on disk - detects "a newer version is
+    // already installed, just relaunch" (e.g. after a terminal dpkg -i
+    // while the old Yayra process was still resident).
+    installInfo: () => ipcRenderer.invoke('yayra:updates-install-info'),
+    relaunch: () => ipcRenderer.invoke('yayra:updates-relaunch'),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on(UPDATES_EVENT_CHANNEL, listener);
@@ -45,6 +51,10 @@ const api = {
     goBack: (tabId) => ipcRenderer.invoke('yayra:webview-go-back', { tabId }),
     goForward: (tabId) => ipcRenderer.invoke('yayra:webview-go-forward', { tabId }),
     reload: (tabId) => ipcRenderer.invoke('yayra:webview-reload', { tabId }),
+    // Chrome Ctrl+Shift+R: clear this site's caches, then reload from
+    // the network. clearSiteCache does the cache part without reloading.
+    hardReload: (tabId) => ipcRenderer.invoke('yayra:webview-hard-reload', { tabId }),
+    clearSiteCache: (tabId) => ipcRenderer.invoke('yayra:webview-clear-site-cache', { tabId }),
     stop: (tabId) => ipcRenderer.invoke('yayra:webview-stop', { tabId }),
     destroy: (tabId) => ipcRenderer.invoke('yayra:webview-destroy', { tabId }),
     // Autofill saved credentials into the page's login form (Chrome-style).
@@ -161,7 +171,9 @@ const api = {
     createShortcut: ({ url, title } = {}) => ipcRenderer.invoke('yayra:create-shortcut', { url, title }),
     // Chrome-style "Install page as app...": real launcher entries that
     // reopen the site in its own minimal app window (yayra --app=<url>).
-    installPageAsApp: ({ url, title } = {}) => ipcRenderer.invoke('yayra:install-page-as-app', { url, title })
+    installPageAsApp: ({ url, title } = {}) => ipcRenderer.invoke('yayra:install-page-as-app', { url, title }),
+    // Real Chromium cache/site-data clearing across all Yayra sessions.
+    clearBrowsingData: ({ cache = true, cookies = false } = {}) => ipcRenderer.invoke('yayra:clear-browsing-data', { cache, cookies })
   }
 };
 

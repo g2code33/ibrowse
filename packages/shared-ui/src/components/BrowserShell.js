@@ -26,7 +26,9 @@ import {
   createHistoryRepo,
   createBookmarksRepo,
   createSettingsRepo,
-  createWheelRepo
+  createWheelRepo,
+  createShortcutsRepo,
+  createSessionRepo
 } from '../services/profileStorage.js';
 import { YayraAiService, AI_DEFAULTS, describeAiReason } from '../services/aiService.js';
 import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract/src/extensions/ExtensionManager.js';
@@ -168,9 +170,13 @@ export class BrowserShell {
       if (!this.settingsRepo) this.settingsRepo = createSettingsRepo(scoped);
       if (!this.storageAdapter) this.storageAdapter = scoped;
       this.wheelRepo = options.wheelRepo || createWheelRepo(scoped);
+      this.shortcutsRepo = options.shortcutsRepo || createShortcutsRepo(scoped);
+      this.sessionRepo = options.sessionRepo || createSessionRepo(scoped);
     } else {
       this.profileStorage = null;
       this.wheelRepo = options.wheelRepo || null;
+      this.shortcutsRepo = options.shortcutsRepo || null;
+      this.sessionRepo = options.sessionRepo || null;
     }
 
     this.passwordManager = options.passwordManager || new PasswordManager(this.storageAdapter);
@@ -252,6 +258,11 @@ export class BrowserShell {
       closedTabsHistory: [],
       historyItems: [],
       bookmarksItems: [],
+      // Chrome-style new tab: the user's own pinned shortcut tiles and
+      // the previous session's not-manually-closed tabs ("Continue with
+      // these tabs").
+      userShortcuts: [],
+      continueTabs: [],
       // Starts empty - no seeded/sample rows. On the Electron desktop build
       // this is populated from real `will-download` history (see
       // electron/downloadsBridge.cjs) in initialize() below; on builds
@@ -786,6 +797,28 @@ export class BrowserShell {
       }
     }
 
+    // New-tab shortcut tiles (Chrome's "Add shortcut" row).
+    if (this.shortcutsRepo && typeof this.shortcutsRepo.getShortcuts === 'function') {
+      try {
+        this.state.userShortcuts = await this.shortcutsRepo.getShortcuts();
+      } catch (err) {
+        console.warn('Failed to load new-tab shortcuts in BrowserShell:', err);
+      }
+    }
+
+    // "Continue with these tabs": what the PREVIOUS run left open (tabs
+    // the user closed by hand were already dropped from the snapshot).
+    // Read BEFORE this run's own snapshot starts overwriting it.
+    if (this.sessionRepo && typeof this.sessionRepo.getLastSession === 'function') {
+      try {
+        const prev = await this.sessionRepo.getLastSession();
+        const openNow = new Set(this.state.tabs.map((t) => t.url));
+        this.state.continueTabs = (prev.tabs || []).filter((t) => !openNow.has(t.url)).slice(0, 5);
+      } catch (err) {
+        console.warn('Failed to load the previous session in BrowserShell:', err);
+      }
+    }
+
     // Radial action wheel: load this profile's saved customization (the
     // old build wrote customizations to localStorage but never read them
     // back, so every restart silently reset the wheel).
@@ -964,6 +997,10 @@ export class BrowserShell {
     if (!target) return null;
 
     this.lastRenderTarget = target;
+
+    // Keep the "last session" snapshot rolling: every render follows a
+    // state change, and the JSON-compare inside makes no-op calls free.
+    this.queueSessionSnapshot();
 
     // CRITICAL (web/PWA no-blink fix): the persistent web-frame layer holds
     // the live <iframe> for each external tab. It must SURVIVE re-renders -
@@ -2393,6 +2430,14 @@ export class BrowserShell {
       case 'system-browser-handoff':
         this.showTransientNotice('Opened in your default browser for secure sign-in.');
         break;
+      case 'hard-reloaded': {
+        // Ctrl+Shift+R / Ctrl+F5 pressed INSIDE the page (the native view
+        // owns those keystrokes) - cache already cleared main-side.
+        let host = evt.origin || '';
+        try { host = new URL(evt.origin).hostname; } catch { /* keep raw */ }
+        this.showTransientNotice(host ? `Cache cleared for ${host} - reloading from the network.` : 'Hard reload - cache bypassed.');
+        break;
+      }
       case 'autofill-captured':
         // Chrome-style: a login was submitted inside the page. Offer to
         // remember it (never for private tabs - checked again in the vault).
@@ -3007,7 +3052,56 @@ export class BrowserShell {
       // REAL "Frequently Used Sites": built from this profile's actual
       // browsing (visit counts in the history repo), capped at 5. A
       // fresh install or a brand-new profile has none - the section is
-      // simply absent until the user has browsed somewhere.
+      // Chrome-style user shortcuts: the tiles the user pinned here
+      // themselves, plus an "Add shortcut" tile (always present - this
+      // is where shortcuts LIVE, like Chrome's new tab page).
+      const shortcutsSection = document.createElement('div');
+      shortcutsSection.className = 'fb-newtab-shortcuts-section';
+      shortcutsSection.style.width = '100%';
+      shortcutsSection.style.maxWidth = '680px';
+      const shortcutsGrid = document.createElement('div');
+      shortcutsGrid.className = 'fb-frequent-grid fb-shortcuts-grid';
+      (this.state.userShortcuts || []).forEach((shortcut) => {
+        const card = document.createElement('button');
+        card.className = 'fb-frequent-card fb-newtab-shortcut fb-user-shortcut';
+        card.title = shortcut.url;
+        card.innerHTML = `
+          <div class="fb-frequent-icon-wrap">${this.frequentSiteIconHtml(shortcut)}</div>
+          <span class="fb-frequent-title">${String(shortcut.title || shortcut.url).replace(/</g, '&lt;')}</span>
+          <span class="fb-shortcut-edit-btn" title="Edit shortcut" data-shortcut-id="${shortcut.id}">⋮</span>
+        `;
+        card.addEventListener('click', (e) => {
+          if (e.target && e.target.classList && e.target.classList.contains('fb-shortcut-edit-btn')) {
+            e.stopPropagation();
+            this._editingShortcut = shortcut;
+            this.openModal('edit-shortcut');
+            return;
+          }
+          this.navigateActiveTab(shortcut.url);
+        });
+        shortcutsGrid.appendChild(card);
+      });
+      if ((this.state.userShortcuts || []).length < 12) {
+        const addCard = document.createElement('button');
+        // NOT fb-newtab-shortcut: that class means "a real site tile"
+        // (tests assert a fresh profile shows zero of them) - the Add
+        // affordance is chrome, not a site.
+        addCard.className = 'fb-frequent-card fb-add-shortcut-card';
+        addCard.title = 'Add shortcut';
+        addCard.innerHTML = `
+          <div class="fb-frequent-icon-wrap fb-add-shortcut-icon">${Icons.plus}</div>
+          <span class="fb-frequent-title">Add shortcut</span>
+        `;
+        addCard.addEventListener('click', () => {
+          this._editingShortcut = null;
+          this.openModal('edit-shortcut');
+        });
+        shortcutsGrid.appendChild(addCard);
+      }
+      shortcutsSection.appendChild(shortcutsGrid);
+      newTabPage.appendChild(shortcutsSection);
+
+      // REAL "Frequently Used Sites" (visit-count driven, cap 5).
       const frequentSites = this.getFrequentSites();
       if (frequentSites.length > 0) {
         const frequentSection = document.createElement('div');
@@ -3036,6 +3130,47 @@ export class BrowserShell {
 
         frequentSection.appendChild(frequentGrid);
         newTabPage.appendChild(frequentSection);
+      }
+
+      // Chrome's "Continue with these tabs" card: the previous run's
+      // tabs that were NOT closed manually (rolling session snapshot),
+      // topped up with frequently-opened sites ("You visit often").
+      const continueEntries = [];
+      const seenContinue = new Set(this.state.tabs.map((t) => t.url));
+      for (const t of (this.state.continueTabs || [])) {
+        if (seenContinue.has(t.url)) continue;
+        seenContinue.add(t.url);
+        continueEntries.push({ url: t.url, title: t.title || t.url, reason: 'From last session' });
+        if (continueEntries.length >= 5) break;
+      }
+      for (const site of frequentSites) {
+        if (continueEntries.length >= 5) break;
+        if (seenContinue.has(site.url)) continue;
+        seenContinue.add(site.url);
+        continueEntries.push({ url: site.url, title: site.title || site.url, reason: 'You visit often' });
+      }
+      if (continueEntries.length > 0) {
+        const continueCard = document.createElement('div');
+        continueCard.className = 'fb-continue-card';
+        continueCard.innerHTML = `
+          <div class="fb-continue-card-head">Continue with these tabs</div>
+          ${continueEntries.map((entry) => {
+            let host = entry.url;
+            try { host = new URL(entry.url).hostname; } catch { /* keep url */ }
+            return `
+            <button class="fb-continue-item" data-url="${String(entry.url).replace(/"/g, '&quot;')}">
+              <img class="fb-continue-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.style.visibility='hidden'" />
+              <span class="fb-continue-text">
+                <span class="fb-continue-title">${String(entry.title).replace(/</g, '&lt;')}</span>
+                <span class="fb-continue-meta">${host} &bull; ${entry.reason}</span>
+              </span>
+            </button>`;
+          }).join('')}
+        `;
+        continueCard.querySelectorAll('.fb-continue-item').forEach((item) => {
+          item.addEventListener('click', () => this.navigateActiveTab(item.dataset.url));
+        });
+        newTabPage.appendChild(continueCard);
       }
 
       // Recent History Quick List
@@ -5479,6 +5614,31 @@ export class BrowserShell {
    * websites are NOT reloaded - like Chrome, background tabs stay alive
    * untouched (pooled frames / native views).
    * ----------------------------------------------------------- */
+  /**
+   * Rolling "tabs that are still open" snapshot (profile-scoped). A tab
+   * the user closes by hand leaves state.tabs and therefore the
+   * snapshot - so whatever the snapshot holds when the app dies (quit,
+   * crash, tray exit) is exactly "the tabs that were NOT closed
+   * manually", which the next launch offers as "Continue with these
+   * tabs". Debounced + JSON-compared so render() can call it freely.
+   */
+  queueSessionSnapshot() {
+    if (!this.sessionRepo || typeof this.sessionRepo.saveSession !== 'function') return;
+    if (typeof setTimeout !== 'function') return;
+    const tabs = (this.state.tabs || [])
+      .filter((t) => t && !t.isPrivate && /^https?:\/\//i.test(String(t.url || '')))
+      .map((t) => ({ url: t.url, title: t.title || t.url }));
+    const json = JSON.stringify(tabs);
+    if (json === this._lastSessionSnapshotJson) return;
+    this._lastSessionSnapshotJson = json;
+    if (this._sessionSnapshotTimer) clearTimeout(this._sessionSnapshotTimer);
+    this._sessionSnapshotTimer = setTimeout(() => {
+      this._sessionSnapshotTimer = null;
+      Promise.resolve(this.sessionRepo.saveSession(tabs)).catch(() => {});
+    }, 600);
+    if (typeof this._sessionSnapshotTimer?.unref === 'function') this._sessionSnapshotTimer.unref();
+  }
+
   startBackgroundRefresh() {
     if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
     if (this._bgRefreshTimer) return;
@@ -5526,8 +5686,11 @@ export class BrowserShell {
       if (this.settingsRepo?.getSettings) {
         try { fresh.settings = await this.settingsRepo.getSettings(); } catch { /* keep current */ }
       }
+      if (this.shortcutsRepo?.getShortcuts) {
+        try { fresh.shortcuts = await this.shortcutsRepo.getShortcuts(); } catch { /* keep current */ }
+      }
 
-      const snapshot = JSON.stringify([fresh.history, fresh.bookmarks, fresh.downloads, fresh.settings]);
+      const snapshot = JSON.stringify([fresh.history, fresh.bookmarks, fresh.downloads, fresh.settings, fresh.shortcuts]);
       if (snapshot === this._bgRefreshSnapshot) return false;
       const isFirstPass = this._bgRefreshSnapshot === undefined;
       this._bgRefreshSnapshot = snapshot;
@@ -5537,6 +5700,7 @@ export class BrowserShell {
       if (fresh.downloads) this.state.downloadsItems = fresh.downloads;
       if (fresh.downloadRoot !== undefined) this.state.downloadRoot = fresh.downloadRoot;
       if (fresh.settings) this.state.settings = { ...this.state.settings, ...fresh.settings };
+      if (fresh.shortcuts) this.state.userShortcuts = fresh.shortcuts;
 
       // The very first pass just seeds the snapshot - initialize()
       // already rendered this exact data.
@@ -6206,6 +6370,19 @@ export class BrowserShell {
         this.syncWheelToOverlay();
       } catch { /* keep current */ }
     }
+    if (this.shortcutsRepo?.getShortcuts) {
+      try { this.state.userShortcuts = await this.shortcutsRepo.getShortcuts(); } catch { /* keep current */ }
+    }
+    if (this.sessionRepo?.getLastSession) {
+      try {
+        // Profile switch: the previous-session offer belongs to the NEW
+        // profile; the rolling snapshot restarts from its tabs too.
+        const prev = await this.sessionRepo.getLastSession();
+        const openNow = new Set(this.state.tabs.map((t) => t.url));
+        this.state.continueTabs = (prev.tabs || []).filter((t) => !openNow.has(t.url)).slice(0, 5);
+        this._lastSessionSnapshotJson = null;
+      } catch { /* keep current */ }
+    }
     this.render();
   }
 
@@ -6645,7 +6822,40 @@ export class BrowserShell {
       return;
     }
 
+    // How is THIS copy installed, and is a NEWER build already on disk?
+    // That happens when the update was installed outside the app (e.g.
+    // terminal `sudo dpkg -i ...`) while the old Yayra process stayed
+    // resident in the tray/bubble: the old process keeps answering every
+    // launch through the single-instance lock, so the user "keeps
+    // getting the previous version" no matter how often they install.
+    // The honest fix is Chrome's: a "Relaunch to update" prompt, not
+    // another download.
+    const installInfo = await this.getUpdateInstallInfo();
+    if (installInfo?.relaunchWillUpdate) {
+      this.state.updateState = {
+        ...this.state.updateState,
+        status: 'relaunch',
+        installedVersion: installInfo.runningVersion || this.state.updateState.installedVersion,
+        availableVersion: installInfo.diskVersion || null,
+        notes: `v${installInfo.diskVersion} is already installed on this computer - relaunch Yayra to start using it.`,
+        download: null
+      };
+      this.render();
+      if (manual) this.showTransientNotice(`v${installInfo.diskVersion} is installed - relaunch Yayra to finish the update.`);
+      this.promptRelaunchToUpdate(installInfo.diskVersion);
+      return;
+    }
+
     if (res && (res.status === 'available' || res.status === 'ready')) {
+      // AppImage installs must download the AppImage (which Yayra
+      // self-replaces in place), never the .deb: a dpkg install lands in
+      // /opt while the user keeps launching their old AppImage file -
+      // which looks exactly like "the update never applies".
+      let download = res.download || null;
+      if (installInfo?.installKind === 'appimage') {
+        const alt = res.manifest?.downloads?.['linux-appimage'];
+        if (alt?.url) download = alt;
+      }
       this.state.updateState = {
         status: 'ready',
         installedVersion: res.installedVersion ?? this.state.updateState.installedVersion,
@@ -6654,7 +6864,7 @@ export class BrowserShell {
         // Verified download descriptor from the update manifest (url,
         // sha256, bytes) - this is what the desktop pipeline downloads,
         // verifies and installs. See applyUpdate().
-        download: res.download || null,
+        download,
         force: Boolean(res.force)
       };
       this.render();
@@ -6683,6 +6893,46 @@ export class BrowserShell {
         }
       }
     }
+  }
+
+  /** Install metadata from the desktop updater bridge (null on web/mobile). */
+  async getUpdateInstallInfo() {
+    const bridge = this.desktopUpdatesBridge;
+    if (!bridge || typeof bridge.installInfo !== 'function') return null;
+    try {
+      const info = await bridge.installInfo();
+      return (info && info.ok) ? info : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Chrome's "Relaunch to update": the new build is on disk already. */
+  promptRelaunchToUpdate(diskVersion) {
+    if (this.state.updatePromptShown) return;
+    this.state.updatePromptShown = true;
+    this.state.updatePrompt = {
+      version: diskVersion || null,
+      notes: '',
+      relaunch: true,
+      desktopPipeline: false
+    };
+    this.render();
+  }
+
+  async relaunchToUpdate() {
+    const bridge = this.desktopUpdatesBridge;
+    this.state.updatePrompt = null;
+    this.render();
+    if (bridge && typeof bridge.relaunch === 'function') {
+      try {
+        const res = await bridge.relaunch();
+        if (res && res.status === 'relaunching') return;
+        this.showTransientNotice(`Relaunch failed${res?.reason ? ` (${res.reason})` : ''} - please close and reopen Yayra.`);
+        return;
+      } catch { /* fall through */ }
+    }
+    this.showTransientNotice('Please close Yayra completely (including the bubble) and reopen it to use the installed version.');
   }
 
   promptUpdateReady() {
@@ -6718,6 +6968,28 @@ export class BrowserShell {
     card.className = 'fb-update-prompt-card';
     card.setAttribute('role', 'dialog');
     card.setAttribute('aria-label', 'Update available');
+    if (prompt.relaunch) {
+      // The newer build is ALREADY installed on disk (e.g. terminal
+      // dpkg -i while this old process stayed resident) - no download,
+      // just Chrome's "Relaunch to update".
+      card.innerHTML = `
+        <div class="fb-update-prompt-head">
+          <span class="fb-update-prompt-icon">${Icons.refresh || Icons.download}</span>
+          <div>
+            <strong class="fb-update-prompt-title">Update installed - relaunch to finish</strong>
+            <p class="fb-update-prompt-text">Yayra v${prompt.version || 'latest'} is already installed on this computer, but this window is still running the old version. Relaunch to start using it.</p>
+          </div>
+        </div>
+        <div class="fb-update-prompt-actions">
+          <button class="fb-btn fb-btn-secondary fb-update-prompt-later">Later</button>
+          <button class="fb-btn fb-btn-primary fb-update-prompt-now">Relaunch Yayra</button>
+        </div>
+      `;
+      card.querySelector('.fb-update-prompt-now')?.addEventListener('click', () => this.relaunchToUpdate());
+      card.querySelector('.fb-update-prompt-later')?.addEventListener('click', () => this.deferUpdatePrompt());
+      root.appendChild(card);
+      return;
+    }
     card.innerHTML = `
       <div class="fb-update-prompt-head">
         <span class="fb-update-prompt-icon">${Icons.download}</span>
@@ -7193,6 +7465,7 @@ export class BrowserShell {
         </div>
 
         <!-- 8. Delete browsing data -->
+        <button class="fb-drawer-item fb-dr-clear-site-cache">${Icons.refresh} <span>Clear cache for this site</span> <kbd>Ctrl+Shift+R</kbd></button>
         <button class="fb-drawer-item fb-dr-clear">${Icons.trash} <span>Delete browsing data...</span> <kbd>Ctrl+Shift+Del</kbd></button>
         <div class="fb-drawer-separator"></div>
 
@@ -7464,6 +7737,12 @@ export class BrowserShell {
       this.openModal('clear-data');
     });
 
+    drawer.querySelector('.fb-dr-clear-site-cache')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.render();
+      this.clearActiveSiteCache();
+    });
+
     drawer.querySelector('.fb-dr-find')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
       this.state.findInPage.isOpen = true;
@@ -7678,6 +7957,9 @@ export class BrowserShell {
         break;
       case 'clear-data':
         this.renderClearDataModal(modal);
+        break;
+      case 'edit-shortcut':
+        this.renderEditShortcutModal(modal);
         break;
       case 'tab-switcher':
         this.renderTabSwitcherModal(modal);
@@ -8102,6 +8384,63 @@ export class BrowserShell {
     });
   }
 
+  /** Chrome's "Add/Edit shortcut" dialog for the new-tab tiles. */
+  renderEditShortcutModal(modal) {
+    const editing = this._editingShortcut || null;
+    modal.className = 'fb-modal-card fb-modal-edit-shortcut';
+    modal.innerHTML = `
+      <div class="fb-modal-header">
+        <h2 class="fb-modal-title">${editing ? 'Edit shortcut' : 'Add shortcut'}</h2>
+        <button class="fb-modal-close-btn">${Icons.close}</button>
+      </div>
+      <div class="fb-modal-body" style="display:flex; flex-direction:column; gap:10px;">
+        <label style="display:flex; flex-direction:column; gap:4px; font-size:0.8rem; color:var(--fb-text-muted);">Name
+          <input type="text" id="fb-shortcut-name" class="fb-input" placeholder="e.g. GitHub" value="${editing ? String(editing.title).replace(/"/g, '&quot;') : ''}" />
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px; font-size:0.8rem; color:var(--fb-text-muted);">URL
+          <input type="text" id="fb-shortcut-url" class="fb-input" placeholder="https://example.com" value="${editing ? String(editing.url).replace(/"/g, '&quot;') : ''}" />
+        </label>
+      </div>
+      <div class="fb-modal-footer" style="display:flex; justify-content:space-between; gap:8px;">
+        <span>${editing ? `<button class="fb-btn fb-btn-danger fb-shortcut-remove">Remove</button>` : ''}</span>
+        <span style="display:flex; gap:8px;">
+          <button class="fb-btn fb-btn-secondary fb-shortcut-cancel">Cancel</button>
+          <button class="fb-btn fb-btn-primary fb-shortcut-save">${editing ? 'Save' : 'Add'}</button>
+        </span>
+      </div>
+    `;
+    const close = () => { this._editingShortcut = null; this.closeModal(); };
+    modal.querySelector('.fb-modal-close-btn')?.addEventListener('click', close);
+    modal.querySelector('.fb-shortcut-cancel')?.addEventListener('click', close);
+    modal.querySelector('.fb-shortcut-remove')?.addEventListener('click', async () => {
+      if (editing && this.shortcutsRepo?.removeShortcut) {
+        await this.shortcutsRepo.removeShortcut(editing.id);
+        this.state.userShortcuts = await this.shortcutsRepo.getShortcuts();
+      }
+      close();
+      this.render();
+    });
+    modal.querySelector('.fb-shortcut-save')?.addEventListener('click', async () => {
+      const name = modal.querySelector('#fb-shortcut-name')?.value?.trim() || '';
+      let url = modal.querySelector('#fb-shortcut-url')?.value?.trim() || '';
+      if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
+      if (!url || !/^https?:\/\/[^\s]+\.[^\s]+/i.test(url)) {
+        this.showTransientNotice('Enter a valid website address for the shortcut.');
+        return;
+      }
+      if (!this.shortcutsRepo) { close(); return; }
+      if (editing && this.shortcutsRepo.updateShortcut) {
+        await this.shortcutsRepo.updateShortcut(editing.id, { title: name || url, url });
+      } else if (this.shortcutsRepo.addShortcut) {
+        const added = await this.shortcutsRepo.addShortcut({ title: name || url, url });
+        if (!added) this.showTransientNotice('Shortcut limit reached (12) - remove one first.');
+      }
+      this.state.userShortcuts = await this.shortcutsRepo.getShortcuts();
+      close();
+      this.render();
+    });
+  }
+
   renderClearDataModal(modal) {
     modal.className = 'fb-modal-card fb-modal-cleardata';
     modal.innerHTML = `
@@ -8122,13 +8461,38 @@ export class BrowserShell {
     modal.querySelector('.fb-modal-close-btn')?.addEventListener('click', () => this.closeModal());
     modal.querySelector('.fb-cancel-cleardata')?.addEventListener('click', () => this.closeModal());
     modal.querySelector('.fb-confirm-cleardata')?.addEventListener('click', async () => {
-      if (this.historyRepo && typeof this.historyRepo.clearHistory === 'function') {
-        await this.historyRepo.clearHistory();
+      const wantHistory = modal.querySelector('#cb-hist')?.checked !== false;
+      const wantCookies = modal.querySelector('#cb-cookies')?.checked !== false;
+      const wantCache = modal.querySelector('#cb-cache')?.checked !== false;
+      const done = [];
+      if (wantHistory) {
+        if (this.historyRepo && typeof this.historyRepo.clearHistory === 'function') {
+          await this.historyRepo.clearHistory();
+        }
+        this.state.historyItems = [];
+        done.push('history');
       }
-      this.state.historyItems = [];
-      alert('Browsing data cleared successfully.');
+      // Desktop: REALLY clear Chromium's caches / cookies across every
+      // Yayra session (see yayra:clear-browsing-data in main.cjs). The
+      // web build can only clear its own PWA caches - said honestly.
+      if ((wantCache || wantCookies) && this.systemBridge && typeof this.systemBridge.clearBrowsingData === 'function') {
+        try {
+          const res = await this.systemBridge.clearBrowsingData({ cache: wantCache, cookies: wantCookies });
+          if (res && res.ok) {
+            if (wantCache) done.push(res.clearedBytes > 0 ? `cache (${(res.clearedBytes / (1024 * 1024)).toFixed(1)} MB freed)` : 'cache');
+            if (wantCookies) done.push('cookies & site data');
+          }
+        } catch { /* reported below by omission */ }
+      } else if (wantCache && typeof caches !== 'undefined' && caches?.keys) {
+        try {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((k) => caches.delete(k)));
+          done.push("Yayra's own app cache (sites' caches belong to your browser)");
+        } catch { /* best effort on web */ }
+      }
       this.closeModal();
       this.render();
+      this.showTransientNotice(done.length ? `Cleared: ${done.join(', ')}.` : 'Nothing was cleared.');
     });
   }
 
@@ -8954,6 +9318,56 @@ export class BrowserShell {
     }, 300);
   }
 
+  /**
+   * Chrome's Ctrl+Shift+R / Ctrl+F5: clear THIS site's caches, then
+   * reload from the network. On desktop the native engine genuinely
+   * drops the origin's code caches / Cache Storage / service workers and
+   * bypasses the HTTP cache on the reload. The web build can only do a
+   * plain reload (a page cannot clear another origin's cache) - honest
+   * notice instead of pretending.
+   */
+  async hardReload() {
+    const activeTab = this.getActiveTab();
+    if (!activeTab) return;
+    if (this.nativeWebview && typeof this.nativeWebview.hardReload === 'function' && this._nativeWebviewTabIds.has(activeTab.id)) {
+      try {
+        const res = await this.nativeWebview.hardReload(activeTab.id);
+        if (res && res.ok && res.origin) {
+          let host = res.origin; try { host = new URL(res.origin).hostname; } catch { /* keep origin */ }
+          this.showTransientNotice(`Cache cleared for ${host} - reloading from the network.`);
+        }
+        return;
+      } catch { /* fall through to plain reload */ }
+    }
+    this.reload();
+    if (!this.nativeWebview && /^https?:\/\//i.test(String(activeTab.url || ''))) {
+      this.showTransientNotice('Reloaded. Full per-site cache clearing needs the Yayra desktop app.');
+    }
+  }
+
+  /** Menu action: clear the current site's cached data, then reload it. */
+  async clearActiveSiteCache() {
+    const tab = this.getActiveTab();
+    if (!tab || !/^https?:\/\//i.test(String(tab.url || ''))) {
+      this.showTransientNotice('Open a website first - internal pages have no site cache.');
+      return;
+    }
+    if (this.nativeWebview && typeof this.nativeWebview.clearSiteCache === 'function' && this._nativeWebviewTabIds.has(tab.id)) {
+      try {
+        const res = await this.nativeWebview.clearSiteCache(tab.id);
+        if (res && res.ok) {
+          let host = res.origin; try { host = new URL(res.origin).hostname; } catch { /* keep origin */ }
+          this.showTransientNotice(`Cached data cleared for ${host}. Reloading…`);
+          this.reload();
+          return;
+        }
+        this.showTransientNotice(`Couldn't clear this site's cache${res?.reason ? ` (${res.reason})` : ''}.`);
+        return;
+      } catch { /* fall through */ }
+    }
+    this.showTransientNotice('Per-site cache clearing needs the Yayra desktop app - in a browser, use its own site settings.');
+  }
+
   stopLoading() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
@@ -9675,6 +10089,18 @@ export class BrowserShell {
       e.preventDefault();
       this.toggleBookmarkCurrentTab();
     }
+    // Ctrl+Shift+R / Ctrl+F5 / Shift+F5: hard reload - clears the
+    // current site's cache, then reloads from the network (Chrome).
+    else if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'r')
+      || (e.key === 'F5' && (e.ctrlKey || e.metaKey || e.shiftKey))) {
+      e.preventDefault();
+      this.hardReload();
+    }
+    // Ctrl+R / F5: reload the current page (Chrome).
+    else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r') || e.key === 'F5') {
+      e.preventDefault();
+      this.reload();
+    }
     // Ctrl+H: History
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
       e.preventDefault();
@@ -9727,6 +10153,10 @@ export class BrowserShell {
     }
     this.stopBackgroundUpdateChecks();
     this.stopBackgroundRefresh();
+    if (this._sessionSnapshotTimer) {
+      clearTimeout(this._sessionSnapshotTimer);
+      this._sessionSnapshotTimer = null;
+    }
     if (this.webFrameLayer) {
       this.webFrameLayer.remove();
       this.webFrameLayer = null;

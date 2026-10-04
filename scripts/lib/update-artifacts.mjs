@@ -12,9 +12,15 @@
  */
 
 // Ranked artifact patterns per update target. Earlier entries win.
+// 'linux-appimage' is a SECONDARY linux entry: AppImage installs must be
+// offered the AppImage (which Yayra can self-replace in place), never the
+// .deb - a dpkg install lands in /opt while the user keeps launching
+// their old AppImage file, which looks exactly like "the update never
+// applies".
 export const ARTIFACT_PATTERNS = {
   windows: [/-setup-[^/]*\.exe$/i, /-win-x64-[^/]*\.exe$/i, /\.exe$/i],
   linux: [/\.deb$/i, /\.appimage$/i],
+  'linux-appimage': [/\.appimage$/i],
   android: [/\.apk$/i],
   ios: [/\.ipa$/i],
   pwa: [/\.tar\.gz$/i]

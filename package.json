@@ -48,7 +48,8 @@
   "dependencies": {
     "@capacitor/app": "^8.1.2",
     "@capacitor/browser": "^8.0.5",
-    "@capacitor/core": "8.5.2"
+    "@capacitor/core": "8.5.2",
+    "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
     "@capacitor/android": "8.5.2",
@@ -64,6 +65,10 @@
     "executableName": "yayra",
     "artifactName": "${productName}-${os}-${arch}-${version}.${ext}",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/uiohook-napi/**"
+    ],
+    "npmRebuild": false,
     "toolsets": {
       "appimage": "1.0.3"
     },
