@@ -64,6 +64,125 @@ const SYSTEM_BROWSER_AUTH_HOSTS = Object.freeze([
 
 const WEBVIEW_EVENT_CHANNEL = 'yayra:webview-event';
 
+// Sentinel pseudo-scheme the in-page WebAuthn helper uses to ask the main
+// process to open the CURRENT page in the user's default system browser
+// (window.open with this scheme -> setWindowOpenHandler below). Only
+// http(s) targets are honored.
+const OPEN_EXTERNAL_SCHEME = 'yayra-openexternal://';
+
+/**
+ * Decodes a `yayra-openexternal://<encodeURIComponent(url)>` request from
+ * the in-page WebAuthn helper. Returns the decoded http(s) URL, or null
+ * for anything else (wrong scheme, non-web target like javascript:/file:,
+ * malformed encoding) - this is a security gate, not just parsing.
+ */
+function decodeOpenExternalRequest(url) {
+  if (typeof url !== 'string' || !url.startsWith(OPEN_EXTERNAL_SCHEME)) return null;
+  try {
+    const target = decodeURIComponent(url.slice(OPEN_EXTERNAL_SCHEME.length));
+    return /^https?:\/\//i.test(target) ? target : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+/**
+ * Main-world script injected into every page-rendering WebContentsView on
+ * dom-ready (executeJavaScript - a preload CANNOT do this job, because
+ * with contextIsolation the page calls its OWN navigator.credentials, not
+ * the isolated world's copy).
+ *
+ * WHY: passkey/WebAuthn sign-in steps (GitHub 2FA, etc.) can hang forever
+ * inside Electron. Chromium's content layer gives Electron working USB
+ * security keys everywhere, Windows Hello on Windows and Touch ID on
+ * macOS - but the "hybrid" flows browsers add on top (QR code to use a
+ * phone, passkeys synced in Chrome/Google Password Manager) are browser
+ * UI that does not exist in Electron, most visibly on Linux. The site
+ * just awaits navigator.credentials.get() while showing "Waiting for
+ * input from browser interaction..." with no way out.
+ *
+ * This watchdog wraps navigator.credentials.get/create for publicKey
+ * requests only. If a request is still unsettled after ~6s it shows a
+ * small in-page banner explaining what works (USB key / picking another
+ * 2FA method on the page) and offering to reopen the page in the user's
+ * real browser. The banner removes itself the moment the request settles
+ * either way, so working flows (Windows Hello, a touched USB key) never
+ * see it. Password-manager credentials.get() calls (no publicKey) are
+ * untouched.
+ */
+function buildWebAuthnWatchdogScript() {
+  return `(function () {
+  if (window.__yayraWebauthnWatchdog) return;
+  window.__yayraWebauthnWatchdog = true;
+  if (!window.PublicKeyCredential || !navigator.credentials) return;
+  var WAIT_MS = window.__yayraWebauthnWaitMs || 6000;
+  var banner = null;
+  var pending = 0;
+  var timer = null;
+  function removeBanner() {
+    if (!banner) return;
+    if (banner.remove) banner.remove();
+    else if (banner.parentNode) banner.parentNode.removeChild(banner);
+    banner = null;
+  }
+  function showBanner() {
+    if (banner || !document.body) return;
+    banner = document.createElement('div');
+    banner.id = 'yayra-webauthn-helper';
+    banner.setAttribute('style', 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:2147483647;max-width:540px;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,0.18);border-radius:12px;padding:14px 16px;font:13px/1.5 system-ui,sans-serif;box-shadow:0 12px 40px rgba(0,0,0,0.55);');
+    var msg = document.createElement('div');
+    msg.textContent = 'Still waiting for a passkey. If you have a USB security key, plug it in and touch it now. Passkeys saved on a phone or synced in another browser are not available inside the desktop app - choose a different option on this page (such as an authenticator code), or finish this step in your regular browser.';
+    var row = document.createElement('div');
+    row.setAttribute('style', 'margin-top:10px;display:flex;gap:8px;justify-content:flex-end;');
+    var openBtn = document.createElement('button');
+    openBtn.id = 'yayra-webauthn-open-external';
+    openBtn.textContent = 'Open in my browser';
+    openBtn.setAttribute('style', 'border:none;border-radius:8px;padding:6px 12px;background:#3b82f6;color:#fff;cursor:pointer;font:600 12px system-ui,sans-serif;');
+    openBtn.addEventListener('click', function () {
+      window.open('yayra-openexternal://' + encodeURIComponent(window.location.href));
+    });
+    var dismissBtn = document.createElement('button');
+    dismissBtn.id = 'yayra-webauthn-dismiss';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.setAttribute('style', 'border:none;border-radius:8px;padding:6px 12px;background:rgba(255,255,255,0.12);color:#e5e7eb;cursor:pointer;font:600 12px system-ui,sans-serif;');
+    dismissBtn.addEventListener('click', removeBanner);
+    row.appendChild(openBtn);
+    row.appendChild(dismissBtn);
+    banner.appendChild(msg);
+    banner.appendChild(row);
+    document.body.appendChild(banner);
+  }
+  function watch(original) {
+    return function (options) {
+      var result = original.apply(navigator.credentials, arguments);
+      if (!options || !options.publicKey || !result || typeof result.then !== 'function') return result;
+      pending += 1;
+      if (!timer) {
+        timer = setTimeout(function () {
+          timer = null;
+          if (pending > 0) showBanner();
+        }, WAIT_MS);
+      }
+      var settle = function () {
+        pending = pending > 0 ? pending - 1 : 0;
+        if (pending === 0) {
+          if (timer) { clearTimeout(timer); timer = null; }
+          removeBanner();
+        }
+      };
+      result.then(settle, settle);
+      return result;
+    };
+  }
+  try {
+    navigator.credentials.get = watch(navigator.credentials.get.bind(navigator.credentials));
+    navigator.credentials.create = watch(navigator.credentials.create.bind(navigator.credentials));
+  } catch (_err) {
+    // Site froze the credentials container - leave it untouched.
+  }
+})();`;
+}
+
 /**
  * Builds a standard desktop Chrome User-Agent string for the current
  * platform/Chromium version, deliberately omitting the "Electron/x.y.z"
@@ -282,6 +401,15 @@ function createWebviewBridge({
 
   function attachListeners(key, entry) {
     const wc = entry.view.webContents;
+    // Passkey/WebAuthn stuck-request watchdog - injected into the page's
+    // MAIN world on every document (see buildWebAuthnWatchdogScript for
+    // the full rationale). Guarded: test fakes may not implement
+    // executeJavaScript.
+    wc.on('dom-ready', () => {
+      if (typeof wc.executeJavaScript === 'function') {
+        wc.executeJavaScript(buildWebAuthnWatchdogScript(), true).catch(() => {});
+      }
+    });
     wc.on('did-start-loading', () => sendTo(entry, 'loading-start'));
     wc.on('did-stop-loading', () => sendTo(entry, 'loading-stop'));
     wc.on('did-navigate', (_event, url) => {
@@ -321,6 +449,14 @@ function createWebviewBridge({
       Menu.buildFromTemplate(template).popup({ window: win });
     });
     wc.setWindowOpenHandler(({ url }) => {
+      // In-page WebAuthn helper asking to reopen this page in the user's
+      // real browser (where phone/synced passkeys actually work).
+      const externalTarget = decodeOpenExternalRequest(url);
+      if (externalTarget) {
+        shell.openExternal(externalTarget).catch((err) => logger.error('[yayra:webview] failed to open external url', err));
+        sendTo(entry, 'system-browser-handoff', { url: externalTarget });
+        return { action: 'deny' };
+      }
       if (requiresSystemBrowserAuth(url, authHosts)) {
         shell.openExternal(url).catch((err) => logger.error('[yayra:webview] failed to open external auth url', err));
         sendTo(entry, 'system-browser-handoff', { url });
@@ -566,7 +702,10 @@ function createWebviewBridge({
 module.exports = {
   WEBVIEW_EVENT_CHANNEL,
   SYSTEM_BROWSER_AUTH_HOSTS,
+  OPEN_EXTERNAL_SCHEME,
   requiresSystemBrowserAuth,
+  decodeOpenExternalRequest,
+  buildWebAuthnWatchdogScript,
   sanitizeBounds,
   buildBrowserUserAgent,
   buildContextMenuTemplate,
