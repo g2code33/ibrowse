@@ -1398,15 +1398,20 @@ export class BrowserShell {
     // startBackgroundUpdateChecks) can discover a release at any time, and
     // the one-per-session confirm dialog is easy to dismiss - this chip
     // stays visible until the update is actually applied.
-    if (this.state.updateState.status === 'ready') {
+    if (this.state.updateState.status === 'ready' || this.state.updateState.status === 'staged') {
+      const staged = this.state.updateState.status === 'staged';
       const updateChip = document.createElement('button');
       updateChip.className = 'fb-update-chip';
       updateChip.setAttribute(
         'title',
-        `Update Yayra to v${this.state.updateState.availableVersion || 'latest'} - click to install`
+        staged
+          ? `Yayra v${this.state.updateState.availableVersion || 'latest'} is downloaded & verified - click to install`
+          : `Update Yayra to v${this.state.updateState.availableVersion || 'latest'} - click to download & install`
       );
-      updateChip.setAttribute('aria-label', 'Install available update');
-      updateChip.innerHTML = `${Icons.download}<span class="fb-update-chip-label">Update</span>`;
+      updateChip.setAttribute('aria-label', staged ? 'Install downloaded update' : 'Download and install available update');
+      // Downloaded & verified -> the remaining action is INSTALL, and the
+      // chip says exactly that (never "Download and install" again).
+      updateChip.innerHTML = `${Icons.download}<span class="fb-update-chip-label">${staged ? 'Install' : 'Update'}</span>`;
       updateChip.addEventListener('click', (e) => {
         e.stopPropagation();
         this.applyUpdate();
@@ -5826,7 +5831,7 @@ export class BrowserShell {
       </div>
       <div class="fb-update-prompt-actions">
         <button class="fb-btn fb-btn-secondary fb-update-prompt-later">Later</button>
-        <button class="fb-btn fb-btn-primary fb-update-prompt-now">${prompt.desktopPipeline ? 'Download &amp; install now' : 'Update now'}</button>
+        <button class="fb-btn fb-btn-primary fb-update-prompt-now">${prompt.desktopPipeline ? (this.state.updateState.status === 'staged' ? 'Install now' : 'Download &amp; install now') : 'Update now'}</button>
       </div>
     `;
     card.querySelector('.fb-update-prompt-now')?.addEventListener('click', () => this.acceptUpdatePrompt());
@@ -5906,6 +5911,12 @@ export class BrowserShell {
     // the verified installer to the OS. Everything else (web/PWA) keeps the
     // reload-based flow below.
     const bridge = this.desktopUpdatesBridge;
+    // Already downloaded & verified? Then the ONLY remaining step is
+    // installing - never re-download, and every button says "Install".
+    if (bridge && this.state.updateState.status === 'staged' && this.state.updateState.stagedPath) {
+      this.installDesktopUpdateNow();
+      return;
+    }
     if (bridge && this.state.updateState.download?.url) {
       this.applyDesktopUpdate().catch(() => {});
       return;
@@ -5978,27 +5989,40 @@ export class BrowserShell {
   async installDesktopUpdateNow() {
     const bridge = this.desktopUpdatesBridge;
     const path = this.state.updateInstallPrompt?.path || this.state.updateState.stagedPath;
+    const version = this.state.updateInstallPrompt?.version || this.state.updateState.availableVersion || null;
     this.state.updateInstallPrompt = null;
     this.clearPendingInstall();
+    if (!bridge || !path) { this.render(); return; }
+    this.state.updateState = { ...this.state.updateState, status: 'installing' };
     this.render();
-    if (!bridge || !path) return;
     let install;
     try {
-      install = await bridge.install({ path });
+      install = await bridge.install({ path, version });
     } catch (err) {
       install = { status: 'error', reason: String(err?.message || err) };
     }
     if (install?.status === 'install_started') {
-      this.showTransientNotice(install.method === 'os-installer'
-        ? 'Installer launched - Yayra will close so it can restart on the new version.'
-        : 'Update file revealed - replace your current install with it.');
-      // "Install & RESTART now": get out of the installer's way so it can
-      // replace the running app, which then reopens on the new version.
-      if (install.method === 'os-installer' && this.windowControls && typeof setTimeout === 'function') {
-        setTimeout(() => { try { this.windowControls.close(); } catch { /* already closing */ } }, 1500);
+      // The main process does the real work per artifact type
+      // (electron/desktopUpdater.cjs) - tell the user exactly what happens
+      // next instead of a one-size-fits-all message.
+      const messages = {
+        'os-installer': 'Installer launched - Yayra will close so the new version can take its place.',
+        pkexec: 'Enter your password in the system prompt - Yayra restarts on the new version automatically.',
+        'self-replace': 'Update applied in place - Yayra is reopening on the new version…',
+        mounted: 'Disk image opened - drag Yayra into Applications to finish updating.',
+        reveal: `Automatic install is not available here${install.note ? ` (${install.note})` : ''} - the verified update file was revealed so you can run it yourself.`
+      };
+      this.showTransientNotice(messages[install.method] || 'Install started.');
+      if (install.method === 'reveal' || install.method === 'mounted') {
+        // Nothing is replacing the running app: stay on "staged" so the
+        // Install button remains available.
+        this.state.updateState = { ...this.state.updateState, status: 'staged', stagedPath: path };
+        this.render();
       }
     } else {
-      this.showTransientNotice(`Could not launch the installer: ${install?.reason || 'unknown error'}.`);
+      this.state.updateState = { ...this.state.updateState, status: 'staged', stagedPath: path, notes: install?.reason || 'unknown error' };
+      this.render();
+      this.showTransientNotice(`Could not launch the installer: ${install?.reason || 'unknown error'}. The download stays verified - try again from Settings → Yayra Updates.`);
     }
   }
 
@@ -6044,7 +6068,7 @@ export class BrowserShell {
     if (!bridge) return;
     let install;
     try {
-      install = await bridge.install({ path: pending.path });
+      install = await bridge.install({ path: pending.path, version: pending.version || null });
     } catch (err) {
       install = { status: 'error', reason: String(err?.message || err) };
     }
@@ -6104,6 +6128,21 @@ export class BrowserShell {
     } else if (evt.type === 'download-failed') {
       this.state.updateState = { ...this.state.updateState, status: 'error', notes: evt.reason || 'download failed' };
       this.render();
+    } else if (evt.type === 'install-finished') {
+      // Package manager finished (e.g. pkexec dpkg -i) - the main process
+      // relaunches Yayra on the new version right after this event.
+      this.state.updateState = { ...this.state.updateState, status: 'installing' };
+      this.render();
+      this.showTransientNotice(`Update${evt.version ? ` v${evt.version}` : ''} installed - Yayra is restarting on the new version…`);
+    } else if (evt.type === 'install-failed') {
+      // Honest failure (declined password prompt, dpkg error, …): the
+      // verified download stays staged so Install can be retried.
+      this.state.updateState = { ...this.state.updateState, status: 'staged', notes: evt.reason || 'install failed' };
+      this.render();
+      const reason = evt.reason === 'authorization-declined'
+        ? 'the system password prompt was cancelled'
+        : (evt.reason || 'unknown error');
+      this.showTransientNotice(`Install did not finish: ${reason}. The update stays downloaded - try again from Settings → Yayra Updates.`);
     }
   }
 
@@ -6158,10 +6197,18 @@ export class BrowserShell {
               </div>
             </div>
           ` : this.state.updateState.status === 'staged' ? `
+            <button class="fb-drawer-update-btn fb-drawer-install-btn" title="Install the downloaded & verified update now">
+              <span class="fb-update-badge-icon">${Icons.update}</span>
+              <div class="fb-update-text-group">
+                <strong>Install Yayra ${this.state.updateState.availableVersion ? `v${this.state.updateState.availableVersion}` : 'update'}</strong>
+                <span>Downloaded &amp; verified - click to install now</span>
+              </div>
+            </button>
+          ` : this.state.updateState.status === 'installing' ? `
             <div class="fb-drawer-update-status-row">
               <div class="fb-update-status-left">
-                <span class="fb-status-orb green"></span>
-                <span class="fb-update-status-text">Update v${this.state.updateState.availableVersion || ''} verified - installer launched</span>
+                <span class="fb-status-orb pulse"></span>
+                <span class="fb-update-status-text">Installing update${this.state.updateState.availableVersion ? ` v${this.state.updateState.availableVersion}` : ''}…</span>
               </div>
             </div>
           ` : this.state.updateState.status === 'error' ? `
@@ -6366,6 +6413,14 @@ export class BrowserShell {
       this.state.isSideDrawerOpen = false;
       this.render();
       this.applyUpdate();
+    });
+
+    // Staged (downloaded & verified) update: the drawer's primary action
+    // is plain "Install" - it never re-downloads.
+    drawer.querySelector('.fb-drawer-install-btn')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.render();
+      this.installDesktopUpdateNow();
     });
 
     // Submenu click toggling for mobile / touch

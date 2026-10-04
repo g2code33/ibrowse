@@ -12,6 +12,7 @@ const { app, ipcMain, net, shell } = electron;
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 
 const UPDATE_LOG_PREFIX = '[updates]';
 const UPDATE_EVENT_CHANNEL = 'yayra:updates-event';
@@ -30,14 +31,27 @@ const UPDATE_EVENT_CHANNEL = 'yayra:updates-event';
  *                        length + sha256 BEFORE reporting it staged
  *                        (tampered/truncated files are deleted, the old
  *                        install keeps running).
- *   updates-install   -> opens the verified installer (.deb/.exe go to the
- *                        OS installer; AppImage and anything else is
- *                        revealed in the file manager next to the running
- *                        version) - honest behavior, no fake "relaunch".
+ *   updates-install   -> ACTUALLY installs the verified artifact:
+ *                        - .exe/.msi  : launches the Windows installer
+ *                          detached, then quits the WHOLE app (bubble
+ *                          included) so the installer can replace the
+ *                          locked binaries and relaunch the new version.
+ *                        - .deb/.rpm  : runs the package manager under
+ *                          pkexec (GUI password prompt); on success Yayra
+ *                          relaunches itself on the freshly installed
+ *                          version. Falls back to the OS software
+ *                          installer, then to reveal-in-folder.
+ *                        - .AppImage  : when running AS an AppImage
+ *                          ($APPIMAGE), the staged file replaces the
+ *                          current one in place, the new AppImage is
+ *                          launched and the old instance quits.
+ *                        - .dmg/.pkg  : handed to macOS (mount/Installer);
+ *                          anything else is revealed next to the current
+ *                          install. No fake "install_started" ever.
  *
- * Dependency-injected (netImpl/shellImpl/appImpl/getWindow) so the full
- * download+verify+install flow is unit-testable without Electron or any
- * real network - see tests/desktop-updater.test.mjs.
+ * Dependency-injected (netImpl/shellImpl/appImpl/spawnImpl/getWindow/...)
+ * so the full download+verify+install flow is unit-testable without
+ * Electron or any real network - see tests/desktop-updater.test.mjs.
  */
 function registerDesktopUpdateHandlers({
   getWindow,
@@ -46,7 +60,12 @@ function registerDesktopUpdateHandlers({
   netImpl = net,
   shellImpl = shell,
   fsImpl = fs,
-  ipcMainImpl = ipcMain
+  ipcMainImpl = ipcMain,
+  spawnImpl = spawn,
+  envImpl = process.env,
+  setTimeoutImpl = setTimeout,
+  quitDelayMs = 1500,
+  relaunchDelayMs = 800
 }) {
   function emit(event, payload) {
     try {
@@ -136,7 +155,22 @@ function registerDesktopUpdateHandlers({
     }
   };
 
-  const handleInstall = async (event, { path: stagedPath } = {}) => {
+  /** First existing pkexec binary, or null (no GUI elevation available). */
+  function findPkexec() {
+    const candidates = ['/usr/bin/pkexec', '/bin/pkexec', '/usr/local/bin/pkexec'];
+    for (const candidate of candidates) {
+      try { if (fsImpl.existsSync(candidate)) return candidate; } catch { /* keep looking */ }
+    }
+    return null;
+  }
+
+  /** Reveal fallback shared by every path that cannot truly install. */
+  function revealFallback(stagedPath, note) {
+    try { shellImpl.showItemInFolder?.(stagedPath); } catch { /* best effort */ }
+    return { status: 'install_started', method: 'reveal', note: note || null };
+  }
+
+  const handleInstall = async (event, { path: stagedPath, version } = {}) => {
     if (!stagedPath) {
       // Legacy no-payload call (old renderer builds): nothing is staged,
       // report that honestly instead of pretending to install.
@@ -148,19 +182,139 @@ function registerDesktopUpdateHandlers({
     }
     const ext = path.extname(stagedPath).toLowerCase();
     logger(`${UPDATE_LOG_PREFIX} install_started ${stagedPath}`);
-    if (ext === '.exe' || ext === '.deb' || ext === '.msi') {
-      // Hands off to the OS installer (NSIS on Windows, the package
-      // installer on Debian/Ubuntu). openPath resolves to '' on success.
-      const openError = await shellImpl.openPath(stagedPath);
-      if (openError) {
-        shellImpl.showItemInFolder?.(stagedPath);
-        return { status: 'install_started', method: 'reveal', note: openError };
+
+    // ---------- Windows: .exe (NSIS) / .msi ----------
+    // The old flow only closed the main WINDOW, so the app (bubble/tray)
+    // kept running and the installer could not replace the locked files.
+    // Now: launch the installer detached, then quit the ENTIRE app so the
+    // install actually completes and relaunches the new version.
+    if (ext === '.exe' || ext === '.msi') {
+      let spawnFailed = false;
+      try {
+        const child = ext === '.msi'
+          ? spawnImpl('msiexec', ['/i', stagedPath], { detached: true, stdio: 'ignore' })
+          : spawnImpl(stagedPath, [], { detached: true, stdio: 'ignore' });
+        child.once?.('error', (err) => {
+          spawnFailed = true;
+          const reason = String(err?.message || err);
+          logger(`${UPDATE_LOG_PREFIX} installer_spawn_failed ${reason}`);
+          emit(event, { type: 'install-failed', version: version || null, reason });
+          try { shellImpl.showItemInFolder?.(stagedPath); } catch { /* best effort */ }
+        });
+        child.unref?.();
+      } catch (err) {
+        // Synchronous spawn failure: fall back to the OS "open" verb.
+        const openError = await shellImpl.openPath(stagedPath).catch((e) => String(e?.message || e));
+        if (openError) return revealFallback(stagedPath, openError);
       }
+      // Give the IPC reply + the installer window a moment, then get the
+      // whole app out of the installer's way.
+      setTimeoutImpl(() => {
+        if (spawnFailed) return;
+        logger(`${UPDATE_LOG_PREFIX} quitting so the installer can replace the app`);
+        try { appImpl.quit?.(); } catch { /* already quitting */ }
+      }, quitDelayMs);
+      return { status: 'install_started', method: 'os-installer', willQuit: true };
+    }
+
+    // ---------- Linux packages: .deb / .rpm ----------
+    // shell.openPath on a .deb is NOT a real install on most distros
+    // (GNOME Software/archive manager silently does nothing). Run the real
+    // package manager under pkexec - the system shows a password prompt,
+    // dpkg/rpm replaces the files, and Yayra relaunches itself on the new
+    // version (same executable path, now the new build).
+    if (ext === '.deb' || ext === '.rpm') {
+      const pkexec = findPkexec();
+      if (pkexec) {
+        const argv = ext === '.deb' ? ['dpkg', '-i', stagedPath] : ['rpm', '-U', '--replacepkgs', stagedPath];
+        try {
+          const child = spawnImpl(pkexec, argv, { stdio: 'ignore' });
+          child.once?.('error', (err) => {
+            const reason = String(err?.message || err);
+            logger(`${UPDATE_LOG_PREFIX} pkexec_spawn_failed ${reason}`);
+            emit(event, { type: 'install-failed', version: version || null, reason });
+          });
+          child.once?.('exit', (code) => {
+            if (code === 0) {
+              logger(`${UPDATE_LOG_PREFIX} package installed - relaunching on the new version`);
+              emit(event, { type: 'install-finished', version: version || null, relaunching: true });
+              setTimeoutImpl(() => {
+                try { appImpl.relaunch?.(); } catch { /* best effort */ }
+                try { appImpl.quit?.(); } catch { /* already quitting */ }
+              }, relaunchDelayMs);
+            } else {
+              // 126/127 = the user dismissed the PolicyKit password prompt.
+              const reason = (code === 126 || code === 127)
+                ? 'authorization-declined'
+                : `package-manager-exited-${code}`;
+              logger(`${UPDATE_LOG_PREFIX} install_failed ${reason}`);
+              emit(event, { type: 'install-failed', version: version || null, reason });
+            }
+          });
+          return { status: 'install_started', method: 'pkexec', willRestart: true };
+        } catch (err) {
+          logger(`${UPDATE_LOG_PREFIX} pkexec unavailable: ${String(err?.message || err)}`);
+          // fall through to the software-installer handoff below
+        }
+      }
+      // No pkexec: hand to the OS software installer; reveal as last resort.
+      const openError = await shellImpl.openPath(stagedPath).catch((e) => String(e?.message || e));
+      if (openError) return revealFallback(stagedPath, openError);
       return { status: 'install_started', method: 'os-installer' };
     }
-    // AppImage/archives: reveal next to the user so they can swap it in.
-    shellImpl.showItemInFolder?.(stagedPath);
-    return { status: 'install_started', method: 'reveal' };
+
+    // ---------- Linux AppImage: true in-place self-update ----------
+    if (ext === '.appimage') {
+      const currentAppImage = envImpl?.APPIMAGE;
+      if (currentAppImage && fsImpl.existsSync(currentAppImage)) {
+        try {
+          fsImpl.copyFileSync(stagedPath, currentAppImage);
+          fsImpl.chmodSync(currentAppImage, 0o755);
+        } catch (err) {
+          // Could not overwrite (e.g. read-only mount): reveal honestly.
+          return revealFallback(stagedPath, `self-replace-failed: ${String(err?.message || err)}`);
+        }
+        let spawnFailed = false;
+        try {
+          const child = spawnImpl(currentAppImage, [], { detached: true, stdio: 'ignore' });
+          child.once?.('error', (err) => {
+            spawnFailed = true;
+            emit(event, {
+              type: 'install-failed',
+              version: version || null,
+              reason: `relaunch-failed: ${String(err?.message || err)} (the update IS in place - reopen Yayra manually)`
+            });
+          });
+          child.unref?.();
+        } catch (err) {
+          return {
+            status: 'install_started',
+            method: 'self-replace',
+            willQuit: false,
+            note: `updated in place; reopen Yayra manually (${String(err?.message || err)})`
+          };
+        }
+        setTimeoutImpl(() => {
+          if (spawnFailed) return;
+          logger(`${UPDATE_LOG_PREFIX} AppImage replaced - handing over to the new version`);
+          try { appImpl.quit?.(); } catch { /* already quitting */ }
+        }, quitDelayMs);
+        return { status: 'install_started', method: 'self-replace', willQuit: true };
+      }
+      // Not running as an AppImage (dev run / extracted): reveal honestly.
+      return revealFallback(stagedPath, 'not-running-as-appimage');
+    }
+
+    // ---------- macOS: .dmg mounts, .pkg opens Installer.app ----------
+    if (ext === '.dmg' || ext === '.pkg') {
+      const openError = await shellImpl.openPath(stagedPath).catch((e) => String(e?.message || e));
+      if (openError) return revealFallback(stagedPath, openError);
+      return { status: 'install_started', method: ext === '.dmg' ? 'mounted' : 'os-installer' };
+    }
+
+    // Archives/unknown formats: reveal next to the user so they can swap
+    // it in - never pretend an install ran.
+    return revealFallback(stagedPath, null);
   };
 
   ipcMainImpl.handle('yayra:updates-check', handleCheck);

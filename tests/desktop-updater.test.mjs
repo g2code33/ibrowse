@@ -43,7 +43,22 @@ function streamResponseFor(buffer, { ok = true, status = 200, chunkSize = 16 } =
   };
 }
 
-function makeHarness({ artifact = Buffer.from('yayra new release payload: '.repeat(8)), fetchImpl = null } = {}) {
+function makeFakeChild() {
+  const listeners = new Map();
+  return {
+    unrefed: false,
+    once(evt, fn) { listeners.set(evt, fn); },
+    unref() { this.unrefed = true; },
+    trigger(evt, ...args) { const fn = listeners.get(evt); if (fn) fn(...args); }
+  };
+}
+
+function makeHarness({
+  artifact = Buffer.from('yayra new release payload: '.repeat(8)),
+  fetchImpl = null,
+  env = {},
+  pkexecPresent = false
+} = {}) {
   const userData = makeTempDir();
   const handlers = new Map();
   const ipcMainImpl = { handle: (channel, fn) => handlers.set(channel, fn) };
@@ -61,16 +76,44 @@ function makeHarness({ artifact = Buffer.from('yayra new release payload: '.repe
   const netImpl = {
     fetch: fetchImpl || (async () => streamResponseFor(artifact))
   };
+  // pkexec detection goes through fsImpl.existsSync - intercept just the
+  // pkexec probe paths and defer everything else to the real fs.
+  const fsImpl = Object.create(fs);
+  fsImpl.existsSync = (p) => (String(p).endsWith('/pkexec') ? pkexecPresent : fs.existsSync(p));
+  const spawned = [];
+  const spawnImpl = (cmd, args, opts) => {
+    const child = makeFakeChild();
+    spawned.push({ cmd, args, opts, child });
+    return child;
+  };
+  const scheduled = [];
+  const setTimeoutImpl = (fn, ms) => { scheduled.push({ fn, ms }); };
+  const appCalls = [];
+  const appImpl = {
+    getPath: () => userData,
+    quit: () => appCalls.push('quit'),
+    relaunch: () => appCalls.push('relaunch')
+  };
   registerDesktopUpdateHandlers({
     getWindow: () => null,
     logger: () => {},
-    appImpl: { getPath: () => userData },
+    appImpl,
     netImpl,
     shellImpl,
-    fsImpl: fs,
-    ipcMainImpl
+    fsImpl,
+    ipcMainImpl,
+    spawnImpl,
+    envImpl: env,
+    setTimeoutImpl,
+    quitDelayMs: 0,
+    relaunchDelayMs: 0
   });
-  return { artifact, userData, handlers, sentEvents, fakeSender, opened, revealed };
+  return { artifact, userData, handlers, sentEvents, fakeSender, opened, revealed, spawned, scheduled, appCalls };
+}
+
+/** Run every quit/relaunch callback the handler scheduled so far. */
+function runScheduled(scheduled) {
+  while (scheduled.length) scheduled.shift().fn();
 }
 
 test('desktop updater: downloads, streams progress events, verifies sha256+bytes, and reports the staged file path', async () => {
@@ -153,28 +196,132 @@ test('desktop updater: HTTP failure is an error with the status code, not a stag
   assert.match(result.reason, /HTTP 503/);
 });
 
-test('desktop updater: install hands a verified .deb to the OS installer (shell.openPath)', async () => {
-  const { artifact, handlers, fakeSender, opened } = makeHarness();
-  const staged = await handlers.get('yayra:updates-download')({ sender: fakeSender }, {
-    url: 'https://example.com/yayra-9.9.9.deb', version: '9.9.9', target: 'linux',
+async function stageArtifact(harness, fileName) {
+  const { artifact, handlers, fakeSender } = harness;
+  return handlers.get('yayra:updates-download')({ sender: fakeSender }, {
+    url: `https://example.com/${fileName}`, version: '9.9.9', target: 'linux',
     sha256: sha256Of(artifact), bytes: artifact.byteLength
   });
+}
+
+test('desktop updater: .deb install runs the REAL package manager under pkexec, then relaunches on success', async () => {
+  const harness = makeHarness({ pkexecPresent: true });
+  const { handlers, fakeSender, opened, spawned, scheduled, appCalls, sentEvents } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.deb');
+
+  const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path, version: '9.9.9' });
+  assert.equal(result.status, 'install_started');
+  assert.equal(result.method, 'pkexec');
+  assert.equal(result.willRestart, true);
+  assert.deepEqual(opened, [], 'openPath is NOT a .deb install - never used when pkexec exists');
+  assert.equal(spawned.length, 1);
+  assert.match(spawned[0].cmd, /pkexec$/);
+  assert.deepEqual(spawned[0].args, ['dpkg', '-i', staged.path]);
+
+  // dpkg succeeds -> install-finished event + relaunch on the new version.
+  spawned[0].child.trigger('exit', 0);
+  const finished = sentEvents.filter((e) => e.payload.type === 'install-finished');
+  assert.equal(finished.length, 1, 'install-finished is reported to the renderer');
+  runScheduled(scheduled);
+  assert.deepEqual(appCalls, ['relaunch', 'quit'], 'app relaunches so reopening shows the NEW version');
+});
+
+test('desktop updater: cancelled pkexec password prompt is an HONEST install-failed (nothing quits)', async () => {
+  const harness = makeHarness({ pkexecPresent: true });
+  const { handlers, fakeSender, spawned, scheduled, appCalls, sentEvents } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.deb');
+
+  await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path, version: '9.9.9' });
+  spawned[0].child.trigger('exit', 126); // user dismissed the PolicyKit dialog
+  const failed = sentEvents.filter((e) => e.payload.type === 'install-failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].payload.reason, 'authorization-declined');
+  runScheduled(scheduled);
+  assert.deepEqual(appCalls, [], 'the running app NEVER quits when nothing was installed');
+});
+
+test('desktop updater: .deb without pkexec falls back to the OS software installer', async () => {
+  const harness = makeHarness({ pkexecPresent: false });
+  const { handlers, fakeSender, opened, spawned } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.deb');
+
   const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
   assert.equal(result.status, 'install_started');
   assert.equal(result.method, 'os-installer');
   assert.deepEqual(opened, [staged.path]);
+  assert.equal(spawned.length, 0);
 });
 
-test('desktop updater: install reveals an AppImage in the file manager (no silent self-swap pretense)', async () => {
-  const { artifact, handlers, fakeSender, revealed } = makeHarness();
-  const staged = await handlers.get('yayra:updates-download')({ sender: fakeSender }, {
-    url: 'https://example.com/yayra-9.9.9.AppImage', version: '9.9.9', target: 'linux',
-    sha256: sha256Of(artifact), bytes: artifact.byteLength
-  });
+test('desktop updater: .exe install launches the installer detached and quits the WHOLE app (not just a window)', async () => {
+  const harness = makeHarness();
+  const { handlers, fakeSender, spawned, scheduled, appCalls } = harness;
+  const staged = await stageArtifact(harness, 'yayra-setup-9.9.9.exe');
+
   const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
   assert.equal(result.status, 'install_started');
+  assert.equal(result.method, 'os-installer');
+  assert.equal(result.willQuit, true);
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].cmd, staged.path, 'the installer binary itself is launched');
+  assert.equal(spawned[0].opts.detached, true, 'detached so it survives the app quitting');
+  assert.equal(spawned[0].child.unrefed, true);
+  runScheduled(scheduled);
+  assert.deepEqual(appCalls, ['quit'], 'full app.quit() so the installer can replace locked files');
+});
+
+test('desktop updater: .msi goes through msiexec /i', async () => {
+  const harness = makeHarness();
+  const { handlers, fakeSender, spawned } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.msi');
+
+  const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
+  assert.equal(result.method, 'os-installer');
+  assert.equal(spawned[0].cmd, 'msiexec');
+  assert.deepEqual(spawned[0].args, ['/i', staged.path]);
+});
+
+test('desktop updater: AppImage self-replaces $APPIMAGE in place, launches the new build, and quits', async () => {
+  const currentDir = makeTempDir();
+  const currentAppImage = path.join(currentDir, 'Yayra.AppImage');
+  fs.writeFileSync(currentAppImage, Buffer.from('OLD build bytes'));
+  const harness = makeHarness({ env: { APPIMAGE: currentAppImage } });
+  const { artifact, handlers, fakeSender, spawned, scheduled, appCalls, revealed } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.AppImage');
+
+  const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
+  assert.equal(result.status, 'install_started');
+  assert.equal(result.method, 'self-replace');
+  assert.equal(result.willQuit, true);
+  assert.deepEqual(fs.readFileSync(currentAppImage), artifact, 'the running AppImage file now CONTAINS the new build');
+  assert.ok((fs.statSync(currentAppImage).mode & 0o111) !== 0, 'replacement stays executable');
+  assert.equal(spawned[0].cmd, currentAppImage, 'the new build is launched');
+  assert.deepEqual(revealed, [], 'no reveal-in-folder cop-out when a real self-update is possible');
+  runScheduled(scheduled);
+  assert.deepEqual(appCalls, ['quit'], 'old instance hands over to the new one');
+});
+
+test('desktop updater: AppImage staged while NOT running as an AppImage is revealed honestly', async () => {
+  const harness = makeHarness({ env: {} });
+  const { handlers, fakeSender, revealed, appCalls, scheduled } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.AppImage');
+
+  const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
   assert.equal(result.method, 'reveal');
+  assert.equal(result.note, 'not-running-as-appimage');
   assert.deepEqual(revealed, [staged.path]);
+  runScheduled(scheduled);
+  assert.deepEqual(appCalls, [], 'never quits when nothing installed');
+});
+
+test('desktop updater: macOS .dmg is mounted via openPath (drag-to-Applications guidance)', async () => {
+  const harness = makeHarness();
+  const { handlers, fakeSender, opened } = harness;
+  const staged = await stageArtifact(harness, 'yayra-9.9.9.dmg');
+
+  const result = await handlers.get('yayra:updates-install')({ sender: fakeSender }, { path: staged.path });
+  assert.equal(result.status, 'install_started');
+  assert.equal(result.method, 'mounted');
+  assert.deepEqual(opened, [staged.path]);
 });
 
 test('desktop updater: install without a staged file is an honest error (no fake "install_started")', async () => {

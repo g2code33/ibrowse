@@ -196,8 +196,10 @@ test('desktop update pipeline: confirming an available update downloads via the 
     assert.equal(downloadCalls[0].sha256, 'abc123', 'manifest checksum is passed for fail-closed verification');
     assert.equal(downloadCalls[0].bytes, 1000);
     assert.equal(downloadCalls[0].target, 'linux');
-    assert.deepEqual(installCalls, [{ path: '/tmp/staged/yayra-0.4.0.deb' }], 'verified staged file is handed to the OS installer');
-    assert.equal(shell.state.updateState.status, 'staged');
+    assert.deepEqual(installCalls, [{ path: '/tmp/staged/yayra-0.4.0.deb', version: '0.4.0' }], 'verified staged file (path + version) is handed to the OS installer');
+    // The OS installer is now replacing the app - the honest state is
+    // "installing" (it only falls back to "staged" if the install fails).
+    assert.equal(shell.state.updateState.status, 'installing');
   } finally {
     delete window.alert;
     uninstall();

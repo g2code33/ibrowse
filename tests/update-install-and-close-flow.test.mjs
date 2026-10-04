@@ -75,7 +75,7 @@ test('staged update: "Install when Yayra opens again" persists and the NEXT laun
     // "When opened again": a brand-new shell (next launch) honours it.
     const { shell: nextLaunch } = await makeShell();
     await new Promise((r) => setTimeout(r, 10));
-    assert.deepEqual(installs, [{ path: '/tmp/yayra-new.deb' }], 'scheduled install runs at next launch');
+    assert.deepEqual(installs, [{ path: '/tmp/yayra-new.deb', version: '2.0.0' }], 'scheduled install runs at next launch');
     assert.equal(storage.getItem('yayra:pending-update-install'), null, 'consumed exactly once');
     assert.ok(nextLaunch, 'next launch shell is fine');
   } finally {
@@ -111,7 +111,7 @@ test('staged update: "Later - manually" dismisses but Settings -> Yayra Updates 
 
     container.querySelector('.fb-up-install-now').click();
     await new Promise((r) => setTimeout(r, 10));
-    assert.deepEqual(installs, [{ path: '/tmp/yayra-new.deb' }], 'manual install uses the staged path');
+    assert.deepEqual(installs, [{ path: '/tmp/yayra-new.deb', version: '2.0.0' }], 'manual install carries the staged path and version');
   } finally {
     bridge.uninstall();
     cleanup();
@@ -154,6 +154,105 @@ test('menu: the update section has an "Update options" button that opens Setting
   assert.equal(shell.state.settingsActiveCategory, 'updates');
   const tab = shell.getActiveTab();
   assert.equal(tab.url, 'yayra://settings', 'opens the settings page');
+});
+
+/* ------------- staged update: every button says INSTALL ------------- */
+
+test('staged update: toolbar chip reads "Install" and clicking it INSTALLS the staged file (never re-downloads)', async () => {
+  const { cleanup } = withLocalStorage();
+  const downloads = [];
+  const installs = [];
+  const bridge = installUpdatesBridge({ downloads, installs });
+  try {
+    const { shell, container } = await makeShell();
+    shell.state.updateState = {
+      ...shell.state.updateState,
+      status: 'staged',
+      stagedPath: '/tmp/yayra-new.deb',
+      availableVersion: '2.0.0',
+      download: { url: 'https://example.com/yayra-2.0.0.deb' }
+    };
+    shell.render(container);
+
+    const chip = container.querySelector('.fb-update-chip');
+    assert.ok(chip, 'update chip stays visible while an install is pending');
+    const label = container.querySelector('.fb-update-chip-label');
+    assert.equal(label.textContent, 'Install', 'post-download the chip says Install, not Update/Download');
+
+    chip.click();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(downloads.length, 0, 'no re-download of an already staged update');
+    assert.equal(installs.length, 1, 'clicking Install actually installs');
+    assert.equal(installs[0].path, '/tmp/yayra-new.deb');
+  } finally {
+    bridge.uninstall();
+    cleanup();
+  }
+});
+
+test('staged update: the menu update section offers a real "Install" button wired to the staged file', async () => {
+  const { cleanup } = withLocalStorage();
+  const installs = [];
+  const bridge = installUpdatesBridge({ installs });
+  try {
+    const { shell, container } = await makeShell();
+    shell.state.updateState = { ...shell.state.updateState, status: 'staged', stagedPath: '/tmp/yayra-new.deb', availableVersion: '2.0.0' };
+    shell.state.isSideDrawerOpen = true;
+    shell.render(container);
+
+    const installBtn = container.querySelector('.fb-drawer-install-btn');
+    assert.ok(installBtn, 'drawer shows an actionable Install button when staged');
+    assert.match(installBtn.textContent, /Install Yayra v2\.0\.0/);
+    installBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(installs.map((i) => i.path), ['/tmp/yayra-new.deb']);
+  } finally {
+    bridge.uninstall();
+    cleanup();
+  }
+});
+
+test('install failure keeps the download STAGED (retry stays possible) and never closes the window', async () => {
+  const { cleanup } = withLocalStorage();
+  const closes = [];
+  globalThis.window.yayra = globalThis.window.yayra || {};
+  globalThis.window.yayra.updates = {
+    check: async () => ({ status: 'checking' }),
+    download: async () => ({ status: 'staged', path: '/tmp/yayra-new.deb' }),
+    install: async () => ({ status: 'error', reason: 'authorization-declined' }),
+    onEvent: () => () => {}
+  };
+  globalThis.window.yayra.windowControls = { close: () => closes.push(true), minimize: () => {}, toggleMaximize: () => {} };
+  try {
+    const { shell } = await makeShell();
+    shell.state.updateState = { ...shell.state.updateState, status: 'staged', stagedPath: '/tmp/yayra-new.deb', availableVersion: '2.0.0' };
+    await shell.installDesktopUpdateNow();
+    assert.equal(shell.state.updateState.status, 'staged', 'failed install falls back to staged, not a dead end');
+    assert.equal(shell.state.updateState.stagedPath, '/tmp/yayra-new.deb');
+    assert.equal(closes.length, 0, 'the renderer NEVER closes the window itself anymore');
+  } finally {
+    delete globalThis.window.yayra;
+    cleanup();
+  }
+});
+
+test('main-process install events: install-failed restores staged; install-finished shows installing', async () => {
+  const { cleanup } = withLocalStorage();
+  const bridge = installUpdatesBridge();
+  try {
+    const { shell } = await makeShell();
+    shell.state.updateState = { ...shell.state.updateState, status: 'installing', stagedPath: '/tmp/yayra-new.deb', availableVersion: '2.0.0' };
+
+    shell.handleDesktopUpdateEvent({ type: 'install-failed', reason: 'package-manager-exited-1' });
+    assert.equal(shell.state.updateState.status, 'staged', 'failure goes back to staged');
+    assert.match(shell.state.updateState.notes, /package-manager-exited-1/);
+
+    shell.handleDesktopUpdateEvent({ type: 'install-finished', version: '2.0.0', relaunching: true });
+    assert.equal(shell.state.updateState.status, 'installing', 'success reports installing while the app relaunches');
+  } finally {
+    bridge.uninstall();
+    cleanup();
+  }
 });
 
 /* ---------------------- close prompt & session modes ---------------------- */
