@@ -4885,3 +4885,176 @@ html {
   max-height: 100dvh;
   overflow: hidden;
 }
+
+/* -------------------------------------------------------------
+ * YAYRA AI - omnibox "Ask Yayra AI" row, new-tab chip, yayra://ai page
+ * ----------------------------------------------------------- */
+
+.fb-ai-suggestion {
+  border-bottom: 1px solid var(--fb-border, rgba(255, 255, 255, 0.08));
+}
+
+.fb-ai-suggestion-icon {
+  color: #a78bfa;
+}
+
+.fb-ai-suggestion-badge {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+}
+
+.fb-newtab-ai-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px auto 0;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  background: rgba(139, 92, 246, 0.12);
+  color: #c4b5fd;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.fb-newtab-ai-chip:hover {
+  background: rgba(139, 92, 246, 0.22);
+  transform: translateY(-1px);
+}
+
+.fb-ai-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  max-width: 860px;
+}
+
+.fb-ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.fb-ai-provider-chip {
+  font-size: 0.72rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--fb-text-secondary);
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.fb-ai-setup-note {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.fb-ai-thread {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.fb-ai-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--fb-text-secondary);
+  max-width: 420px;
+}
+
+.fb-ai-empty-icon {
+  color: #a78bfa;
+  margin-bottom: 8px;
+}
+
+.fb-ai-empty-icon svg {
+  width: 34px;
+  height: 34px;
+}
+
+.fb-ai-msg {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  max-width: 92%;
+}
+
+.fb-ai-msg-user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.fb-ai-msg-avatar {
+  flex: 0 0 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.16);
+  color: #a78bfa;
+}
+
+.fb-ai-msg-user .fb-ai-msg-avatar {
+  background: rgba(79, 124, 255, 0.18);
+  color: #93b4ff;
+}
+
+.fb-ai-msg-body {
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fb-text-primary, #e5e7eb);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--fb-border, rgba(255, 255, 255, 0.08));
+}
+
+.fb-ai-msg-user .fb-ai-msg-body {
+  background: rgba(79, 124, 255, 0.14);
+  border-color: rgba(79, 124, 255, 0.3);
+}
+
+.fb-ai-msg-error .fb-ai-msg-body {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.fb-ai-msg-busy .fb-ai-msg-body {
+  color: var(--fb-text-muted);
+  font-style: italic;
+}
+
+.fb-ai-form {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.fb-ai-form .fb-ai-input {
+  flex: 1;
+}

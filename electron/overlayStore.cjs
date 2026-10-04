@@ -27,7 +27,11 @@ const DEFAULTS = Object.freeze({
   overlayAllApps: true,
   opacity: 0.92,
   size: 64,
-  position: null // null = not yet placed; overlay picks a default corner
+  position: null, // null = not yet placed; overlay picks a default corner
+  // Triple-clicking the bubble locks it exactly where it is (no dragging)
+  // until it is triple-clicked again. Persisted so a locked bubble stays
+  // locked across restarts.
+  positionLocked: false
 });
 
 function createOverlayStore({ fs, userDataDir }) {

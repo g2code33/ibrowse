@@ -91,6 +91,9 @@ function createOverlayBridge({
   // other application - see assertTopmost() for why this is needed.
   let overlayTopmostTimer = null;
   let miniTopmostTimer = null;
+  // Manual drag loop (the bubble has NO native drag region - drag regions
+  // swallow left-button events, which broke clicking entirely).
+  let dragTimer = null;
 
   /**
    * Force a window back to the top of the OS z-order.
@@ -221,9 +224,22 @@ function createOverlayBridge({
     // circular plate/gradient behind it. A soft drop shadow keeps the
     // logo legible over any app underneath. Fallback (logo asset
     // unavailable): a bare transparent "Y" monogram, still no circle.
+    //
+    // INPUT HANDLING (why there is NO -webkit-app-region: drag here):
+    // Electron drag regions are handled natively by the OS window - the
+    // renderer never receives left-button mouse events inside them, so
+    // click/dblclick listeners on a draggable bubble silently never fire
+    // (right-click still worked because contextmenu passes through).
+    // That was exactly the "left click / tap / double click do nothing"
+    // bug. Dragging is therefore implemented manually: pointerdown tells
+    // the main process to follow the cursor (screen.getCursorScreenPoint
+    // polling), and real pointer events stay available for taps:
+    //   1 tap   -> toggle the floating mini browser
+    //   2 taps  -> open the full browser window
+    //   3 taps  -> lock the bubble where it is / unlock it again
     const bubbleContent = logo
-      ? `<img id="bubble" src="${logo}" alt="" title="Open Yayra" draggable="false" />`
-      : `<div id="bubble" title="Open Yayra"><span id="monogram">Y</span></div>`;
+      ? `<img id="bubble" src="${logo}" alt="" draggable="false" />`
+      : `<div id="bubble"><span id="monogram">Y</span></div>`;
     return `<!doctype html>
 <html><head><meta charset="utf-8" />
 <style>
@@ -235,11 +251,14 @@ function createOverlayBridge({
     object-fit:contain;
     filter:drop-shadow(0 3px 10px rgba(0,0,0,0.55));
     opacity:${settings.opacity};
-    -webkit-app-region: drag;
     cursor:grab;
     user-select:none;
+    touch-action:none;
+    transition:transform 120ms ease;
   }
-  #bubble:active { cursor:grabbing; }
+  #bubble.dragging { cursor:grabbing; }
+  #bubble.locked { cursor:default; }
+  #bubble.pulse { transform:scale(0.82); }
   #monogram {
     font:800 64px/1 system-ui, sans-serif;
     color:#4f7cff;
@@ -251,13 +270,77 @@ function createOverlayBridge({
   ${bubbleContent}
   <script>
     const bubbleEl = document.getElementById('bubble');
-    bubbleEl.addEventListener('click', () => {
-      if (window.yayraOverlay?.bubbleClick) window.yayraOverlay.bubbleClick();
-      else window.yayraOverlay?.restore();
+    const api = window.yayraOverlay || {};
+    let locked = ${settings.positionLocked ? 'true' : 'false'};
+    const TAP_SLOP_PX = 5;        // movement below this is a tap, not a drag
+    const MULTI_TAP_MS = 350;     // Chrome-style multi-click settle window
+
+    function applyLockUi() {
+      bubbleEl.classList.toggle('locked', locked);
+      bubbleEl.title = locked
+        ? 'Yayra - position locked (triple-click to unlock)'
+        : 'Yayra - click: mini  |  double-click: full browser  |  triple-click: lock position  |  drag to move';
+    }
+    function pulse() {
+      bubbleEl.classList.add('pulse');
+      setTimeout(() => bubbleEl.classList.remove('pulse'), 140);
+    }
+    applyLockUi();
+    if (typeof api.onLockChanged === 'function') {
+      api.onLockChanged((isLocked) => { locked = Boolean(isLocked); applyLockUi(); pulse(); });
+    }
+
+    let downAt = null;   // screen coords at pointerdown
+    let moved = false;
+    let tapCount = 0;
+    let tapTimer = null;
+
+    function endDrag() {
+      bubbleEl.classList.remove('dragging');
+      if (typeof api.dragEnd === 'function') api.dragEnd();
+    }
+    function dispatchTaps(count) {
+      tapCount = 0;
+      if (typeof api.tap === 'function') api.tap(count);
+      else if (count === 1 && typeof api.bubbleClick === 'function') api.bubbleClick();
+      else if (typeof api.restore === 'function') api.restore();
+    }
+
+    bubbleEl.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      try { bubbleEl.setPointerCapture(e.pointerId); } catch {}
+      downAt = { x: e.screenX, y: e.screenY };
+      moved = false;
+      // Main process follows the cursor; refuses to move while locked.
+      if (!locked && typeof api.dragStart === 'function') {
+        api.dragStart({ x: e.clientX, y: e.clientY });
+        bubbleEl.classList.add('dragging');
+      }
     });
+    bubbleEl.addEventListener('pointermove', (e) => {
+      if (!downAt) return;
+      if (Math.abs(e.screenX - downAt.x) > TAP_SLOP_PX || Math.abs(e.screenY - downAt.y) > TAP_SLOP_PX) moved = true;
+    });
+    bubbleEl.addEventListener('pointerup', (e) => {
+      if (!downAt) return;
+      const wasDrag = moved
+        || Math.abs(e.screenX - downAt.x) > TAP_SLOP_PX
+        || Math.abs(e.screenY - downAt.y) > TAP_SLOP_PX;
+      downAt = null;
+      endDrag();
+      if (wasDrag) { tapCount = 0; clearTimeout(tapTimer); return; }
+      pulse();
+      tapCount += 1;
+      clearTimeout(tapTimer);
+      if (tapCount >= 3) dispatchTaps(3); // lock/unlock fires instantly
+      else tapTimer = setTimeout(() => dispatchTaps(tapCount), MULTI_TAP_MS);
+    });
+    bubbleEl.addEventListener('pointercancel', () => { downAt = null; endDrag(); });
+    bubbleEl.addEventListener('lostpointercapture', () => { if (downAt) { downAt = null; endDrag(); } });
     bubbleEl.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      window.yayraOverlay?.openMenu?.();
+      if (typeof api.openMenu === 'function') api.openMenu();
     });
   </script>
 </body></html>`;
@@ -324,6 +407,7 @@ function createOverlayBridge({
 
     overlayWin.on('closed', () => {
       overlayWin = null;
+      endBubbleDrag({ persist: false });
       overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     });
 
@@ -331,6 +415,7 @@ function createOverlayBridge({
   }
 
   function destroyOverlayWindow() {
+    endBubbleDrag({ persist: false });
     overlayTopmostTimer = stopTopmostGuard(overlayTopmostTimer);
     if (overlayWin && !overlayWin.isDestroyed()) {
       overlayWin.close();
@@ -437,6 +522,85 @@ function createOverlayBridge({
     return ensureMiniWindow();
   }
 
+  /* -------------------------------------------------------------
+   * Manual bubble dragging + tap gestures + triple-click position lock.
+   *
+   * The bubble window deliberately has no -webkit-app-region drag zone
+   * (native drag regions eat every left-button event, so click/double-
+   * click never reached the renderer - the original "using it is not
+   * working" bug). Instead, pointerdown in the bubble asks the main
+   * process to follow the OS cursor until pointerup. While the position
+   * is LOCKED (toggled by triple-click), drag requests are refused and
+   * the bubble stays exactly where it is.
+   * ----------------------------------------------------------- */
+
+  function beginBubbleDrag(offset) {
+    if (!overlayWin || overlayWin.isDestroyed()) return false;
+    if (overlayStore.load().positionLocked) return false; // triple-click lock
+    const dx = Math.round(Number(offset?.x)) || 0;
+    const dy = Math.round(Number(offset?.y)) || 0;
+    endBubbleDrag({ persist: false });
+    if (typeof setInterval !== 'function' || typeof screen.getCursorScreenPoint !== 'function') return false;
+    dragTimer = setInterval(() => {
+      try {
+        if (!overlayWin || overlayWin.isDestroyed()) { endBubbleDrag({ persist: false }); return; }
+        const pt = screen.getCursorScreenPoint();
+        overlayWin.setPosition(pt.x - dx, pt.y - dy);
+      } catch {
+        endBubbleDrag({ persist: false });
+      }
+    }, 16);
+    if (dragTimer && typeof dragTimer.unref === 'function') dragTimer.unref();
+    return true;
+  }
+
+  function endBubbleDrag({ persist = true } = {}) {
+    if (dragTimer) clearInterval(dragTimer);
+    dragTimer = null;
+    if (!persist) return;
+    try {
+      if (overlayWin && !overlayWin.isDestroyed()) {
+        const [x, y] = overlayWin.getPosition();
+        overlayStore.save({ position: { x, y } });
+      }
+    } catch {
+      // best-effort persistence only
+    }
+  }
+
+  function setPositionLocked(locked) {
+    const next = overlayStore.save({ positionLocked: Boolean(locked) });
+    if (next.positionLocked) endBubbleDrag({ persist: true }); // a mid-drag lock freezes in place
+    try {
+      if (overlayWin && !overlayWin.isDestroyed() && typeof overlayWin.setMovable === 'function') {
+        overlayWin.setMovable(!next.positionLocked);
+      }
+      // Let the bubble update its cursor/tooltip + play the lock pulse.
+      overlayWin?.webContents?.send?.('yayra:overlay-lock-changed', next.positionLocked);
+    } catch {
+      // Renderer gone mid-toggle - state is persisted either way.
+    }
+    return next;
+  }
+
+  function togglePositionLock() {
+    return setPositionLocked(!overlayStore.load().positionLocked);
+  }
+
+  /**
+   * Gesture dispatch for the bubble (counts settled by the renderer):
+   *   1 tap -> toggle the floating mini browser (AssistiveTouch expand);
+   *   2 taps -> open/restore the FULL browser window;
+   *   3 taps -> lock the bubble's position right where it is - and
+   *             triple-clicking again unlocks movement.
+   */
+  function handleBubbleTap(count) {
+    const taps = Math.max(1, Math.round(Number(count)) || 1);
+    if (taps >= 3) return togglePositionLock();
+    if (taps === 2) return restoreMainWindow();
+    return toggleMiniPanel();
+  }
+
   function restoreMainWindow() {
     const win = getMainWindow?.();
     if (win && !win.isDestroyed()) {
@@ -460,10 +624,15 @@ function createOverlayBridge({
 
   function openBubbleMenu() {
     if (!Menu || !overlayWin || overlayWin.isDestroyed()) return;
+    const locked = Boolean(overlayStore.load().positionLocked);
     const template = [
       { label: 'Open yayra mini', click: () => toggleMiniPanel() },
       { label: 'Open full browser', click: () => restoreMainWindow() },
       { type: 'separator' },
+      {
+        label: locked ? 'Unlock movement (or triple-click)' : 'Lock position here (or triple-click)',
+        click: () => togglePositionLock()
+      },
       { label: 'Hide bubble (re-enable from Settings)', click: () => setEnabled(false) },
       { type: 'separator' },
       { label: 'Quit Yayra', click: () => { try { app.quit(); } catch { /* already quitting */ } } }
@@ -558,6 +727,15 @@ function createOverlayBridge({
   // the main window). Right-click: quick menu with full-browser/quit.
   ipcMain.on('yayra:overlay-bubble-click', () => toggleMiniPanel());
   ipcMain.on('yayra:overlay-bubble-menu', () => openBubbleMenu());
+  // Settled tap-count gestures from the bubble renderer: 1 = mini,
+  // 2 = full browser, 3 = lock/unlock position (see handleBubbleTap).
+  ipcMain.on('yayra:overlay-bubble-tap', (_e, count) => handleBubbleTap(count));
+  // Manual drag loop (replaces the native drag region that swallowed all
+  // left-button events): follow the OS cursor until pointerup.
+  ipcMain.on('yayra:overlay-drag-start', (_e, offset) => beginBubbleDrag(offset));
+  ipcMain.on('yayra:overlay-drag-end', () => endBubbleDrag());
+  // Settings toggle mirrors the triple-click lock.
+  ipcMain.handle('yayra:overlay-set-position-locked', (_e, locked) => setPositionLocked(locked));
   // Sent from the mini shell's own chrome (close / expand buttons).
   ipcMain.on('yayra:overlay-mini-close', () => {
     if (miniWin && !miniWin.isDestroyed()) miniWin.hide();
@@ -594,6 +772,11 @@ function createOverlayBridge({
     setOverlayAllApps,
     setBubbleSize,
     setBubbleOpacity,
+    setPositionLocked,
+    togglePositionLock,
+    handleBubbleTap,
+    beginBubbleDrag,
+    endBubbleDrag,
     initializeOnStartup,
     applyLoginItemSettings
   };

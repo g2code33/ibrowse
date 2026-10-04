@@ -20,6 +20,7 @@ import { Icons } from '../icons/icons.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
 import { PasskeyService } from '../services/passkeyService.js';
 import { ProfileService } from '../services/profileService.js';
+import { YayraAiService, AI_DEFAULTS, describeAiReason } from '../services/aiService.js';
 import { ExtensionManager, BUILT_IN_EXTENSIONS } from '../../../browser-contract/src/extensions/ExtensionManager.js';
 
 /**
@@ -123,6 +124,10 @@ export class BrowserShell {
     // get passkeysBridge() + electron/passkeyBridge.cjs. DI for tests.
     this.passkeyService = options.passkeyService
       || new PasskeyService({ storage: this.storageAdapter, nativeBridge: this.passkeysBridge });
+    // Yayra AI (Chrome-style "AI options on every search"): omnibox "Ask
+    // Yayra AI" row, the yayra://ai chat page, and Settings > Yayra AI.
+    // See packages/shared-ui/src/services/aiService.js. DI for tests.
+    this.aiService = options.aiService || new YayraAiService({ storage: this.storageAdapter });
     // Browser profiles + the Chrome-style "keep your browsing separate"
     // smart prompt. See packages/shared-ui/src/services/profileService.js.
     this.profileService = options.profileService
@@ -214,7 +219,7 @@ export class BrowserShell {
       // System-wide floating overlay bubble (see electron/overlayWindow.cjs).
       // These mirror the Electron-side defaults so the UI shows sane values
       // even before overlayBridge.getSettings() resolves.
-      overlaySettings: { enabled: true, launchAtStartup: true, overlayAllApps: true },
+      overlaySettings: { enabled: true, launchAtStartup: true, overlayAllApps: true, positionLocked: false },
       passwordsItems: [],
       // API keys / tokens / secure notes living in the same encrypted vault.
       vaultKeysItems: [],
@@ -227,6 +232,12 @@ export class BrowserShell {
       passwordsActiveSection: 'passwords',
       // Registered Yayra account passkey metadata (null = none yet).
       passkeyInfo: null,
+      // Yayra AI: synchronous config snapshot (renders can't await), the
+      // yayra://ai conversation of this session, and the busy flag while
+      // an answer is being generated.
+      aiConfig: { ...AI_DEFAULTS },
+      aiConversation: [],
+      aiBusy: false,
       extensionsItems: [...BUILT_IN_EXTENSIONS],
       sponsoredLinks: DEVELOPER_AD_LINKS.map((item) => ({
         ...item,
@@ -766,6 +777,16 @@ export class BrowserShell {
         }
       } catch (err) {
         console.warn('Failed to load overlay settings in BrowserShell:', err);
+      }
+    }
+
+    // Yayra AI config snapshot for synchronous renders (omnibox row,
+    // settings section, yayra://ai page).
+    if (this.aiService) {
+      try {
+        this.state.aiConfig = await this.aiService.getConfig();
+      } catch {
+        this.state.aiConfig = { ...AI_DEFAULTS };
       }
     }
 
@@ -1744,6 +1765,8 @@ export class BrowserShell {
       this.renderInternalExtensionsPage(viewport, activeTab);
     } else if (url === 'yayra://permissions') {
       this.renderInternalPermissionsPage(viewport, activeTab);
+    } else if (url === 'yayra://ai' || url.startsWith('yayra://ai?')) {
+      this.renderInternalAiPage(viewport, activeTab);
     } else if (url === 'yayra://about') {
       this.renderInternalAboutPage(viewport, activeTab);
     } else {
@@ -2522,6 +2545,20 @@ export class BrowserShell {
     newTabPage.appendChild(searchForm);
     this.bindSearchSuggestions(searchForm.querySelector('.fb-newtab-search-input'));
 
+    // Chrome-style AI entry point right under the search box: asks the
+    // typed query (or just opens the yayra://ai chat when empty).
+    if (this.state.aiConfig?.enabled) {
+      const aiChip = document.createElement('button');
+      aiChip.type = 'button';
+      aiChip.className = 'fb-newtab-ai-chip';
+      aiChip.innerHTML = `${Icons.sparkles} <span>Ask Yayra AI</span>`;
+      aiChip.addEventListener('click', () => {
+        const typed = searchForm.querySelector('.fb-newtab-search-input')?.value?.trim() || '';
+        this.openAiPage(typed);
+      });
+      newTabPage.appendChild(aiChip);
+    }
+
     if (this.state.isMobile && !activeTab.isPrivate) {
       this.renderMobileSafariExtensionCard(newTabPage);
     }
@@ -2779,6 +2816,9 @@ export class BrowserShell {
         <button class="fb-settings-nav-item ${activeCat === 'floating' ? 'active' : ''}" data-cat="floating" data-category="floating">
           ${Icons.bubble} <span>Floating & Transparency</span>
         </button>
+        <button class="fb-settings-nav-item ${activeCat === 'ai' ? 'active' : ''}" data-cat="ai" data-category="ai">
+          ${Icons.sparkles} <span>Yayra AI</span>
+        </button>
         <button class="fb-settings-nav-item ${activeCat === 'appearance' ? 'active' : ''}" data-cat="appearance" data-category="appearance">
           ${Icons.moon} <span>Appearance</span>
         </button>
@@ -2901,6 +2941,63 @@ export class BrowserShell {
                 <p>Keeps the bubble above other applications (desktop-only). Turning this off keeps it only above Yayra's own window.</p>
               </div>
               <input type="checkbox" id="fb-in-set-overlay-allapps" ${this.state.overlaySettings.overlayAllApps ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
+            </div>
+
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Lock bubble position</strong>
+                <p>Keeps the bubble exactly where it is - dragging is disabled until unlocked. Tip: triple-click the bubble to toggle this anywhere.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-overlay-poslock" ${this.state.overlaySettings.positionLocked ? 'checked' : ''} ${this.overlayBridge ? '' : 'disabled'} />
+            </div>
+          </section>
+
+          <!-- Yayra AI -->
+          <section class="fb-settings-group-card" id="sec-ai" style="${activeCat === 'ai' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
+            <h3 class="fb-settings-group-title">${Icons.sparkles} Yayra AI</h3>
+            <p style="margin:0; font-size:0.82rem; color:var(--fb-text-secondary);">
+              Chrome-style AI across the browser: every search offers an \u201cAsk Yayra AI\u201d option, and <strong>yayra://ai</strong> is a full AI chat page.
+              Yayra\u2019s built-in backend is coming online soon${this.state.aiConfig.provider === 'yayra' ? ' (it will answer honestly that it\u2019s not live yet until then)' : ''};
+              connecting your own OpenAI-compatible provider below works today.
+            </p>
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Enable Yayra AI</strong>
+                <p>Turns all AI features on or off everywhere in the browser.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-ai-enabled" ${this.state.aiConfig.enabled ? 'checked' : ''} />
+            </div>
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Offer \u201cAsk Yayra AI\u201d in search suggestions</strong>
+                <p>Adds an AI row above normal suggestions whenever you type in the address bar, like Chrome\u2019s AI search options.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-ai-omnibox" ${this.state.aiConfig.suggestInOmnibox ? 'checked' : ''} ${this.state.aiConfig.enabled ? '' : 'disabled'} />
+            </div>
+            <div class="fb-setting-row">
+              <label>Provider</label>
+              <select id="fb-in-set-ai-provider" class="fb-select" ${this.state.aiConfig.enabled ? '' : 'disabled'}>
+                <option value="yayra" ${this.state.aiConfig.provider === 'yayra' ? 'selected' : ''}>Yayra built-in (no key needed)</option>
+                <option value="openai-compatible" ${this.state.aiConfig.provider === 'openai-compatible' ? 'selected' : ''}>OpenAI-compatible endpoint (your own)</option>
+              </select>
+            </div>
+            <div id="fb-ai-provider-custom" style="display:${this.state.aiConfig.provider === 'openai-compatible' ? 'flex' : 'none'}; flex-direction:column; gap:10px;">
+              <div class="fb-setting-row">
+                <label>Endpoint URL</label>
+                <input type="text" class="fb-input" id="fb-in-set-ai-endpoint" placeholder="https://api.openai.com/v1 (or Ollama/Groq/OpenRouter/vLLM...)" value="${escapeAttr(this.state.aiConfig.endpoint)}" />
+              </div>
+              <div class="fb-setting-row">
+                <label>API key</label>
+                <input type="password" class="fb-input" id="fb-in-set-ai-key" placeholder="sk-... (stored locally, sent only to YOUR endpoint)" value="${escapeAttr(this.state.aiConfig.apiKey)}" />
+              </div>
+              <div class="fb-setting-row">
+                <label>Model</label>
+                <input type="text" class="fb-input" id="fb-in-set-ai-model" placeholder="e.g. gpt-4o-mini, llama3.1, mixtral..." value="${escapeAttr(this.state.aiConfig.model)}" />
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="fb-btn fb-btn-secondary" id="fb-in-set-ai-test" ${this.state.aiConfig.enabled ? '' : 'disabled'}>Test connection</button>
+              <button class="fb-btn fb-btn-primary" id="fb-in-set-ai-open">Open Yayra AI</button>
             </div>
           </section>
 
@@ -3183,6 +3280,55 @@ export class BrowserShell {
       const next = await this.overlayBridge.setLaunchAtStartup(e.target.checked);
       this.state.overlaySettings = { ...this.state.overlaySettings, ...next };
       this.render();
+    });
+
+    // --- Yayra AI (see services/aiService.js) ---
+    const saveAiConfig = async (partial) => {
+      if (!this.aiService) return;
+      this.state.aiConfig = await this.aiService.updateConfig(partial);
+    };
+    page.querySelector('#fb-in-set-ai-enabled')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ enabled: e.target.checked });
+      this.render();
+    });
+    page.querySelector('#fb-in-set-ai-omnibox')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ suggestInOmnibox: e.target.checked });
+    });
+    page.querySelector('#fb-in-set-ai-provider')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ provider: e.target.value });
+      const custom = page.querySelector('#fb-ai-provider-custom');
+      if (custom) custom.style.display = e.target.value === 'openai-compatible' ? 'flex' : 'none';
+    });
+    page.querySelector('#fb-in-set-ai-endpoint')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ endpoint: e.target.value.trim() });
+    });
+    page.querySelector('#fb-in-set-ai-key')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ apiKey: e.target.value.trim() });
+    });
+    page.querySelector('#fb-in-set-ai-model')?.addEventListener('change', async (e) => {
+      await saveAiConfig({ model: e.target.value.trim() });
+    });
+    page.querySelector('#fb-in-set-ai-test')?.addEventListener('click', async (e) => {
+      if (!this.aiService) return;
+      const btn = e.target;
+      btn.disabled = true;
+      btn.textContent = 'Testing\u2026';
+      const result = await this.aiService.testConnection();
+      btn.disabled = false;
+      btn.textContent = 'Test connection';
+      this.showTransientNotice(result.success
+        ? 'Yayra AI is connected and answering.'
+        : `AI test failed: ${describeAiReason(result.reason)}`);
+    });
+    page.querySelector('#fb-in-set-ai-open')?.addEventListener('click', () => this.openAiPage());
+
+    page.querySelector('#fb-in-set-overlay-poslock')?.addEventListener('change', async (e) => {
+      if (!this.overlayBridge?.setPositionLocked) return;
+      const next = await this.overlayBridge.setPositionLocked(e.target.checked);
+      this.state.overlaySettings = { ...this.state.overlaySettings, ...next };
+      this.showTransientNotice(next.positionLocked
+        ? 'Bubble position locked - triple-click the bubble (or untick this) to unlock.'
+        : 'Bubble movement unlocked.');
     });
 
     page.querySelector('#fb-in-set-overlay-allapps')?.addEventListener('change', async (e) => {
@@ -3951,6 +4097,162 @@ export class BrowserShell {
   /* -------------------------------------------------------------
    * 9. ABOUT IN-TAB PAGE (PHASE 16)
    * ----------------------------------------------------------- */
+  /* -------------------------------------------------------------
+   * YAYRA AI - yayra://ai (Chrome-style "AI options on every search")
+   * -----------------------------------------------------------
+   * The in-tab AI page: a conversation with Yayra AI, reachable from the
+   * omnibox "Ask Yayra AI" suggestion row, the new-tab chip, and directly
+   * via yayra://ai. Opening yayra://ai?q=<query> asks the query
+   * immediately (that is how omnibox searches hand over to AI).
+   * Providers live in services/aiService.js - no provider, no fake
+   * answers: the page says exactly what to configure instead.
+   * ----------------------------------------------------------- */
+
+  /** Open the AI page, optionally pre-asking `query` (omnibox handoff). */
+  openAiPage(query) {
+    const q = String(query || '').trim();
+    this.openInternalPage(q ? `yayra://ai?q=${encodeURIComponent(q)}` : 'yayra://ai');
+  }
+
+  /** The ?q= from a yayra://ai URL, or ''. */
+  getAiQueryFromUrl(url) {
+    const match = /^yayra:\/\/ai\?(.*)$/.exec(String(url || ''));
+    if (!match) return '';
+    try {
+      return (new URLSearchParams(match[1]).get('q') || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Ask Yayra AI and append both sides to the session conversation.
+   * Errors become honest assistant-side notices (never fake answers).
+   */
+  async askYayraAi(prompt) {
+    const text = String(prompt || '').trim();
+    if (!text || !this.aiService || this.state.aiBusy) return;
+    const history = this.state.aiConversation
+      .filter((m) => !m.error)
+      .map((m) => ({ role: m.role, content: m.content }));
+    this.state.aiConversation.push({ role: 'user', content: text, at: Date.now() });
+    this.state.aiBusy = true;
+    this.render();
+    let result;
+    try {
+      result = await this.aiService.ask(text, { history });
+    } catch (err) {
+      result = { success: false, reason: 'provider-error', detail: String(err?.message || err) };
+    }
+    this.state.aiBusy = false;
+    if (result && result.success) {
+      this.state.aiConversation.push({ role: 'assistant', content: result.answer, at: Date.now() });
+    } else {
+      this.state.aiConversation.push({
+        role: 'assistant',
+        error: true,
+        reason: result?.reason,
+        content: describeAiReason(result?.reason),
+        at: Date.now()
+      });
+    }
+    this.render();
+  }
+
+  renderInternalAiPage(viewport, activeTab) {
+    const page = document.createElement('div');
+    page.className = 'fb-internal-page fb-ai-page';
+    const cfg = this.state.aiConfig || { ...AI_DEFAULTS };
+    const ready = Boolean(cfg.enabled && (cfg.provider !== 'openai-compatible' || cfg.endpoint));
+    const providerLabel = cfg.provider === 'openai-compatible'
+      ? `your provider${cfg.model ? ` (${cfg.model})` : ''}`
+      : 'Yayra\u2019s built-in AI';
+
+    const messagesHtml = this.state.aiConversation.map((m) => `
+      <div class="fb-ai-msg fb-ai-msg-${m.role}${m.error ? ' fb-ai-msg-error' : ''}">
+        <span class="fb-ai-msg-avatar">${m.role === 'user' ? Icons.finderFace : Icons.sparkles}</span>
+        <div class="fb-ai-msg-body"></div>
+      </div>`).join('');
+
+    page.innerHTML = `
+      <div class="fb-internal-container fb-ai-container">
+        <div class="fb-internal-header fb-ai-header">
+          <h1>${Icons.sparkles} Yayra AI</h1>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <span class="fb-ai-provider-chip" title="Active provider">${cfg.enabled ? providerLabel : 'AI is off'}</span>
+            <button class="fb-btn fb-btn-secondary fb-ai-clear" ${this.state.aiConversation.length ? '' : 'disabled'}>Clear chat</button>
+            <button class="fb-btn fb-btn-secondary fb-ai-settings">AI settings</button>
+          </div>
+        </div>
+        ${cfg.enabled ? '' : `
+          <div class="fb-ai-setup-note">
+            Yayra AI is turned off. Enable it in <strong>Settings &gt; Yayra AI</strong>.
+          </div>`}
+        ${cfg.enabled && !ready ? `
+          <div class="fb-ai-setup-note">
+            No AI provider is configured yet - add an OpenAI-compatible endpoint in <strong>Settings &gt; Yayra AI</strong>.
+          </div>` : ''}
+        <div class="fb-ai-thread" aria-live="polite">
+          ${this.state.aiConversation.length ? messagesHtml : `
+            <div class="fb-ai-empty">
+              <div class="fb-ai-empty-icon">${Icons.sparkles}</div>
+              <h2>Ask anything</h2>
+              <p>Yayra AI answers questions right inside the browser - type below, or pick \u201cAsk Yayra AI\u201d on any search suggestion, Chrome-style.</p>
+            </div>`}
+          ${this.state.aiBusy ? `
+            <div class="fb-ai-msg fb-ai-msg-assistant fb-ai-msg-busy">
+              <span class="fb-ai-msg-avatar">${Icons.sparkles}</span>
+              <div class="fb-ai-msg-body">Thinking&hellip;</div>
+            </div>` : ''}
+        </div>
+        <form class="fb-ai-form">
+          <input type="text" class="fb-input fb-ai-input" placeholder="Ask Yayra AI&hellip;" autocomplete="off" ${this.state.aiBusy ? 'disabled' : ''} />
+          <button type="submit" class="fb-btn fb-btn-primary fb-ai-send" ${this.state.aiBusy ? 'disabled' : ''}>Ask</button>
+        </form>
+      </div>
+    `;
+
+    // Message text is injected via textContent - AI/user content must
+    // never be parsed as HTML.
+    const bodies = page.querySelectorAll('.fb-ai-msg-body');
+    this.state.aiConversation.forEach((m, i) => {
+      if (bodies[i]) bodies[i].textContent = m.content;
+    });
+
+    page.querySelector('.fb-ai-clear')?.addEventListener('click', () => {
+      this.state.aiConversation = [];
+      this.render();
+    });
+    page.querySelector('.fb-ai-settings')?.addEventListener('click', () => {
+      this.state.settingsActiveCategory = 'ai';
+      this.state.activeSettingsCategory = 'ai';
+      this.openInternalPage('yayra://settings');
+    });
+    const form = page.querySelector('.fb-ai-form');
+    const input = page.querySelector('.fb-ai-input');
+    form?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const value = input?.value?.trim();
+      if (!value) return;
+      input.value = '';
+      this.askYayraAi(value);
+    });
+
+    viewport.appendChild(page);
+
+    // yayra://ai?q=... auto-asks exactly once per navigation (the omnibox
+    // "Ask Yayra AI" handoff) - guarded so re-renders never re-ask.
+    const query = this.getAiQueryFromUrl(activeTab?.url);
+    if (query && activeTab) {
+      const guard = `${activeTab.id}::${query}`;
+      if (!this._aiAutoAsked) this._aiAutoAsked = new Set();
+      if (!this._aiAutoAsked.has(guard)) {
+        this._aiAutoAsked.add(guard);
+        this.askYayraAi(query);
+      }
+    }
+  }
+
   renderInternalAboutPage(viewport) {
     const page = document.createElement('div');
     page.className = 'fb-internal-page fb-about-inpage-layout';
@@ -4456,6 +4758,8 @@ export class BrowserShell {
         this.renderInternalExtensionsPage(miniViewport, activeTab);
       } else if (url === 'yayra://permissions') {
         this.renderInternalPermissionsPage(miniViewport, activeTab);
+      } else if (url === 'yayra://ai' || url.startsWith('yayra://ai?')) {
+        this.renderInternalAiPage(miniViewport, activeTab);
       } else if (url === 'yayra://about') {
         this.renderInternalAboutPage(miniViewport, activeTab);
       } else {
@@ -6661,6 +6965,25 @@ export class BrowserShell {
       const suggestions = await this.getGoogleSearchSuggestions(query);
       if (currentRequest !== requestId || input.value.trim() !== query) return;
       list.innerHTML = '';
+      // Chrome-style AI entry: every search also offers "Ask Yayra AI"
+      // as the first row, opening yayra://ai with the query pre-asked.
+      if (this.state.aiConfig?.enabled && this.state.aiConfig?.suggestInOmnibox) {
+        const aiItem = document.createElement('button');
+        aiItem.type = 'button';
+        aiItem.className = 'fb-search-suggestion fb-ai-suggestion';
+        aiItem.id = `fb-search-suggestion-ai-${Date.now()}`;
+        aiItem.dataset.value = query;
+        aiItem.setAttribute('role', 'option');
+        aiItem.innerHTML = `<span class="fb-search-suggestion-icon fb-ai-suggestion-icon">${Icons.sparkles}</span><span class="fb-search-suggestion-text"></span><span class="fb-ai-suggestion-badge">Yayra AI</span>`;
+        aiItem.querySelector('.fb-search-suggestion-text').textContent = `Ask Yayra AI: ${query}`;
+        aiItem.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          hide();
+          if (options.mobile) this.closeModal();
+          this.openAiPage(query);
+        });
+        list.appendChild(aiItem);
+      }
       suggestions.forEach((suggestion, index) => {
         const item = document.createElement('button');
         item.type = 'button';
@@ -6676,7 +6999,7 @@ export class BrowserShell {
         });
         list.appendChild(item);
       });
-      list.hidden = suggestions.length === 0;
+      list.hidden = list.children.length === 0;
       activeIndex = -1;
       // The dropdown paints over the page area: on Electron the native
       // page surface must yield (it always draws above HTML otherwise).
@@ -6702,7 +7025,14 @@ export class BrowserShell {
       } else if (event.key === 'Enter' && activeIndex >= 0 && items[activeIndex]) {
         event.preventDefault();
         event.stopPropagation();
-        choose(items[activeIndex].dataset.value);
+        const selected = items[activeIndex];
+        if (selected.className.includes('fb-ai-suggestion')) {
+          hide();
+          if (options.mobile) this.closeModal();
+          this.openAiPage(selected.dataset.value);
+        } else {
+          choose(selected.dataset.value);
+        }
       }
     });
     input.addEventListener('blur', () => setTimeout(hide, 160));
@@ -7950,6 +8280,7 @@ export class BrowserShell {
     if (tab.url === 'yayra://passwords') return 'Passwords';
     if (tab.url === 'yayra://extensions') return 'Extensions';
     if (tab.url === 'yayra://permissions') return 'Site Permissions';
+    if (tab.url === 'yayra://ai' || tab.url.startsWith('yayra://ai?')) return 'Yayra AI';
     if (tab.url === 'yayra://about') return 'About Yayra';
 
     try {
