@@ -310,7 +310,7 @@ html {
   align-items: center;
   justify-content: center;
   position: relative;
-  cursor: grab;
+  cursor: pointer; /* native system cursor - keeps the Windows pointer size (grab = Chromium bitmap, shrinks) */
   transition: var(--fb-transition);
   user-select: none;
 }
@@ -321,7 +321,7 @@ html {
 }
 
 .fb-orb:active {
-  cursor: grabbing;
+  cursor: move;
   transform: scale(0.95);
 }
 
@@ -2304,7 +2304,7 @@ html {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: grab;
+  cursor: pointer; /* native system cursor - keeps the Windows pointer size (grab = Chromium bitmap, shrinks) */
   user-select: none;
   touch-action: none;
   transition: transform 0.15s ease, filter 0.15s ease;
@@ -2312,7 +2312,7 @@ html {
 }
 
 .yayra-floating-bubble-persistent:active {
-  cursor: grabbing;
+  cursor: move;
   transform: scale(0.96);
 }
 
@@ -2580,13 +2580,13 @@ html {
   align-items: center;
   justify-content: space-between;
   padding: 0 10px;
-  cursor: grab;
+  cursor: move; /* native system cursor - keeps the Windows pointer size (grab = Chromium bitmap, shrinks) */
   user-select: none;
   touch-action: none;
 }
 
 .fb-floating-popup-header:active {
-  cursor: grabbing;
+  cursor: move;
 }
 
 .fb-floating-popup-brand {

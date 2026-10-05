@@ -441,12 +441,17 @@ function createOverlayBridge({
     object-fit:contain;
     filter:drop-shadow(0 3px 10px rgba(0,0,0,0.55));
     opacity:${settings.opacity};
-    cursor:grab;
+    /* 'pointer'/'move' map to REAL Windows system cursors (IDC_HAND /
+       IDC_SIZEALL) so the pointer keeps the user's Windows size here.
+       'grab'/'grabbing' have no native Windows cursor - Chromium paints
+       them from its own fixed-size bitmaps, which SHRANK the pointer
+       over the bubble for anyone using a larger Windows pointer. */
+    cursor:pointer;
     user-select:none;
     touch-action:none;
     transition:transform 120ms ease;
   }
-  #bubble.dragging { cursor:grabbing; }
+  #bubble.dragging { cursor:move; }
   #bubble.locked { cursor:default; }
   #bubble.pulse { transform:scale(0.82); }
   #monogram {
