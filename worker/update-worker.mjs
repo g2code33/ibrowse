@@ -20,7 +20,10 @@ const buckets = new Map();
 // gets crowded: round-robin start + failover walk, with per-key cooldown
 // benches for keys that answer 429 (rate-limited) or 401/403 (dead key).
 const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const NVIDIA_DEFAULT_MODEL = 'meta/llama-3.3-70b-instruct';
+// Default model for Yayra's managed AI. Kimi K3 on NVIDIA NIM: ~2.8T MoE,
+// 1M context, strong reasoning. Override WITHOUT code changes by setting
+// the NVIDIA_MODEL var on the worker (see docs/CLOUDFLARE.md).
+const NVIDIA_DEFAULT_MODEL = 'moonshotai/kimi-k3';
 const AI_WINDOW_MS = 60_000;
 const AI_LIMIT = 15; // per-IP AI budget, separate from the global limiter
 const aiBuckets = new Map();

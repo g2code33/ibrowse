@@ -428,7 +428,10 @@ function createWebviewBridge({
   function navState(webContents) {
     return {
       canGoBack: historyCanGoBack(webContents),
-      canGoForward: historyCanGoForward(webContents)
+      canGoForward: historyCanGoForward(webContents),
+      // Engine-truth loading state rides along with every navigation so
+      // the renderer's optimistic X/refresh toggle can self-correct.
+      isLoading: typeof webContents.isLoading === 'function' ? Boolean(webContents.isLoading()) : undefined
     };
   }
 
@@ -776,6 +779,17 @@ function createWebviewBridge({
   ipcMain.handle('yayra:webview-hard-reload', (event, { tabId } = {}) => hardReload(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-clear-site-cache', (event, { tabId } = {}) => clearSiteCache(viewKey(event, tabId)));
   ipcMain.handle('yayra:webview-stop', (event, { tabId } = {}) => stop(viewKey(event, tabId)));
+  // Engine-truth loading probe: the renderer's stuck-X watchdog asks the
+  // REAL webContents whether the page is still loading, so a missed
+  // loading-stop event can never leave the refresh button stuck as an X.
+  ipcMain.handle('yayra:webview-is-loading', (event, { tabId } = {}) => {
+    const entry = views.get(viewKey(event, tabId));
+    const wc = entry?.view?.webContents;
+    if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) || typeof wc.isLoading !== 'function') {
+      return { isLoading: false };
+    }
+    return { isLoading: Boolean(wc.isLoading()) };
+  });
   ipcMain.handle('yayra:webview-destroy', (event, { tabId } = {}) => destroyView(viewKey(event, tabId)));
 
   // ---- Menu > More tools: real page-level actions -------------------

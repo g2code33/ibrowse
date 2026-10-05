@@ -5,3 +5,10 @@ name = "yayra-updates-api"
 main = "worker/update-worker.mjs"
 compatibility_date = "2026-10-03"
 workers_dev = true
+
+[vars]
+# Model for Yayra's managed AI (/api/ai) on the NVIDIA key pool.
+# Change it here (or `wrangler deploy --var NVIDIA_MODEL:...`) and redeploy -
+# no code changes needed. API keys are NEVER here: secrets only
+# (NVIDIA_API_KEYS / NVIDIA_API_KEY_n via `wrangler secret put`).
+NVIDIA_MODEL = "moonshotai/kimi-k3"

@@ -2075,7 +2075,12 @@ export class BrowserShell {
     // frame/iframe embedding) never come into play.
     if (allowNative && tabId && this.nativeWebview) {
       this.attachNativeWebviewSlot(wrapper, tabId, url, isPrivate);
-      if (typeof onLoaded === 'function') onLoaded();
+      // Do NOT call onLoaded() here. The native engine reports loading
+      // through loading-start/loading-stop events; this blanket "loaded"
+      // on every chrome render forced the X back to the refresh icon in
+      // the middle of real loads (and generally fought the event-driven
+      // state). Stuck states are healed by the loading watchdog and the
+      // engine-truth isLoading carried on 'navigated' events instead.
       return { wrapper, iframe: null };
     }
 
@@ -2417,6 +2422,10 @@ export class BrowserShell {
         tab.isSecure = (tab.url || '').startsWith('https://');
         tab.canGoBack = Boolean(evt.canGoBack);
         tab.canGoForward = Boolean(evt.canGoForward);
+        // Engine-truth loading state rides with every navigation: if a
+        // loading-stop event was ever missed, this snaps the X/refresh
+        // button back to reality instead of leaving it stuck.
+        if (typeof evt.isLoading === 'boolean') this.updateTabLoading(tabId, evt.isLoading);
         const navigationState = this.ensureNavigationState(tab);
         const currentUrl = navigationState.historyStack[navigationState.currentIndex];
         if (currentUrl !== tab.url) {
@@ -9823,11 +9832,48 @@ export class BrowserShell {
       // Drives the background-tab auto-refresh cadence: 5 minutes from
       // the last COMPLETED load, not from some arbitrary boot clock.
       if (changed && !tab.isLoading) tab.lastLoadCompletedAt = Date.now();
+      if (changed && tab.isLoading) {
+        tab.loadingStartedAt = Date.now();
+        this._ensureLoadingWatchdog();
+      }
       const countEl = this.rootElement?.querySelector('.fb-page-loading-bar');
       if (countEl) countEl.style.display = isLoading ? 'block' : 'none';
       if (changed) this.refreshLoadingUi(tabId);
       this.ensurePersistentAssistiveBubble();
     }
+  }
+
+  /**
+   * Stuck-X watchdog: the refresh/stop button is driven by
+   * loading-start/loading-stop events, and the optimistic X on
+   * reload()/navigate. If a single loading-stop is EVER missed (busy
+   * renderer, SPA subframe quirks, an event racing a chrome re-render),
+   * the button used to stay an X forever. While any native tab claims
+   * to be loading, this asks the REAL engine (webContents.isLoading())
+   * every 2s and snaps the UI back to the truth. Self-terminates the
+   * moment nothing is loading; never runs for iframe tabs (their <load>
+   * event is the truth there).
+   */
+  _ensureLoadingWatchdog() {
+    if (this._loadingWatchdogTimer) return;
+    if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
+    if (!this.nativeWebview || typeof this.nativeWebview.isLoading !== 'function') return;
+    this._loadingWatchdogTimer = window.setInterval(() => {
+      const loadingTabs = this.state.tabs.filter((t) => t.isLoading && this._nativeWebviewTabIds.has(t.id));
+      if (!loadingTabs.length) {
+        window.clearInterval(this._loadingWatchdogTimer);
+        this._loadingWatchdogTimer = null;
+        return;
+      }
+      const now = Date.now();
+      for (const tab of loadingTabs) {
+        // Give real loads breathing room - only reconcile after 2.5s.
+        if (now - (tab.loadingStartedAt || 0) < 2500) continue;
+        this.nativeWebview.isLoading(tab.id).then((res) => {
+          if (res && res.isLoading === false) this.updateTabLoading(tab.id, false);
+        }).catch(() => {});
+      }
+    }, 2000);
   }
 
   /**
@@ -10676,6 +10722,10 @@ export class BrowserShell {
     }
     this.stopBackgroundUpdateChecks();
     this.stopBackgroundRefresh();
+    if (this._loadingWatchdogTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+      window.clearInterval(this._loadingWatchdogTimer);
+      this._loadingWatchdogTimer = null;
+    }
     if (this._sessionSnapshotTimer) {
       clearTimeout(this._sessionSnapshotTimer);
       this._sessionSnapshotTimer = null;

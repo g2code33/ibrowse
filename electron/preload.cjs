@@ -56,6 +56,7 @@ const api = {
     hardReload: (tabId) => ipcRenderer.invoke('yayra:webview-hard-reload', { tabId }),
     clearSiteCache: (tabId) => ipcRenderer.invoke('yayra:webview-clear-site-cache', { tabId }),
     stop: (tabId) => ipcRenderer.invoke('yayra:webview-stop', { tabId }),
+    isLoading: (tabId) => ipcRenderer.invoke('yayra:webview-is-loading', { tabId }),
     destroy: (tabId) => ipcRenderer.invoke('yayra:webview-destroy', { tabId }),
     // Autofill saved credentials into the page's login form (Chrome-style).
     fillCredentials: (tabId, { username, password } = {}) => ipcRenderer.invoke('yayra:webview-fill-credentials', { tabId, username, password }),

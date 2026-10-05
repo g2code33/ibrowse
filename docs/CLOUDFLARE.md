@@ -92,7 +92,15 @@ npx --yes wrangler@4 secret put NVIDIA_API_KEY_2 --config wrangler.worker.toml
 # ... up to any NVIDIA_API_KEY_n
 ```
 
-Both styles are merged and deduplicated. Optional tuning vars: `NVIDIA_MODEL` (default `meta/llama-3.3-70b-instruct`) and `NVIDIA_BASE_URL` (default NVIDIA's integrate endpoint). Until at least one key is bound, `/api/ai` honestly returns `501 not_configured` and the app tells users the managed backend is not live — it never fabricates answers.
+Both styles are merged and deduplicated. Until at least one key is bound, `/api/ai` honestly returns `501 not_configured` and the app tells users the managed backend is not live — it never fabricates answers.
+
+**Model selection** — the default is `moonshotai/kimi-k3` (Kimi K3: ~2.8T MoE, 1M context). Three ways to change it, strongest-override first:
+
+1. Edit `NVIDIA_MODEL` under `[vars]` in `wrangler.worker.toml`, then redeploy (`npm run deploy:cloudflare:worker`). This is the committed, visible default.
+2. One-off deploy override: `npx wrangler@4 deploy --config wrangler.worker.toml --var NVIDIA_MODEL:moonshotai/kimi-k3`.
+3. Live change without any deploy: Cloudflare dashboard → Workers & Pages → `yayra-updates-api` → Settings → Variables → edit `NVIDIA_MODEL` → Save (note: a later `wrangler deploy` re-applies the toml value over a dashboard edit).
+
+Use any model id from <https://build.nvidia.com> (the id shown on the model page, e.g. `moonshotai/kimi-k3`, `meta/llama-3.3-70b-instruct`). `NVIDIA_BASE_URL` can likewise override the endpoint (default: NVIDIA's integrate endpoint).
 
 Redeploy the Worker after changing its code (`npm run deploy:cloudflare:worker`); secrets persist across deployments.
 

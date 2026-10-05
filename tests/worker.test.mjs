@@ -273,8 +273,13 @@ test('ai route answers through the NVIDIA pool and NEVER leaks a key to the clie
     assert.ok(call.target.includes('integrate.api.nvidia.com'), 'talks to NVIDIA NIM');
     assert.match(call.options.headers.Authorization, /^Bearer nvapi-answer-/, 'key attached server-side only');
     const upstreamBody = JSON.parse(call.options.body);
-    assert.equal(typeof upstreamBody.model, 'string');
+    assert.equal(upstreamBody.model, 'moonshotai/kimi-k3', 'Kimi K3 is the default model');
     assert.deepEqual(upstreamBody.messages, AI_MESSAGES);
+
+    // NVIDIA_MODEL overrides the default without code changes.
+    const overridden = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.22'), { ...env, NVIDIA_MODEL: 'meta/llama-3.3-70b-instruct' });
+    assert.equal(overridden.status, 200);
+    assert.equal(JSON.parse(seen.at(-1).options.body).model, 'meta/llama-3.3-70b-instruct');
   } finally {
     globalThis.fetch = originalFetch;
   }
