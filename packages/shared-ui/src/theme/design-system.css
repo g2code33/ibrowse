@@ -4329,6 +4329,105 @@ html {
 }
 
 /* "Continue with these tabs" card (Chrome's new-tab resume card) */
+/* Persistent "Restore pages?" bar: docked INTO the chrome right under
+   the toolbar, on every page/tab, until the user manually answers. */
+.fb-restore-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--fb-bg-elevated, #26262c);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+[data-theme="light"] .fb-restore-bar {
+  background: #f3f0fa;
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+.fb-restore-bar-head {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--fb-text-primary);
+  white-space: nowrap;
+}
+
+.fb-restore-bar-body {
+  font-size: 0.8rem;
+  color: var(--fb-text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fb-restore-bar-spacer {
+  flex: 1;
+}
+
+.fb-restore-bar .fb-restore-toast-btn {
+  padding: 5px 18px;
+  font-size: 0.82rem;
+}
+
+.fb-restore-bar .fb-restore-toast-close {
+  position: static;
+}
+
+/* Settings -> Shortcuts reference tables. */
+.fb-shortcuts-subhead {
+  margin: 10px 0 2px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fb-text-muted);
+}
+
+.fb-shortcuts-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.fb-shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.85rem;
+  color: var(--fb-text-primary);
+}
+
+.fb-shortcut-row > span:first-child {
+  flex: 1;
+}
+
+.fb-shortcut-alt {
+  flex: 0 0 auto !important;
+  color: var(--fb-text-muted);
+  font-size: 0.75rem;
+}
+
+.fb-shortcut-row kbd {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font: 600 0.75rem ui-monospace, 'Cascadia Code', Consolas, monospace;
+  color: var(--fb-text-primary);
+  white-space: nowrap;
+}
+
+[data-theme="light"] .fb-shortcut-row kbd {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.14);
+}
+
+[data-theme="light"] .fb-shortcut-row {
+  border-bottom-color: rgba(0, 0, 0, 0.06);
+}
+
 /* Chrome-style "Restore pages?" floating toast: pinned to the top of
    the new-tab page when the last session is recoverable. */
 .fb-restore-toast {

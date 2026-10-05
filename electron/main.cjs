@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer, webContents } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, protocol, net, shell, safeStorage, Menu, clipboard, session, dialog, screen, Tray, nativeImage, systemPreferences, desktopCapturer, webContents, globalShortcut } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -423,9 +423,29 @@ app.whenReady().then(async () => {
       logger: console
     });
   }
+
+  // Ctrl+Alt+Y: open/focus the main Yayra window from ANYWHERE on the
+  // PC. A standard OS accelerator (works on Windows/macOS/Linux-X11,
+  // unlike the CapsLock chords which need the low-level hook).
+  if (!isSmokeRun && !appModeLaunchUrl) {
+    try {
+      globalShortcut.register('CommandOrControl+Alt+Y', () => {
+        try {
+          if (overlayBridge) overlayBridge.restoreMainWindow();
+          else if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+          else createWindow();
+        } catch { /* window raced destruction */ }
+      });
+    } catch (err) {
+      console.warn(`[yayra] could not register Ctrl+Alt+Y global shortcut: ${err?.message || err}`);
+    }
+  }
 });
 
-app.on('will-quit', () => { try { globalHotkeys?.detach(); } catch { /* exiting */ } });
+app.on('will-quit', () => {
+  try { globalHotkeys?.detach(); } catch { /* exiting */ }
+  try { globalShortcut.unregisterAll(); } catch { /* exiting */ }
+});
 
 function resolveBubbleLogoPath() {
   const candidates = [

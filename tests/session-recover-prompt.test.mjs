@@ -117,17 +117,19 @@ test('Restore all consumes the offer and reopens every tab', async () => {
   }
 });
 
-test('layout: floating Restore toast on top, continue card nicely BELOW the tiles (source-order pin)', () => {
+test('layout: restore bar docked into BOTH chrome layouts; continue card BELOW the tiles (source-order pin)', () => {
   const src = fs.readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
-  const toastAt = src.indexOf('this.appendRestoreToast(newTabPage);');
+  const barCalls = src.split('this.renderRestoreBar(root);').length - 1;
+  assert.equal(barCalls, 2, 'restore bar rendered in desktop AND mobile layouts');
+  assert.equal(src.includes('appendRestoreToast'), false,
+    'the old floating newtab-only toast is gone - it could not survive on real pages (native view paints over HTML overlays)');
   const tilesAt = src.indexOf('frequentSection.appendChild(frequentGrid);');
   const cardAt = src.indexOf('this.appendContinueCard(newTabPage, frequentSites);');
-  assert.ok(toastAt > 0 && tilesAt > 0 && cardAt > 0, 'all three blocks exist');
-  assert.ok(toastAt < tilesAt, 'Restore toast is set up before the tiles (floats on top)');
+  assert.ok(tilesAt > 0 && cardAt > 0, 'tiles + card blocks exist');
   assert.ok(tilesAt < cardAt, 'continue card is appended AFTER the frequent-sites section');
 });
 
-test('Chrome-style "Restore pages?" toast: prompts, X closes only the toast, Restore reopens the session', async () => {
+test('"Restore pages?" bar PERSISTS through searches, tab switches and renders until MANUALLY closed', async () => {
   disk.clear();
   // Previous run with one real tab.
   {
@@ -138,26 +140,37 @@ test('Chrome-style "Restore pages?" toast: prompts, X closes only the toast, Res
     shell.render();
     await sleep(900);
   }
-  // Fresh launch: toast AND card both prompt.
+  // Fresh launch: bar AND card both prompt.
   {
     const { shell, container } = await boot();
-    const toast = container.querySelector('.fb-restore-toast');
-    assert.ok(toast, 'floating Restore pages? toast shown');
+    assert.ok(container.querySelector('.fb-restore-bar'), 'docked Restore pages? bar shown');
     assert.ok(container.querySelector('.fb-continue-card'), 'continue card also present below');
-    // X closes just the toast - the card keeps offering.
-    container.querySelector('.fb-restore-toast-close').click();
-    assert.equal(container.querySelector('.fb-restore-toast'), null, 'toast dismissed');
-    assert.ok(container.querySelector('.fb-continue-card'), 'card still offers the session');
-    assert.ok(shell.state.continueTabs.length > 0, 'offer NOT consumed by closing the toast');
+
+    // The user browses around - the bar must NOT leave.
+    shell.navigateActiveTab('https://example.com/search');
+    assert.ok(container.querySelector('.fb-restore-bar'), 'bar survives a search/navigation');
+    shell.createNewTab();
+    assert.ok(container.querySelector('.fb-restore-bar'), 'bar survives opening a new tab');
+    shell.selectTab(shell.state.tabs[0].id);
+    assert.ok(container.querySelector('.fb-restore-bar'), 'bar survives switching tabs');
+    shell.render();
+    assert.ok(container.querySelector('.fb-restore-bar'), 'bar survives arbitrary re-renders');
+
+    // Only the manual X closes it - and the card keeps offering.
+    container.querySelector('.fb-restore-bar-close').click();
+    assert.equal(container.querySelector('.fb-restore-bar'), null, 'bar dismissed by the user');
+    shell.render();
+    assert.equal(container.querySelector('.fb-restore-bar'), null, 'stays closed once answered');
+    assert.ok(shell.state.continueTabs.length > 0, 'offer NOT consumed by closing the bar');
   }
-  // Next launch: toast returns (X was for that run only); Restore works.
+  // Next launch: bar returns (X was for that run only); Restore works.
   {
     const { shell, container } = await boot();
-    const btn = container.querySelector('.fb-restore-toast-btn');
-    assert.ok(btn, 'toast prompts again on the next run');
+    const btn = container.querySelector('.fb-restore-bar-btn');
+    assert.ok(btn, 'bar prompts again on the next run');
     btn.click();
     assert.equal(shell.getActiveTab().url, 'https://www.youtube.com/', 'Restore reopened the last session');
-    assert.equal(container.querySelector('.fb-restore-toast'), null, 'toast gone after restoring');
+    assert.equal(container.querySelector('.fb-restore-bar'), null, 'bar gone after restoring');
     assert.equal(shell.state.continueTabs.length, 0, 'offer consumed');
   }
 });

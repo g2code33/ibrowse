@@ -576,6 +576,11 @@ export class BrowserShell {
       s.isRadialLauncherOpen ||
       (s.findInPage && s.findInPage.isOpen) ||
       Boolean(s.pendingPasswordSave) ||
+      // The close-session prompt ("Close all tabs / Just close / Keep
+      // all tabs") was MISSING here: with a real site open, the native
+      // page surface painted right over it, so the close button looked
+      // dead on desktop - "sometimes the close button misbehaves".
+      s.closePrompt ||
       s.isPageObscured
     );
   }
@@ -1662,6 +1667,12 @@ export class BrowserShell {
     navbar.appendChild(toolbarActions);
     root.appendChild(navbar);
 
+    // Persistent "Restore pages?" bar: docked INTO the chrome (never
+    // overlaid by the native page surface), on EVERY page and tab,
+    // until the user explicitly answers it - searching, switching tabs
+    // and clicking around never dismiss it.
+    this.renderRestoreBar(root);
+
     // 4b. Bookmarks bar (menu > Bookmarks > Show bookmarks bar) - a real
     // strip of this profile's bookmarks, not a decorative toggle.
     if (this.state.settings.showBookmarksBar) {
@@ -1771,6 +1782,8 @@ export class BrowserShell {
     });
     topBar.appendChild(safariTabbar);
     root.appendChild(topBar);
+    // Same persistent restore prompt on mobile - docked, never lost.
+    this.renderRestoreBar(root);
 
     // Main viewport remains the same shared renderer used by desktop so all
     // internal pages, tools, privacy controls, and web content are preserved.
@@ -3118,11 +3131,9 @@ export class BrowserShell {
       // REAL "Frequently Used Sites" (visit-count driven, cap 5).
       const frequentSites = this.getFrequentSites();
 
-      // Chrome-style recovery, both halves: a floating "Restore pages?"
-      // toast at the TOP of the page (can't be missed), while the
-      // "Continue with these tabs?" card sits nicely below the tiles.
-      this.appendRestoreToast(newTabPage);
-
+      // (The "Restore pages?" prompt is a persistent bar docked into
+      // the chrome - renderRestoreBar - so it survives navigation; the
+      // "Continue with these tabs?" card below the tiles completes it.)
       if (frequentSites.length > 0) {
         const frequentSection = document.createElement('div');
         frequentSection.style.width = '100%';
@@ -3403,6 +3414,9 @@ export class BrowserShell {
         <button class="fb-settings-nav-item ${activeCat === 'tabs' ? 'active' : ''}" data-cat="tabs" data-category="tabs">
           ${Icons.tabs} <span>Tabs & Startup</span>
         </button>
+        <button class="fb-settings-nav-item ${activeCat === 'shortcuts' ? 'active' : ''}" data-cat="shortcuts" data-category="shortcuts">
+          ${Icons.lightning || Icons.settings} <span>Shortcuts</span>
+        </button>
         <button class="fb-settings-nav-item ${activeCat === 'downloads' ? 'active' : ''}" data-cat="downloads" data-category="downloads">
           ${Icons.download} <span>Downloads</span>
         </button>
@@ -3654,6 +3668,45 @@ export class BrowserShell {
                 <p>Inactive tabs reload every 5 minutes so they always show current content when you switch back.</p>
               </div>
               <input type="checkbox" id="fb-in-set-auto-refresh-tabs" ${this.state.settings.autoRefreshBackgroundTabs !== false ? 'checked' : ''} />
+            </div>
+          </section>
+
+          <!-- Shortcuts: every keyboard shortcut, system-wide hotkey and
+               bubble gesture in one reference. -->
+          <section class="fb-settings-group-card" id="sec-shortcuts" style="${activeCat === 'shortcuts' || this.state.settingsSearchQuery ? 'display:flex;' : 'display:none;'}">
+            <h3 class="fb-settings-group-title">${Icons.settings} Shortcuts</h3>
+            <p style="margin:0; font-size:0.82rem; color:var(--fb-text-secondary);">Everything Yayra answers to - in the browser, system-wide anywhere on your PC, and on the floating bubble.</p>
+            <h4 class="fb-shortcuts-subhead">In the browser</h4>
+            <div class="fb-shortcuts-table">
+              <div class="fb-shortcut-row"><span>New tab</span><kbd>Ctrl+T</kbd></div>
+              <div class="fb-shortcut-row"><span>Close tab</span><kbd>Ctrl+W</kbd></div>
+              <div class="fb-shortcut-row"><span>Reopen last closed tab</span><kbd>Ctrl+Shift+T</kbd></div>
+              <div class="fb-shortcut-row"><span>New private window</span><kbd>Ctrl+Shift+N</kbd></div>
+              <div class="fb-shortcut-row"><span>Focus the address bar</span><kbd>Ctrl+L</kbd> <span class="fb-shortcut-alt">or</span> <kbd>Alt+D</kbd></div>
+              <div class="fb-shortcut-row"><span>Bookmark this page</span><kbd>Ctrl+D</kbd></div>
+              <div class="fb-shortcut-row"><span>Bookmark all open tabs</span><kbd>Ctrl+Shift+D</kbd></div>
+              <div class="fb-shortcut-row"><span>Toggle the bookmarks bar</span><kbd>Ctrl+Shift+B</kbd></div>
+              <div class="fb-shortcut-row"><span>Reload</span><kbd>Ctrl+R</kbd> <span class="fb-shortcut-alt">or</span> <kbd>F5</kbd></div>
+              <div class="fb-shortcut-row"><span>Hard reload (clear this site's cache)</span><kbd>Ctrl+Shift+R</kbd> <span class="fb-shortcut-alt">or</span> <kbd>Ctrl+F5</kbd></div>
+              <div class="fb-shortcut-row"><span>History</span><kbd>Ctrl+H</kbd></div>
+              <div class="fb-shortcut-row"><span>Downloads</span><kbd>Ctrl+J</kbd></div>
+              <div class="fb-shortcut-row"><span>Find in page</span><kbd>Ctrl+F</kbd></div>
+              <div class="fb-shortcut-row"><span>Stop loading / close menus &amp; overlays</span><kbd>Esc</kbd></div>
+            </div>
+            <h4 class="fb-shortcuts-subhead">System-wide (work anywhere on your PC)</h4>
+            <div class="fb-shortcuts-table">
+              <div class="fb-shortcut-row"><span>Open main Yayra from anywhere</span><kbd>Ctrl+Alt+Y</kbd></div>
+              <div class="fb-shortcut-row"><span>Open/restore main Yayra (low-level hook)</span><kbd>CapsLock+Y</kbd></div>
+              <div class="fb-shortcut-row"><span>Open yayra mini</span><kbd>CapsLock+Shift+R</kbd></div>
+              <div class="fb-shortcut-row"><span>Hide / bring back yayra mini</span><kbd>Esc (hold) + F1</kbd></div>
+            </div>
+            <h4 class="fb-shortcuts-subhead">Floating bubble gestures</h4>
+            <div class="fb-shortcuts-table">
+              <div class="fb-shortcut-row"><span>Open / hide yayra mini</span><kbd>Single click</kbd></div>
+              <div class="fb-shortcut-row"><span>Radial quick menu</span><kbd>Double click</kbd></div>
+              <div class="fb-shortcut-row"><span>Lock / unlock bubble position</span><kbd>Triple click</kbd></div>
+              <div class="fb-shortcut-row"><span>Full bubble menu</span><kbd>Right-click</kbd></div>
+              <div class="fb-shortcut-row"><span>Move the bubble</span><kbd>Drag</kbd></div>
             </div>
           </section>
 
@@ -6464,7 +6517,11 @@ export class BrowserShell {
    * consumed exactly once by the next launch (restoreCloseSession()).
    * ----------------------------------------------------------- */
   requestAppClose() {
-    const realTabs = this.state.tabs.filter((t) => !t.isPrivate && t.url && t.url !== 'yayra://newtab');
+    // Only REAL web pages warrant the session prompt. Internal pages
+    // (Settings, History, ...) used to count as "real tabs", so closing
+    // an app that showed only Settings interrogated the user about
+    // nothing - and could even save yayra:// URLs as the session.
+    const realTabs = this.state.tabs.filter((t) => !t.isPrivate && /^https?:\/\//i.test(t.url || ''));
     if (!realTabs.length || typeof document === 'undefined') {
       try { this.windowControls?.close(); } catch { /* already closing */ }
       return;
@@ -6478,7 +6535,7 @@ export class BrowserShell {
     const tabs = mode === 'fresh'
       ? []
       : this.state.tabs
-        .filter((t) => !t.isPrivate && t.url && t.url !== 'yayra://newtab')
+        .filter((t) => !t.isPrivate && /^https?:\/\//i.test(t.url || ''))
         .map((t) => ({ url: t.url, title: t.title || '' }));
     if (typeof localStorage !== 'undefined') {
       try {
@@ -9583,36 +9640,38 @@ export class BrowserShell {
   }
 
   /**
-   * Chrome's "Restore pages?" toast: a floating prompt pinned to the
-   * top of the new-tab page whenever the previous session's tabs are
-   * recoverable - exactly like Chrome's "Chrome didn't shut down
-   * correctly" card. "Restore" reopens the last session's tabs; the X
-   * closes just the toast (this run) while the "Continue with these
-   * tabs?" card below the tiles keeps offering them.
+   * Chrome's "Restore pages?" prompt, made PERSISTENT: a bar docked
+   * into the chrome (right under the toolbar) whenever the previous
+   * session's tabs are recoverable. Because it is part of the layout -
+   * not an overlay - the native page surface can never cover it, and it
+   * stays through searching, tab switches and every other action until
+   * the user MANUALLY answers: Restore reopens the session; the X is
+   * the only thing that closes the prompt.
    */
-  appendRestoreToast(newTabPage) {
+  renderRestoreBar(root) {
     const tabs = (this.state.continueTabs || []).filter((t) => /^https?:\/\//i.test(t?.url || ''));
     if (!tabs.length || this._restoreToastClosed) return;
     const continueSnapshotId = this.state.continueSavedAt || 'no-snapshot-id';
     if (this.state.settings.continueDismissedAt === continueSnapshotId) return;
-    const toast = document.createElement('div');
-    toast.className = 'fb-restore-toast';
-    toast.setAttribute('role', 'alertdialog');
-    toast.setAttribute('aria-label', 'Restore pages?');
-    toast.innerHTML = `
-      <button class="fb-restore-toast-close" aria-label="Dismiss" title="Dismiss">${Icons.close}</button>
-      <div class="fb-restore-toast-head">Restore pages?</div>
-      <div class="fb-restore-toast-body">Yayra closed before you finished - restore ${tabs.length === 1 ? 'the tab' : `${tabs.length} tabs`} from your last session.</div>
-      <div class="fb-restore-toast-actions"><button class="fb-restore-toast-btn">Restore</button></div>
+    const bar = document.createElement('div');
+    bar.className = 'fb-restore-bar';
+    bar.setAttribute('role', 'alertdialog');
+    bar.setAttribute('aria-label', 'Restore pages?');
+    bar.innerHTML = `
+      <span class="fb-restore-bar-head">Restore pages?</span>
+      <span class="fb-restore-bar-body">Yayra closed before you finished - ${tabs.length === 1 ? 'one tab' : `${tabs.length} tabs`} from your last session can come back.</span>
+      <span class="fb-restore-bar-spacer"></span>
+      <button class="fb-restore-toast-btn fb-restore-bar-btn">Restore</button>
+      <button class="fb-restore-toast-close fb-restore-bar-close" aria-label="Dismiss" title="Dismiss">${Icons.close}</button>
     `;
-    toast.querySelector('.fb-restore-toast-btn')?.addEventListener('click', () => {
+    bar.querySelector('.fb-restore-bar-btn')?.addEventListener('click', () => {
       this.restoreContinueTabs(tabs.map((t) => ({ url: t.url, title: t.title || t.url })));
     });
-    toast.querySelector('.fb-restore-toast-close')?.addEventListener('click', () => {
+    bar.querySelector('.fb-restore-bar-close')?.addEventListener('click', () => {
       this._restoreToastClosed = true;
       this.render();
     });
-    newTabPage.appendChild(toast);
+    root.appendChild(bar);
   }
 
   /**
@@ -9622,8 +9681,8 @@ export class BrowserShell {
    * prompt - the user explicitly recovers (Restore all / click one) or
    * rejects (No thanks). "No thanks" remembers the dismissed snapshot
    * so the same session never re-prompts, while the NEXT session's tabs
-   * prompt again. Sits below the frequent tiles; the floating
-   * "Restore pages?" toast (appendRestoreToast) covers the top.
+   * prompt again. Sits below the frequent tiles; the persistent
+   * "Restore pages?" bar (renderRestoreBar) sits docked in the chrome.
    */
   appendContinueCard(newTabPage, frequentSites = []) {
     const continueEntries = [];
