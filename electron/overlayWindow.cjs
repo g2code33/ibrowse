@@ -141,9 +141,34 @@ function createOverlayBridge({
    * utilities use. Re-asserting when already topmost is a no-op for the OS,
    * so the heartbeat causes no flicker.
    */
+  /** Both overlay surfaces (bubble + mini panel) on screen at once? */
+  function bothOverlaySurfacesVisible() {
+    try {
+      const bubbleVisible = Boolean(overlayWin && !overlayWin.isDestroyed() && overlayWin.isVisible?.());
+      const miniVisible = Boolean(miniWin && !miniWin.isDestroyed() && miniWin.isVisible?.());
+      return bubbleVisible && miniVisible;
+    } catch {
+      return false;
+    }
+  }
+
   function assertTopmost(win) {
     if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return;
     try {
+      // WINDOWS FIX - never assert a HIDDEN window: Chromium's
+      // always-on-top path on Windows issues SetWindowPos with
+      // SWP_SHOWWINDOW, which RE-SHOWS the window. The mini panel's
+      // heartbeat/blur guards kept resurrecting it right after hide(),
+      // which is why the titlebar X, "open full browser" and the
+      // bubble's single-click hide all looked dead on Windows PCs
+      // (the panel hid for a frame and instantly came back).
+      if (typeof win.isVisible === 'function' && !win.isVisible()) return;
+      // WINDOWS FIX - no sibling z-fights: while BOTH the bubble and
+      // the mini panel are on screen, their two out-of-phase heartbeats
+      // re-inserted each window above the other every tick, visibly
+      // BLINKING the pair. If the topmost flag is already in place
+      // there is nothing to repair - skip the reorder entirely.
+      if (bothOverlaySurfacesVisible() && typeof win.isAlwaysOnTop === 'function' && win.isAlwaysOnTop()) return;
       win.setAlwaysOnTop(true, 'screen-saver');
       if (typeof win.moveTop === 'function') win.moveTop();
       if (typeof win.setVisibleOnAllWorkspaces === 'function') {
