@@ -24,7 +24,14 @@
  *      - gitignored, and packaged into the app by electron-builder's
  *      "electron/**" files glob so it travels with a built installer if
  *      present at build time.
- * Returns null (not a throw) when neither source is configured, so callers
+ *   3. google-auth.config.json in the app's per-user config directory
+ *      (~/.config/yayra on Linux, %APPDATA%\yayra on Windows,
+ *      ~/Library/Application Support/yayra on macOS). This is what lets an
+ *      ALREADY-INSTALLED build be configured without rebuilding: drop the
+ *      file there and restart Yayra. A machine-local file deliberately wins
+ *      over the file baked into the installer (source 2 below it), so users
+ *      can point an official build at their own OAuth client.
+ * Returns null (not a throw) when no source is configured, so callers
  * can surface a clear "not configured" state instead of crashing.
  */
 
@@ -40,16 +47,38 @@ function readConfigField(fs, configPath, field) {
   }
 }
 
-function resolveGoogleClientId({ env = process.env, fs = require('node:fs'), configDir = __dirname } = {}) {
-  const fromEnv = env.YAYRA_GOOGLE_CLIENT_ID && env.YAYRA_GOOGLE_CLIENT_ID.trim();
-  if (fromEnv) return fromEnv;
-  return readConfigField(fs, path.join(configDir, 'google-auth.config.json'), 'clientId');
+/**
+ * Per-user config directory for the installed app, matching where Electron
+ * puts userData for an app named "yayra" (overlay-settings.json etc. live in
+ * the same place). Pure computation - no electron dependency - so it stays
+ * unit-testable in plain Node.
+ */
+function defaultUserConfigDir({ env = process.env, platform = process.platform, homedir } = {}) {
+  const home = homedir || require('node:os').homedir();
+  if (platform === 'win32') {
+    return path.join(env.APPDATA && env.APPDATA.trim() ? env.APPDATA : path.join(home, 'AppData', 'Roaming'), 'yayra');
+  }
+  if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'yayra');
+  const xdg = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() ? env.XDG_CONFIG_HOME : path.join(home, '.config');
+  return path.join(xdg, 'yayra');
 }
 
-function resolveGoogleClientSecret({ env = process.env, fs = require('node:fs'), configDir = __dirname } = {}) {
-  const fromEnv = env.YAYRA_GOOGLE_CLIENT_SECRET && env.YAYRA_GOOGLE_CLIENT_SECRET.trim();
+function resolveField(field, envName, { env, fs, configDir, userConfigDir }) {
+  const fromEnv = env[envName] && env[envName].trim();
   if (fromEnv) return fromEnv;
-  return readConfigField(fs, path.join(configDir, 'google-auth.config.json'), 'clientSecret');
+  // Machine-local file first: it lets an installed build be (re)configured
+  // without rebuilding, and overrides whatever shipped inside the installer.
+  const fromUserDir = readConfigField(fs, path.join(userConfigDir, 'google-auth.config.json'), field);
+  if (fromUserDir) return fromUserDir;
+  return readConfigField(fs, path.join(configDir, 'google-auth.config.json'), field);
 }
 
-module.exports = { resolveGoogleClientId, resolveGoogleClientSecret };
+function resolveGoogleClientId({ env = process.env, fs = require('node:fs'), configDir = __dirname, userConfigDir = defaultUserConfigDir({ env }) } = {}) {
+  return resolveField('clientId', 'YAYRA_GOOGLE_CLIENT_ID', { env, fs, configDir, userConfigDir });
+}
+
+function resolveGoogleClientSecret({ env = process.env, fs = require('node:fs'), configDir = __dirname, userConfigDir = defaultUserConfigDir({ env }) } = {}) {
+  return resolveField('clientSecret', 'YAYRA_GOOGLE_CLIENT_SECRET', { env, fs, configDir, userConfigDir });
+}
+
+module.exports = { resolveGoogleClientId, resolveGoogleClientSecret, defaultUserConfigDir };

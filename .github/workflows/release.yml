@@ -153,6 +153,18 @@ jobs:
           else
             echo "signed=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Inject Google sign-in config from repo secrets (optional)
+        shell: bash
+        env:
+          YAYRA_GOOGLE_CLIENT_ID: ${{ secrets.YAYRA_GOOGLE_CLIENT_ID }}
+          YAYRA_GOOGLE_CLIENT_SECRET: ${{ secrets.YAYRA_GOOGLE_CLIENT_SECRET }}
+        run: |
+          if [ -n "$YAYRA_GOOGLE_CLIENT_ID" ] && [ -n "$YAYRA_GOOGLE_CLIENT_SECRET" ]; then
+            node -e "require('fs').writeFileSync('electron/google-auth.config.json', JSON.stringify({ clientId: process.env.YAYRA_GOOGLE_CLIENT_ID.trim(), clientSecret: process.env.YAYRA_GOOGLE_CLIENT_SECRET.trim() }))"
+            echo "Google sign-in config baked into this build."
+          else
+            echo "::warning:: YAYRA_GOOGLE_CLIENT_ID / YAYRA_GOOGLE_CLIENT_SECRET repo secrets not set - installed builds will show 'Google sign-in isn't configured' until users drop google-auth.config.json into their yayra config directory."
+          fi
       - run: npm run package:linux
       - run: npm run verify:packaging
       - name: Sign Linux packages and AppImage
@@ -225,6 +237,18 @@ jobs:
             "CSC_IDENTITY_AUTO_DISCOVERY=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
+      - name: Inject Google sign-in config from repo secrets (optional)
+        shell: bash
+        env:
+          YAYRA_GOOGLE_CLIENT_ID: ${{ secrets.YAYRA_GOOGLE_CLIENT_ID }}
+          YAYRA_GOOGLE_CLIENT_SECRET: ${{ secrets.YAYRA_GOOGLE_CLIENT_SECRET }}
+        run: |
+          if [ -n "$YAYRA_GOOGLE_CLIENT_ID" ] && [ -n "$YAYRA_GOOGLE_CLIENT_SECRET" ]; then
+            node -e "require('fs').writeFileSync('electron/google-auth.config.json', JSON.stringify({ clientId: process.env.YAYRA_GOOGLE_CLIENT_ID.trim(), clientSecret: process.env.YAYRA_GOOGLE_CLIENT_SECRET.trim() }))"
+            echo "Google sign-in config baked into this build."
+          else
+            echo "::warning:: YAYRA_GOOGLE_CLIENT_ID / YAYRA_GOOGLE_CLIENT_SECRET repo secrets not set - installed builds will show 'Google sign-in isn't configured' until users drop google-auth.config.json into their yayra config directory."
+          fi
       - run: npm run package:win
       - name: Sign Windows executables with the configured PFX
         shell: pwsh

@@ -101,6 +101,21 @@ Pick one:
   ```
   This file is included by electron-builder's existing `electron/**/*` files
   glob, so it travels with the built installer.
+- **Already-installed builds (no rebuild needed):** copy the same JSON file
+  into the app's per-user config directory and restart Yayra:
+  - Linux: `~/.config/yayra/google-auth.config.json`
+  - Windows: `%APPDATA%\yayra\google-auth.config.json`
+  - macOS: `~/Library/Application Support/yayra/google-auth.config.json`
+
+  A machine-local file deliberately **wins** over whatever was baked into the
+  installer, so you can point an official build at your own OAuth client.
+- **CI releases (GitHub Actions):** the repo checkout in CI never contains
+  the gitignored file, so `release.yml` writes it from two repository
+  secrets before packaging the Linux and Windows desktop builds. Add them
+  under **GitHub repo → Settings → Secrets and variables → Actions**:
+  `YAYRA_GOOGLE_CLIENT_ID` and `YAYRA_GOOGLE_CLIENT_SECRET`. Every release
+  built after that ships with Sign in with Google working out of the box;
+  without them the step logs a warning and builds proceed unconfigured.
 
 If either value is missing, the "Sign in with Google" button in Settings →
 Account will show a clear "not configured" error instead of failing deep
