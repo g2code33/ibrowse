@@ -4794,11 +4794,18 @@ export class BrowserShell {
     this.state.aiConversation.push(live);
     this.state.aiBusy = true;
     this.render();
+    let thinkingChars = 0;
     const paintLiveAiBubble = () => {
       try {
         const bodies = this.container?.querySelectorAll?.('.fb-ai-msg-body');
         const el = bodies && bodies.length ? bodies[bodies.length - 1] : null;
-        if (el) el.textContent = live.content || 'Thinking\u2026';
+        if (!el) return;
+        // Reasoning models (Kimi K3...) think before answering - show live
+        // progress so the bubble is NEVER frozen while the model works.
+        el.textContent = live.content
+          || (thinkingChars > 0
+            ? `Thinking\u2026 (${Math.max(1, Math.round(thinkingChars / 4))} reasoning tokens)`
+            : 'Thinking\u2026');
       } catch { /* painting is best-effort; state holds the truth */ }
     };
     let result;
@@ -4807,6 +4814,10 @@ export class BrowserShell {
         history,
         onToken: (token) => {
           live.content += token;
+          paintLiveAiBubble();
+        },
+        onThinking: (delta) => {
+          thinkingChars += String(delta).length;
           paintLiveAiBubble();
         }
       });

@@ -424,6 +424,42 @@ test('SPEED: without {stream:true} the buffered JSON contract is unchanged (old 
   }
 });
 
+test('SPEED: reasoning models (Kimi K3) get reasoning_effort "low" + a 4096 token budget so thinking never starves or stalls the answer', async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (target, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+  };
+  try {
+    // Default model (kimi-k3) -> reasoning model -> low effort by default.
+    const r1 = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.81'), { NVIDIA_API_KEYS: 'nvapi-r1' });
+    assert.equal(r1.status, 200);
+    assert.equal(bodies[0].model, 'moonshotai/kimi-k3');
+    assert.equal(bodies[0].reasoning_effort, 'low', 'reasoning models default to low effort = fast answers');
+    assert.equal(bodies[0].max_tokens, 4096, 'budget big enough that thinking cannot starve the answer');
+
+    // Non-reasoning model -> NO reasoning_effort key at all (strict
+    // OpenAI-compatible servers reject unknown parameters).
+    const r2 = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.82'), { NVIDIA_API_KEYS: 'nvapi-r2', NVIDIA_MODEL: 'meta/llama-3.3-70b-instruct' });
+    assert.equal(r2.status, 200);
+    assert.equal('reasoning_effort' in bodies[1], false, 'non-reasoning models get no reasoning_effort key');
+
+    // Operator overrides, no code changes: effort level and token budget.
+    const r3 = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.83'), { NVIDIA_API_KEYS: 'nvapi-r3', NVIDIA_REASONING_EFFORT: 'max', NVIDIA_MAX_TOKENS: '16384' });
+    assert.equal(r3.status, 200);
+    assert.equal(bodies[2].reasoning_effort, 'max');
+    assert.equal(bodies[2].max_tokens, 16384);
+
+    // NVIDIA_REASONING_EFFORT=off sends nothing even for reasoning models.
+    const r4 = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.84'), { NVIDIA_API_KEYS: 'nvapi-r4', NVIDIA_REASONING_EFFORT: 'off' });
+    assert.equal(r4.status, 200);
+    assert.equal('reasoning_effort' in bodies[3], false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('ai route validates input and reports honest statuses: 405, 400s, 429 when every key is busy', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'busy' }), { status: 429 });

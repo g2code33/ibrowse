@@ -118,6 +118,8 @@ npx wrangler@4 secret put NVIDIA_API_KEYS --config wrangler.worker.toml
 
 Resolution order per key: its own model (`NVIDIA_MODEL_n` / `key@model`) → the pool-wide `NVIDIA_MODEL` → the built-in default (`moonshotai/kimi-k3`).
 
+**Reasoning speed** — reasoning models (Kimi K3, DeepSeek-R1, …) "think" before answering; unconfigured they think at max effort (tens of seconds before the first visible word) and the thinking consumes the token budget. The worker therefore sends `reasoning_effort: "low"` for reasoning models (fast answers, still smart) and a `max_tokens` budget of 4096 so thinking can never starve the answer. Tune with worker vars, no code changes: `NVIDIA_REASONING_EFFORT` = `low` | `medium` | `high` | `max` | `off` (send nothing), and `NVIDIA_MAX_TOKENS` (e.g. `16384`). Non-reasoning models never get a `reasoning_effort` key.
+
 **Local deploys** don't need `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`: `npm run deploy:cloudflare:worker` falls back to your `wrangler login` session when they're absent (CI still uses the env-var path).
 
 Redeploy the Worker after changing its code (`npm run deploy:cloudflare:worker`); secrets persist across deployments.

@@ -428,3 +428,50 @@ test('Shell STREAM: a failed ask finalizes the live bubble as an honest error (n
   assert.equal(msg.streaming, false);
   assert.equal(msg.content, describeAiReason('rate-limited'));
 });
+
+test('STREAM THINKING: reasoning deltas fire onThinking live and NEVER pollute the answer', async () => {
+  const service = new YayraAiService({
+    storage: makeStorage(),
+    fetchImpl: async () => sseResponse([
+      'data: {"choices":[{"delta":{"reasoning_content":"step one... "}}]}\n\n',
+      'data: {"choices":[{"delta":{"reasoning_content":"step two... "}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"Final answer."}}]}\n\n',
+      'data: [DONE]\n\n'
+    ])
+  });
+  const tokens = [];
+  const thoughts = [];
+  const result = await service.ask('hi', { onToken: (t) => tokens.push(t), onThinking: (t) => thoughts.push(t) });
+  assert.deepEqual(thoughts, ['step one... ', 'step two... '], 'thinking surfaced live');
+  assert.deepEqual(tokens, ['Final answer.']);
+  assert.equal(result.answer, 'Final answer.', 'reasoning never leaks into the answer');
+});
+
+test('Shell STREAM THINKING: the live bubble shows reasoning progress instead of a frozen Thinking...', async () => {
+  let sawProgress = false;
+  let container;
+  const aiService = {
+    getConfig: async () => ({ ...AI_DEFAULTS }),
+    updateConfig: async (p) => ({ ...AI_DEFAULTS, ...p }),
+    // Deterministic: fire onThinking mid-flight, then check the live bubble
+    // BEFORE resolving - the progress text must already be painted.
+    ask: (prompt, { onThinking } = {}) => new Promise((resolve) => {
+      setTimeout(() => {
+        onThinking('some reasoning tokens streaming in from the model right now');
+        const bodies = container.querySelectorAll('.fb-ai-msg-body');
+        const el = bodies[bodies.length - 1];
+        sawProgress = /reasoning tokens/.test(el.textContent);
+        resolve({ success: true, answer: 'Hello!' });
+      }, 0);
+    }),
+    testConnection: async () => ({ success: true })
+  };
+  const made = makeShell({ aiService });
+  const shell = made.shell;
+  container = made.container;
+  shell.state.tabs[0].url = 'yayra://ai';
+  shell.render(container);
+  await shell.askYayraAi('hi');
+  assert.equal(sawProgress, true, 'bubble showed "Thinking… (N reasoning tokens)" while the model thought');
+  assert.equal(shell.state.aiConversation[1].content, 'Hello!');
+});

@@ -143,10 +143,41 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
   // non-streamed JSON contract stays for old clients and simple callers.
   const wantStream = body?.stream === true;
 
+  // SPEED + CORRECTNESS for reasoning models (Kimi K3, DeepSeek-R1, ...):
+  // these models "think" (reasoning_content) BEFORE answering. Left
+  // unconfigured they think at max effort - tens of seconds before the
+  // first visible word - and the thinking also consumes max_tokens, which
+  // with a small budget can leave the actual answer EMPTY or truncated.
+  // So: (1) reasoning models default to reasoning_effort "low" - snappy
+  // answers, still smart (override with the NVIDIA_REASONING_EFFORT var:
+  // low|medium|high|max, or "off" to send nothing); (2) the token budget
+  // is 4096 (override with NVIDIA_MAX_TOKENS) so thinking can never
+  // starve the answer. Non-reasoning models get NO reasoning_effort key -
+  // strict OpenAI-compatible servers reject unknown parameters.
+  const REASONING_MODEL_RE = /kimi|deepseek(-ai\/)?deepseek-r1|qwq|thinking|reasoning|gpt-oss|openai\/o[134]/i;
+  const reasoningEffortFor = (model) => {
+    const configured = typeof env?.NVIDIA_REASONING_EFFORT === 'string' ? env.NVIDIA_REASONING_EFFORT.trim().toLowerCase() : '';
+    if (configured === 'off' || configured === 'none') return null;
+    if (['low', 'medium', 'high', 'max'].includes(configured)) return configured;
+    return REASONING_MODEL_RE.test(model) ? 'low' : null;
+  };
+  const maxTokens = Number.parseInt(env?.NVIDIA_MAX_TOKENS, 10) > 0 ? Number.parseInt(env.NVIDIA_MAX_TOKENS, 10) : 4096;
+
   // The request body is built PER KEY: every pool entry carries its own
   // model (NVIDIA_MODEL_n / key@model), so a failover hop to another key
   // automatically speaks that key's model.
-  const bodyFor = (model) => JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: wantStream });
+  const bodyFor = (model) => {
+    const effort = reasoningEffortFor(model);
+    return JSON.stringify({
+      model,
+      messages,
+      temperature: 0.6,
+      top_p: 0.9,
+      max_tokens: maxTokens,
+      stream: wantStream,
+      ...(effort ? { reasoning_effort: effort } : {})
+    });
+  };
 
   // Round-robin start (random per isolate, advancing per request) spreads
   // simultaneous users across DIFFERENT keys; the failover walk tries the

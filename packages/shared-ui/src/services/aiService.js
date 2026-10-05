@@ -118,7 +118,7 @@ export class YayraAiService {
    * 'not-configured', 'backend-not-deployed', 'auth-failed',
    * 'rate-limited', 'provider-error', 'network-error', 'empty-answer'.
    */
-  async ask(prompt, { history = [], signal, onToken } = {}) {
+  async ask(prompt, { history = [], signal, onToken, onThinking } = {}) {
     const text = String(prompt || '').trim();
     if (!text) return { success: false, reason: 'empty-answer' };
     const cfg = await this.getConfig();
@@ -136,12 +136,12 @@ export class YayraAiService {
 
     if (cfg.provider === 'openai-compatible') {
       if (!cfg.endpoint) return { success: false, reason: 'not-configured' };
-      return this._askOpenAiCompatible(cfg, messages, signal, onToken);
+      return this._askOpenAiCompatible(cfg, messages, signal, onToken, onThinking);
     }
-    return this._askYayraBackend(messages, signal, onToken);
+    return this._askYayraBackend(messages, signal, onToken, onThinking);
   }
 
-  async _askYayraBackend(messages, signal, onToken) {
+  async _askYayraBackend(messages, signal, onToken, onThinking) {
     const wantStream = typeof onToken === 'function';
     try {
       const response = await this._fetch(this.yayraEndpoint, {
@@ -165,7 +165,7 @@ export class YayraAiService {
       // stream yet answers with JSON - detected by content-type, handled by
       // the buffered path below, zero breakage.
       if (wantStream && isEventStream(response)) {
-        const answer = (await readSseAnswer(response, onToken)).trim();
+        const answer = (await readSseAnswer(response, onToken, onThinking)).trim();
         if (!answer) return { success: false, reason: 'empty-answer' };
         return { success: true, answer };
       }
@@ -180,7 +180,7 @@ export class YayraAiService {
     }
   }
 
-  async _askOpenAiCompatible(cfg, messages, signal, onToken) {
+  async _askOpenAiCompatible(cfg, messages, signal, onToken, onThinking) {
     const wantStream = typeof onToken === 'function';
     const url = normalizeChatCompletionsUrl(cfg.endpoint);
     try {
@@ -211,7 +211,7 @@ export class YayraAiService {
       }
 
       if (wantStream && isEventStream(response)) {
-        const answer = (await readSseAnswer(response, onToken)).trim();
+        const answer = (await readSseAnswer(response, onToken, onThinking)).trim();
         if (!answer) return { success: false, reason: 'empty-answer' };
         return { success: true, answer };
       }
@@ -249,7 +249,7 @@ function isEventStream(response) {
  * returning the assembled answer. Non-content deltas (e.g. a reasoning
  * model's thinking stream) are skipped - only real answer text is painted.
  */
-export async function readSseAnswer(response, onToken) {
+export async function readSseAnswer(response, onToken, onThinking) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -271,6 +271,14 @@ export async function readSseAnswer(response, onToken) {
       if (typeof delta === 'string' && delta) {
         answer += delta;
         if (typeof onToken === 'function') onToken(delta);
+        continue;
+      }
+      // Reasoning models (Kimi K3, DeepSeek-R1, ...) stream their thinking
+      // as reasoning_content before any answer text - surface it so the UI
+      // can show LIVE progress instead of a frozen "Thinking...".
+      const thinking = json?.choices?.[0]?.delta?.reasoning_content;
+      if (typeof thinking === 'string' && thinking && typeof onThinking === 'function') {
+        onThinking(thinking);
       }
     }
   }
