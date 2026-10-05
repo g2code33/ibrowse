@@ -342,6 +342,37 @@ test('ai route spreads consecutive requests across DIFFERENT keys (round-robin, 
   }
 });
 
+test('EVERY key can carry ITS OWN model: NVIDIA_MODEL_n next to NVIDIA_API_KEY_n, or inline key@model', async () => {
+  const originalFetch = globalThis.fetch;
+  const modelByKey = new Map();
+  globalThis.fetch = async (target, options) => {
+    const key = options.headers.Authorization.replace('Bearer ', '');
+    modelByKey.set(key, JSON.parse(options.body).model);
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+  };
+  try {
+    const env = {
+      // Inline style inside the list secret: key@model.
+      NVIDIA_API_KEYS: 'nvapi-pk-list1@meta/llama-3.3-70b-instruct, nvapi-pk-list2',
+      // Numbered style: NVIDIA_MODEL_n pairs with NVIDIA_API_KEY_n.
+      NVIDIA_API_KEY_1: 'nvapi-pk-num1',
+      NVIDIA_MODEL_1: 'deepseek-ai/deepseek-v3.2',
+      NVIDIA_API_KEY_2: 'nvapi-pk-num2' // no model -> pool default
+    };
+    // Round-robin spreads consecutive requests over all 4 keys.
+    for (let i = 0; i < 4; i += 1) {
+      const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.66'), env);
+      assert.equal(response.status, 200);
+    }
+    assert.equal(modelByKey.get('nvapi-pk-list1'), 'meta/llama-3.3-70b-instruct', 'inline key@model respected');
+    assert.equal(modelByKey.get('nvapi-pk-num1'), 'deepseek-ai/deepseek-v3.2', 'NVIDIA_MODEL_1 pairs with NVIDIA_API_KEY_1');
+    assert.equal(modelByKey.get('nvapi-pk-list2'), 'moonshotai/kimi-k3', 'keys without their own model fall back to the default');
+    assert.equal(modelByKey.get('nvapi-pk-num2'), 'moonshotai/kimi-k3', 'numbered key without NVIDIA_MODEL_n falls back too');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('ai route validates input and reports honest statuses: 405, 400s, 429 when every key is busy', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'busy' }), { status: 429 });

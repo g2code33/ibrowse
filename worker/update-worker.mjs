@@ -58,21 +58,41 @@ export default {
  *      whitespace or newlines (easiest: one `wrangler secret put` call).
  *   2. NVIDIA_API_KEY_1, NVIDIA_API_KEY_2, ... NVIDIA_API_KEY_42 - numbered
  *      individual secrets, so keys can be added/revoked one at a time.
+ *
+ * EVERY KEY CAN CARRY ITS OWN MODEL (per-key model routing):
+ *   - numbered keys: bind NVIDIA_MODEL_n next to NVIDIA_API_KEY_n
+ *     (e.g. NVIDIA_MODEL_3 = "meta/llama-3.3-70b-instruct");
+ *   - list entries: append the model inline as key@model
+ *     (e.g. "nvapi-xxx@moonshotai/kimi-k3, nvapi-yyy" - keys are
+ *     nvapi-... strings, so '@' is a safe separator);
+ *   - any key WITHOUT its own model uses NVIDIA_MODEL, then the default.
  * Keys never appear in wrangler.worker.toml or the repo - secrets only.
+ * Returns [{ key, model }, ...].
  */
 function collectNvidiaKeys(env) {
-  const keys = [];
-  const push = (raw) => {
-    for (const k of String(raw || '').split(/[\s,;]+/)) {
-      if (k && !keys.includes(k)) keys.push(k);
+  const entries = [];
+  const seen = new Set();
+  const defaultModel = env?.NVIDIA_MODEL || NVIDIA_DEFAULT_MODEL;
+  const push = (raw, boundModel) => {
+    for (const token of String(raw || '').split(/[\s,;]+/)) {
+      if (!token) continue;
+      const at = token.indexOf('@');
+      const key = at > 0 ? token.slice(0, at) : token;
+      const inlineModel = at > 0 ? token.slice(at + 1) : '';
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ key, model: inlineModel || boundModel || defaultModel });
     }
   };
   push(env?.NVIDIA_API_KEYS);
   const numbered = Object.keys(env || {})
     .filter((name) => /^NVIDIA_API_KEY_\d+$/.test(name))
     .sort((a, b) => Number(a.slice(15)) - Number(b.slice(15)));
-  for (const name of numbered) push(env[name]);
-  return keys;
+  for (const name of numbered) {
+    const n = name.slice(15); // 'NVIDIA_API_KEY_'.length
+    push(env[name], typeof env[`NVIDIA_MODEL_${n}`] === 'string' && env[`NVIDIA_MODEL_${n}`] ? env[`NVIDIA_MODEL_${n}`] : '');
+  }
+  return entries;
 }
 
 /** Only well-formed chat turns reach NVIDIA; everything else is clamped. */
@@ -116,8 +136,10 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
   const messages = sanitizeAiMessages(body?.messages);
   if (!messages) return new Response(JSON.stringify({ error: 'invalid_messages' }), { status: 400, headers });
 
-  const model = env?.NVIDIA_MODEL || NVIDIA_DEFAULT_MODEL;
-  const upstreamBody = JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: false });
+  // The request body is built PER KEY: every pool entry carries its own
+  // model (NVIDIA_MODEL_n / key@model), so a failover hop to another key
+  // automatically speaks that key's model.
+  const bodyFor = (model) => JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: false });
 
   // Round-robin start (random per isolate, advancing per request) spreads
   // simultaneous users across DIFFERENT keys; the failover walk tries the
@@ -130,7 +152,7 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
   let lastStatus = 0;
 
   for (let i = 0; i < keys.length && attempted < maxAttempts; i += 1) {
-    const key = keys[(start + i) % keys.length];
+    const { key, model } = keys[(start + i) % keys.length];
     const benchedUntil = keyBench.get(key) || 0;
     if (benchedUntil > now) continue; // benched key: let it cool down
     attempted += 1;
@@ -140,7 +162,7 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
       upstream = await fetch(env?.NVIDIA_BASE_URL || NVIDIA_CHAT_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: upstreamBody
+        body: bodyFor(model)
       });
     } catch {
       lastStatus = 0;

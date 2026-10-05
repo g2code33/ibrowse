@@ -102,6 +102,22 @@ Both styles are merged and deduplicated. Until at least one key is bound, `/api/
 
 Use any model id from <https://build.nvidia.com> (the id shown on the model page, e.g. `moonshotai/kimi-k3`, `meta/llama-3.3-70b-instruct`). `NVIDIA_BASE_URL` can likewise override the endpoint (default: NVIDIA's integrate endpoint).
 
+**Per-key models** — every key in the pool can carry its OWN model; the failover walk automatically speaks each key's model:
+
+```bash
+# Numbered style: NVIDIA_MODEL_n pairs with NVIDIA_API_KEY_n.
+npx wrangler@4 secret put NVIDIA_API_KEY_1 --config wrangler.worker.toml   # nvapi-xxx
+npx wrangler@4 secret put NVIDIA_MODEL_1  --config wrangler.worker.toml    # deepseek-ai/deepseek-v3.2
+
+# List style: append the model inline as key@model.
+npx wrangler@4 secret put NVIDIA_API_KEYS --config wrangler.worker.toml
+# paste: nvapi-xxx@moonshotai/kimi-k3,nvapi-yyy@meta/llama-3.3-70b-instruct,nvapi-zzz
+```
+
+Resolution order per key: its own model (`NVIDIA_MODEL_n` / `key@model`) → the pool-wide `NVIDIA_MODEL` → the built-in default (`moonshotai/kimi-k3`).
+
+**Local deploys** don't need `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`: `npm run deploy:cloudflare:worker` falls back to your `wrangler login` session when they're absent (CI still uses the env-var path).
+
 Redeploy the Worker after changing its code (`npm run deploy:cloudflare:worker`); secrets persist across deployments.
 
 ## 4. GitHub Actions behavior

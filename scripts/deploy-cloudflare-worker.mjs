@@ -13,9 +13,11 @@ const entry = path.join(root, 'worker', 'update-worker.mjs');
 const manifestPath = path.join(root, 'dist', 'updates', 'manifest.json');
 
 if (!token || !accountId) {
-  console.error('Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID for the update API Worker.');
-  console.error('Set them in the terminal only; never commit or paste API tokens into chat.');
-  process.exit(1);
+  // No CI tokens in the environment - fall back to the interactive
+  // `wrangler login` session (OAuth), which is how local deploys work.
+  // CI keeps using the env-var path; tokens stay terminal-only.
+  console.warn('CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set - using your `wrangler login` session instead.');
+  console.warn('If this fails with an auth error, run: npx wrangler@4 login');
 }
 if (!existsSync(config) || !existsSync(entry)) {
   console.error('Cloudflare Worker configuration or entrypoint is missing.');
@@ -39,7 +41,11 @@ const result = spawnSync(npx, [
   '--var', `UPDATES_MANIFEST_JSON:${manifest}`
 ], {
   cwd: root,
-  env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token },
+  env: {
+    ...process.env,
+    ...(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {}),
+    ...(token ? { CLOUDFLARE_API_TOKEN: token } : {})
+  },
   stdio: 'inherit'
 });
 
