@@ -94,6 +94,8 @@ npx --yes wrangler@4 secret put NVIDIA_API_KEY_2 --config wrangler.worker.toml
 
 Both styles are merged and deduplicated. Until at least one key is bound, `/api/ai` honestly returns `501 not_configured` and the app tells users the managed backend is not live — it never fabricates answers.
 
+**Streaming:** POST `{ messages, stream: true }` and `/api/ai` pipes NVIDIA's Server-Sent Events straight through (`text/event-stream`, OpenAI-style `data: {"choices":[{"delta":{"content":"..."}}]}` chunks, `data: [DONE]` terminator) — tokens reach the client the instant the model emits them, which is what makes the in-app AI feel instant. Without `stream: true` the original buffered `{ answer }` JSON contract is unchanged.
+
 **Model selection** — the default is `moonshotai/kimi-k3` (Kimi K3: ~2.8T MoE, 1M context). Three ways to change it, strongest-override first:
 
 1. Edit `NVIDIA_MODEL` under `[vars]` in `wrangler.worker.toml`, then redeploy (`npm run deploy:cloudflare:worker`). This is the committed, visible default.

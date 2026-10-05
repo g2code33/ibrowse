@@ -136,10 +136,17 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
   const messages = sanitizeAiMessages(body?.messages);
   if (!messages) return new Response(JSON.stringify({ error: 'invalid_messages' }), { status: 400, headers });
 
+  // SPEED: when the client asks for `stream: true`, tokens are piped
+  // straight through from NVIDIA as Server-Sent Events the moment they are
+  // generated (same system as the CLINICAL-RX app) - first words appear in
+  // well under a second instead of after the whole completion. The
+  // non-streamed JSON contract stays for old clients and simple callers.
+  const wantStream = body?.stream === true;
+
   // The request body is built PER KEY: every pool entry carries its own
   // model (NVIDIA_MODEL_n / key@model), so a failover hop to another key
   // automatically speaks that key's model.
-  const bodyFor = (model) => JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: false });
+  const bodyFor = (model) => JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: wantStream });
 
   // Round-robin start (random per isolate, advancing per request) spreads
   // simultaneous users across DIFFERENT keys; the failover walk tries the
@@ -161,7 +168,11 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
     try {
       upstream = await fetch(env?.NVIDIA_BASE_URL || NVIDIA_CHAT_URL, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          Accept: wantStream ? 'text/event-stream' : 'application/json'
+        },
         body: bodyFor(model)
       });
     } catch {
@@ -170,6 +181,16 @@ async function answerWithNvidiaPool(request, headers, env, ip) {
     }
 
     if (upstream.ok) {
+      if (wantStream && upstream.body) {
+        // Pipe NVIDIA's SSE body straight through, untouched - zero
+        // buffering in the worker, so the client paints each token the
+        // instant the model emits it. Failover already happened above:
+        // only a healthy 200 reaches this point.
+        return new Response(upstream.body, {
+          status: 200,
+          headers: { ...headers, 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' }
+        });
+      }
       let payload;
       try { payload = await upstream.json(); } catch { payload = null; }
       const answer = typeof payload?.choices?.[0]?.message?.content === 'string'

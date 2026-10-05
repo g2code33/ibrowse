@@ -288,3 +288,143 @@ test('Shell: new tab shows the "Ask Yayra AI" chip; Settings has the Yayra AI se
   assert.ok(container.querySelector('#fb-in-set-ai-endpoint'), 'endpoint field');
   assert.ok(container.querySelector('#fb-in-set-ai-test'), 'test connection button');
 });
+
+/* ---------------------- streaming (SPEED) tests ---------------------- */
+// The CLINICAL-RX output system: tokens paint as they arrive instead of
+// after the whole completion, with transparent fallbacks when the backend
+// can't stream.
+
+function sseResponse(chunks, { contentType = 'text/event-stream' } = {}) {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      controller.close();
+    }
+  });
+  return new Response(stream, { status: 200, headers: { 'content-type': contentType } });
+}
+
+test('STREAM: yayra backend - onToken fires per token AND the final answer is the assembled text', async () => {
+  let requestBody = null;
+  const service = new YayraAiService({
+    storage: makeStorage(),
+    fetchImpl: async (url, init) => {
+      requestBody = JSON.parse(init.body);
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"lo "}}]}\n',
+        'data: {"choices":[{"delta":{"content":"there"}}]}\n\n',
+        'data: [DONE]\n\n'
+      ]);
+    }
+  });
+  const tokens = [];
+  const result = await service.ask('hi', { onToken: (t) => tokens.push(t) });
+  assert.equal(requestBody.stream, true, 'asks the worker to stream');
+  assert.deepEqual(tokens, ['Hel', 'lo ', 'there'], 'every token painted as it arrived');
+  assert.equal(result.success, true);
+  assert.equal(result.answer, 'Hello there');
+});
+
+test('STREAM: reasoning/empty deltas are skipped - only real answer text reaches onToken', async () => {
+  const service = new YayraAiService({
+    storage: makeStorage(),
+    fetchImpl: async () => sseResponse([
+      'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n',
+      'data: {"choices":[{"delta":{}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"Answer."}}]}\n\n',
+      'data: [DONE]\n\n'
+    ])
+  });
+  const tokens = [];
+  const result = await service.ask('hi', { onToken: (t) => tokens.push(t) });
+  assert.deepEqual(tokens, ['Answer.']);
+  assert.equal(result.answer, 'Answer.');
+});
+
+test('STREAM FALLBACK: a worker that answers buffered JSON still works with onToken set (old deploys)', async () => {
+  const service = new YayraAiService({
+    storage: makeStorage(),
+    fetchImpl: async () => new Response(JSON.stringify({ answer: 'buffered answer' }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    })
+  });
+  const tokens = [];
+  const result = await service.ask('hi', { onToken: (t) => tokens.push(t) });
+  assert.equal(result.success, true);
+  assert.equal(result.answer, 'buffered answer', 'JSON contract still honoured');
+});
+
+test('STREAM FALLBACK: openai-compatible endpoint rejecting stream:true is retried once buffered', async () => {
+  const calls = [];
+  const storage = makeStorage();
+  const service = new YayraAiService({
+    storage,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push(body);
+      if (body.stream) return new Response(JSON.stringify({ error: 'stream unsupported' }), { status: 400 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'no-stream answer' } }] }), { status: 200 });
+    }
+  });
+  await service.updateConfig({ provider: 'openai-compatible', endpoint: 'https://x.test/v1', apiKey: 'k' });
+  const result = await service.ask('hi', { onToken: () => {} });
+  assert.equal(calls.length, 2, 'streamed attempt, then buffered retry');
+  assert.equal(calls[0].stream, true);
+  assert.equal(calls[1].stream, undefined);
+  assert.equal(result.success, true);
+  assert.equal(result.answer, 'no-stream answer');
+});
+
+test('Shell STREAM: tokens paint into the live assistant bubble progressively, then finalize', async () => {
+  let capturedOnToken = null;
+  const aiService = {
+    getConfig: async () => ({ ...AI_DEFAULTS }),
+    updateConfig: async (p) => ({ ...AI_DEFAULTS, ...p }),
+    ask: (prompt, { onToken } = {}) => {
+      capturedOnToken = onToken;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          onToken('Accra ');
+          onToken('is the capital.');
+          resolve({ success: true, answer: 'Accra is the capital.' });
+        }, 0);
+      });
+    },
+    testConnection: async () => ({ success: true })
+  };
+  const { shell, container } = makeShell({ aiService });
+  shell.state.tabs[0].url = 'yayra://ai';
+  shell.render(container);
+
+  const askPromise = shell.askYayraAi('capital of Ghana?');
+  // The live bubble exists IMMEDIATELY (user message + streaming assistant).
+  assert.equal(shell.state.aiConversation.length, 2, 'user + live assistant bubble appended before any token');
+  assert.equal(shell.state.aiConversation[1].streaming, true);
+
+  await askPromise;
+  assert.equal(typeof capturedOnToken, 'function', 'shell passes onToken so the service streams');
+  const finalMsg = shell.state.aiConversation[1];
+  assert.equal(finalMsg.streaming, false, 'bubble finalized');
+  assert.equal(finalMsg.content, 'Accra is the capital.');
+  const bodies = container.querySelectorAll('.fb-ai-msg-body');
+  assert.equal(bodies[bodies.length - 1].textContent, 'Accra is the capital.', 'final text rendered');
+});
+
+test('Shell STREAM: a failed ask finalizes the live bubble as an honest error (no fake answers)', async () => {
+  const aiService = {
+    getConfig: async () => ({ ...AI_DEFAULTS }),
+    updateConfig: async (p) => ({ ...AI_DEFAULTS, ...p }),
+    ask: async () => ({ success: false, reason: 'rate-limited' }),
+    testConnection: async () => ({ success: true })
+  };
+  const { shell, container } = makeShell({ aiService });
+  shell.state.tabs[0].url = 'yayra://ai';
+  shell.render(container);
+  await shell.askYayraAi('hello?');
+  const msg = shell.state.aiConversation[1];
+  assert.equal(msg.error, true);
+  assert.equal(msg.streaming, false);
+  assert.equal(msg.content, describeAiReason('rate-limited'));
+});

@@ -4785,25 +4785,42 @@ export class BrowserShell {
       .filter((m) => !m.error)
       .map((m) => ({ role: m.role, content: m.content }));
     this.state.aiConversation.push({ role: 'user', content: text, at: Date.now() });
+    // STREAMING (CLINICAL-RX output system): a live assistant bubble is
+    // appended immediately and each token is painted into it the moment it
+    // arrives - no waiting for the whole completion. Tokens update the DOM
+    // SURGICALLY (textContent on the live bubble), never via full render(),
+    // so streaming stays smooth with zero flicker.
+    const live = { role: 'assistant', content: '', streaming: true, at: Date.now() };
+    this.state.aiConversation.push(live);
     this.state.aiBusy = true;
     this.render();
+    const paintLiveAiBubble = () => {
+      try {
+        const bodies = this.container?.querySelectorAll?.('.fb-ai-msg-body');
+        const el = bodies && bodies.length ? bodies[bodies.length - 1] : null;
+        if (el) el.textContent = live.content || 'Thinking\u2026';
+      } catch { /* painting is best-effort; state holds the truth */ }
+    };
     let result;
     try {
-      result = await this.aiService.ask(text, { history });
+      result = await this.aiService.ask(text, {
+        history,
+        onToken: (token) => {
+          live.content += token;
+          paintLiveAiBubble();
+        }
+      });
     } catch (err) {
       result = { success: false, reason: 'provider-error', detail: String(err?.message || err) };
     }
     this.state.aiBusy = false;
+    live.streaming = false;
     if (result && result.success) {
-      this.state.aiConversation.push({ role: 'assistant', content: result.answer, at: Date.now() });
+      live.content = result.answer;
     } else {
-      this.state.aiConversation.push({
-        role: 'assistant',
-        error: true,
-        reason: result?.reason,
-        content: describeAiReason(result?.reason),
-        at: Date.now()
-      });
+      live.error = true;
+      live.reason = result?.reason;
+      live.content = describeAiReason(result?.reason);
     }
     this.render();
   }
@@ -4848,7 +4865,7 @@ export class BrowserShell {
               <h2>Ask anything</h2>
               <p>Yayra AI answers questions right inside the browser - type below, or pick \u201cAsk Yayra AI\u201d on any search suggestion, Chrome-style.</p>
             </div>`}
-          ${this.state.aiBusy ? `
+          ${this.state.aiBusy && !this.state.aiConversation.some((m) => m.streaming) ? `
             <div class="fb-ai-msg fb-ai-msg-assistant fb-ai-msg-busy">
               <span class="fb-ai-msg-avatar">${Icons.sparkles}</span>
               <div class="fb-ai-msg-body">Thinking&hellip;</div>
@@ -4865,7 +4882,9 @@ export class BrowserShell {
     // never be parsed as HTML.
     const bodies = page.querySelectorAll('.fb-ai-msg-body');
     this.state.aiConversation.forEach((m, i) => {
-      if (bodies[i]) bodies[i].textContent = m.content;
+      // A still-empty streaming bubble reads "Thinking..." until the first
+      // token lands (tokens then paint into it surgically, see askYayraAi).
+      if (bodies[i]) bodies[i].textContent = m.content || (m.streaming ? 'Thinking\u2026' : '');
     });
 
     page.querySelector('.fb-ai-clear')?.addEventListener('click', () => {

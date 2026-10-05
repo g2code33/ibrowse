@@ -373,6 +373,57 @@ test('EVERY key can carry ITS OWN model: NVIDIA_MODEL_n next to NVIDIA_API_KEY_n
   }
 });
 
+test('SPEED: ai route STREAMS - {stream:true} pipes NVIDIA SSE tokens straight through as text/event-stream', async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamBody = null;
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"Acc"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"ra"}}]}\n\n',
+    'data: [DONE]\n\n'
+  ];
+  globalThis.fetch = async (target, options) => {
+    upstreamBody = JSON.parse(options.body);
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const chunk of sse) controller.enqueue(enc.encode(chunk));
+        controller.close();
+      }
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  try {
+    const env = { NVIDIA_API_KEYS: 'nvapi-stream-key' };
+    const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES, stream: true }, '203.0.113.77'), env);
+    assert.equal(response.status, 200);
+    assert.equal(upstreamBody.stream, true, 'upstream request asks NVIDIA to stream');
+    assert.equal(response.headers.get('content-type').includes('text/event-stream'), true, 'SSE reaches the client');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const text = await response.text();
+    assert.equal(text, sse.join(''), 'tokens pass through UNBUFFERED and untouched');
+    assert.equal(text.includes('nvapi-stream-key'), false, 'key never leaks into the stream');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SPEED: without {stream:true} the buffered JSON contract is unchanged (old clients keep working)', async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamBody = null;
+  globalThis.fetch = async (target, options) => {
+    upstreamBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Accra' } }] }), { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.78'), { NVIDIA_API_KEYS: 'nvapi-k' });
+    assert.equal(response.status, 200);
+    assert.equal(upstreamBody.stream, false, 'non-stream clients get a non-stream upstream call');
+    assert.equal((await response.json()).answer, 'Accra');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('ai route validates input and reports honest statuses: 405, 400s, 429 when every key is busy', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'busy' }), { status: 429 });

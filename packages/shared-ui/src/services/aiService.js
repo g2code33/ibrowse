@@ -103,12 +103,22 @@ export class YayraAiService {
   /**
    * Ask Yayra AI. `history` is the prior conversation:
    * [{ role: 'user'|'assistant', content }].
+   *
+   * SPEED - `onToken`: pass a function and the answer STREAMS - onToken
+   * fires with each token as the model generates it (SSE pass-through from
+   * the worker; same output system as the CLINICAL-RX app), so the first
+   * words appear in well under a second instead of after the whole
+   * completion. The resolved { answer } is still the complete text. When
+   * the backend can't stream (old worker deploy, provider without SSE),
+   * this transparently falls back to the buffered JSON contract - the
+   * caller never has to care.
+   *
    * Resolves { success: true, answer } or { success: false, reason,
    * detail? } - reasons: 'ai-disabled', 'no-fetch-runtime',
    * 'not-configured', 'backend-not-deployed', 'auth-failed',
    * 'rate-limited', 'provider-error', 'network-error', 'empty-answer'.
    */
-  async ask(prompt, { history = [], signal } = {}) {
+  async ask(prompt, { history = [], signal, onToken } = {}) {
     const text = String(prompt || '').trim();
     if (!text) return { success: false, reason: 'empty-answer' };
     const cfg = await this.getConfig();
@@ -126,17 +136,21 @@ export class YayraAiService {
 
     if (cfg.provider === 'openai-compatible') {
       if (!cfg.endpoint) return { success: false, reason: 'not-configured' };
-      return this._askOpenAiCompatible(cfg, messages, signal);
+      return this._askOpenAiCompatible(cfg, messages, signal, onToken);
     }
-    return this._askYayraBackend(messages, signal);
+    return this._askYayraBackend(messages, signal, onToken);
   }
 
-  async _askYayraBackend(messages, signal) {
+  async _askYayraBackend(messages, signal, onToken) {
+    const wantStream = typeof onToken === 'function';
     try {
       const response = await this._fetch(this.yayraEndpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ messages }),
+        headers: {
+          'content-type': 'application/json',
+          accept: wantStream ? 'text/event-stream, application/json' : 'application/json'
+        },
+        body: JSON.stringify(wantStream ? { messages, stream: true } : { messages }),
         signal
       });
       if (response.status === 404 || response.status === 501) {
@@ -146,6 +160,16 @@ export class YayraAiService {
       }
       if (response.status === 429) return { success: false, reason: 'rate-limited' };
       if (!response.ok) return { success: false, reason: 'provider-error', detail: `HTTP ${response.status}` };
+
+      // Streamed answer: paint tokens as they arrive. A worker that doesn't
+      // stream yet answers with JSON - detected by content-type, handled by
+      // the buffered path below, zero breakage.
+      if (wantStream && isEventStream(response)) {
+        const answer = (await readSseAnswer(response, onToken)).trim();
+        if (!answer) return { success: false, reason: 'empty-answer' };
+        return { success: true, answer };
+      }
+
       const payload = await response.json();
       const answer = typeof payload?.answer === 'string' ? payload.answer.trim() : '';
       if (!answer) return { success: false, reason: 'empty-answer' };
@@ -156,23 +180,42 @@ export class YayraAiService {
     }
   }
 
-  async _askOpenAiCompatible(cfg, messages, signal) {
+  async _askOpenAiCompatible(cfg, messages, signal, onToken) {
+    const wantStream = typeof onToken === 'function';
     const url = normalizeChatCompletionsUrl(cfg.endpoint);
     try {
-      const headers = { 'content-type': 'application/json', accept: 'application/json' };
+      const headers = {
+        'content-type': 'application/json',
+        accept: wantStream ? 'text/event-stream, application/json' : 'application/json'
+      };
       if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
       const response = await this._fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           model: cfg.model || 'gpt-4o-mini',
-          messages
+          messages,
+          ...(wantStream ? { stream: true } : {})
         }),
         signal
       });
       if (response.status === 401 || response.status === 403) return { success: false, reason: 'auth-failed' };
       if (response.status === 429) return { success: false, reason: 'rate-limited' };
-      if (!response.ok) return { success: false, reason: 'provider-error', detail: `HTTP ${response.status}` };
+      if (!response.ok) {
+        // Some OpenAI-compatible servers reject "stream": true outright -
+        // retry once buffered (CLINICAL-RX's proven fallback).
+        if (wantStream && [400, 422, 500, 501].includes(response.status)) {
+          return this._askOpenAiCompatible(cfg, messages, signal, null);
+        }
+        return { success: false, reason: 'provider-error', detail: `HTTP ${response.status}` };
+      }
+
+      if (wantStream && isEventStream(response)) {
+        const answer = (await readSseAnswer(response, onToken)).trim();
+        if (!answer) return { success: false, reason: 'empty-answer' };
+        return { success: true, answer };
+      }
+
       const payload = await response.json();
       const answer = typeof payload?.choices?.[0]?.message?.content === 'string'
         ? payload.choices[0].message.content.trim()
@@ -194,6 +237,45 @@ export class YayraAiService {
 }
 
 /* ------------------------------ helpers ------------------------------ */
+
+/** A streamable SSE response: right content-type AND a readable body. */
+function isEventStream(response) {
+  const ctype = String(response?.headers?.get?.('content-type') || '');
+  return ctype.includes('text/event-stream') && Boolean(response?.body?.getReader);
+}
+
+/**
+ * Consume an OpenAI-style SSE stream, firing onToken per content delta and
+ * returning the assembled answer. Non-content deltas (e.g. a reasoning
+ * model's thinking stream) are skipped - only real answer text is painted.
+ */
+export async function readSseAnswer(response, onToken) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let answer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') return answer;
+      let json = null;
+      try { json = JSON.parse(data); } catch { continue; /* partial chunk */ }
+      const delta = json?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta) {
+        answer += delta;
+        if (typeof onToken === 'function') onToken(delta);
+      }
+    }
+  }
+  return answer;
+}
 
 /**
  * Accepts either a base URL ("https://api.openai.com/v1", "http://localhost:11434/v1")
