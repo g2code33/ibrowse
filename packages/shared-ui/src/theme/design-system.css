@@ -4329,6 +4329,85 @@ html {
 }
 
 /* "Continue with these tabs" card (Chrome's new-tab resume card) */
+/* Chrome-style "Restore pages?" floating toast: pinned to the top of
+   the new-tab page when the last session is recoverable. */
+.fb-restore-toast {
+  position: fixed;
+  top: 112px;
+  right: 18px;
+  z-index: 300;
+  width: min(340px, calc(100vw - 36px));
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: var(--fb-bg-elevated, #26262c);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+[data-theme="light"] .fb-restore-toast {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+}
+
+.fb-restore-toast-head {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--fb-text-primary);
+  padding-right: 28px;
+}
+
+.fb-restore-toast-body {
+  font-size: 0.85rem;
+  color: var(--fb-text-secondary);
+  line-height: 1.4;
+}
+
+.fb-restore-toast-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.fb-restore-toast-btn {
+  padding: 8px 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--fb-accent-primary);
+  color: var(--fb-bg-primary, #101014);
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.fb-restore-toast-btn:hover {
+  filter: brightness(1.1);
+}
+
+.fb-restore-toast-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fb-text-muted);
+  cursor: pointer;
+}
+
+.fb-restore-toast-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fb-text-primary);
+}
+
 .fb-continue-card {
   width: 100%;
   max-width: 680px;

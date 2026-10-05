@@ -3118,9 +3118,10 @@ export class BrowserShell {
       // REAL "Frequently Used Sites" (visit-count driven, cap 5).
       const frequentSites = this.getFrequentSites();
 
-      // RECOVER-RECENT-TABS PROMPT FIRST: it renders ABOVE the tiles so
-      // the user cannot miss it (it used to sit below the fold).
-      this.appendContinueCard(newTabPage, frequentSites);
+      // Chrome-style recovery, both halves: a floating "Restore pages?"
+      // toast at the TOP of the page (can't be missed), while the
+      // "Continue with these tabs?" card sits nicely below the tiles.
+      this.appendRestoreToast(newTabPage);
 
       if (frequentSites.length > 0) {
         const frequentSection = document.createElement('div');
@@ -3152,6 +3153,10 @@ export class BrowserShell {
         frequentSection.appendChild(frequentGrid);
         newTabPage.appendChild(frequentSection);
       }
+
+      // "Continue with these tabs?" card - below the tiles, where it
+      // reads naturally (the floating toast above handles urgency).
+      this.appendContinueCard(newTabPage, frequentSites);
 
       // Recent History: a proper card (same design language as the
       // continue-tabs card) - click a row to open it, or copy its link.
@@ -9567,13 +9572,47 @@ export class BrowserShell {
   }
 
   /**
+   * Chrome's "Restore pages?" toast: a floating prompt pinned to the
+   * top of the new-tab page whenever the previous session's tabs are
+   * recoverable - exactly like Chrome's "Chrome didn't shut down
+   * correctly" card. "Restore" reopens the last session's tabs; the X
+   * closes just the toast (this run) while the "Continue with these
+   * tabs?" card below the tiles keeps offering them.
+   */
+  appendRestoreToast(newTabPage) {
+    const tabs = (this.state.continueTabs || []).filter((t) => /^https?:\/\//i.test(t?.url || ''));
+    if (!tabs.length || this._restoreToastClosed) return;
+    const continueSnapshotId = this.state.continueSavedAt || 'no-snapshot-id';
+    if (this.state.settings.continueDismissedAt === continueSnapshotId) return;
+    const toast = document.createElement('div');
+    toast.className = 'fb-restore-toast';
+    toast.setAttribute('role', 'alertdialog');
+    toast.setAttribute('aria-label', 'Restore pages?');
+    toast.innerHTML = `
+      <button class="fb-restore-toast-close" aria-label="Dismiss" title="Dismiss">${Icons.close}</button>
+      <div class="fb-restore-toast-head">Restore pages?</div>
+      <div class="fb-restore-toast-body">Yayra closed before you finished - restore ${tabs.length === 1 ? 'the tab' : `${tabs.length} tabs`} from your last session.</div>
+      <div class="fb-restore-toast-actions"><button class="fb-restore-toast-btn">Restore</button></div>
+    `;
+    toast.querySelector('.fb-restore-toast-btn')?.addEventListener('click', () => {
+      this.restoreContinueTabs(tabs.map((t) => ({ url: t.url, title: t.title || t.url })));
+    });
+    toast.querySelector('.fb-restore-toast-close')?.addEventListener('click', () => {
+      this._restoreToastClosed = true;
+      this.render();
+    });
+    newTabPage.appendChild(toast);
+  }
+
+  /**
    * Chrome's "Continue with these tabs?" card: the previous run's tabs
    * that were NOT closed manually (rolling session snapshot), topped up
    * with frequently-opened sites ("You visit often"). ALWAYS a real
    * prompt - the user explicitly recovers (Restore all / click one) or
    * rejects (No thanks). "No thanks" remembers the dismissed snapshot
    * so the same session never re-prompts, while the NEXT session's tabs
-   * prompt again. Rendered ABOVE the frequent tiles.
+   * prompt again. Sits below the frequent tiles; the floating
+   * "Restore pages?" toast (appendRestoreToast) covers the top.
    */
   appendContinueCard(newTabPage, frequentSites = []) {
     const continueEntries = [];

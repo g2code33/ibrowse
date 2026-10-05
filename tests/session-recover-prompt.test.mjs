@@ -117,12 +117,49 @@ test('Restore all consumes the offer and reopens every tab', async () => {
   }
 });
 
-test('prompt renders ABOVE the frequent tiles (source-order pin)', () => {
+test('layout: floating Restore toast on top, continue card nicely BELOW the tiles (source-order pin)', () => {
   const src = fs.readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
+  const toastAt = src.indexOf('this.appendRestoreToast(newTabPage);');
+  const tilesAt = src.indexOf('frequentSection.appendChild(frequentGrid);');
   const cardAt = src.indexOf('this.appendContinueCard(newTabPage, frequentSites);');
-  const tilesAt = src.indexOf("frequentSection.appendChild(frequentGrid);");
-  assert.ok(cardAt > 0 && tilesAt > 0, 'both blocks exist');
-  assert.ok(cardAt < tilesAt, 'continue card is appended before the frequent-sites section');
+  assert.ok(toastAt > 0 && tilesAt > 0 && cardAt > 0, 'all three blocks exist');
+  assert.ok(toastAt < tilesAt, 'Restore toast is set up before the tiles (floats on top)');
+  assert.ok(tilesAt < cardAt, 'continue card is appended AFTER the frequent-sites section');
+});
+
+test('Chrome-style "Restore pages?" toast: prompts, X closes only the toast, Restore reopens the session', async () => {
+  disk.clear();
+  // Previous run with one real tab.
+  {
+    const { shell } = await boot();
+    shell.state.tabs.push(
+      { id: 't-a', title: 'YouTube', url: 'https://www.youtube.com/', isLoading: false, isPrivate: false, favicon: null }
+    );
+    shell.render();
+    await sleep(900);
+  }
+  // Fresh launch: toast AND card both prompt.
+  {
+    const { shell, container } = await boot();
+    const toast = container.querySelector('.fb-restore-toast');
+    assert.ok(toast, 'floating Restore pages? toast shown');
+    assert.ok(container.querySelector('.fb-continue-card'), 'continue card also present below');
+    // X closes just the toast - the card keeps offering.
+    container.querySelector('.fb-restore-toast-close').click();
+    assert.equal(container.querySelector('.fb-restore-toast'), null, 'toast dismissed');
+    assert.ok(container.querySelector('.fb-continue-card'), 'card still offers the session');
+    assert.ok(shell.state.continueTabs.length > 0, 'offer NOT consumed by closing the toast');
+  }
+  // Next launch: toast returns (X was for that run only); Restore works.
+  {
+    const { shell, container } = await boot();
+    const btn = container.querySelector('.fb-restore-toast-btn');
+    assert.ok(btn, 'toast prompts again on the next run');
+    btn.click();
+    assert.equal(shell.getActiveTab().url, 'https://www.youtube.com/', 'Restore reopened the last session');
+    assert.equal(container.querySelector('.fb-restore-toast'), null, 'toast gone after restoring');
+    assert.equal(shell.state.continueTabs.length, 0, 'offer consumed');
+  }
 });
 
 test('mini shell never writes the session snapshot (static pin)', () => {
