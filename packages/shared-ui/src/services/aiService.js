@@ -8,10 +8,12 @@
  * and the yayra://ai chat page - with TWO real provider modes:
  *
  *   - 'yayra'  (default): Yayra's own backend at the updates-API worker
- *     (POST /api/ai). The endpoint contract is defined here; until the
- *     worker route is deployed, ask() reports an HONEST "backend not
- *     deployed yet" error rather than fabricating answers. No API key
- *     needed from users once it ships.
+ *     (POST /api/ai). Server-side it runs on a POOL of NVIDIA NIM keys
+ *     (worker/update-worker.mjs) - round-robin + failover across many
+ *     keys so users never crowd a single one. No API key needed from
+ *     users; until the keys are bound on the worker, ask() reports an
+ *     HONEST "backend not deployed yet" error rather than fabricating
+ *     answers.
  *   - 'openai-compatible': ANY OpenAI-style /chat/completions endpoint
  *     (OpenAI, Groq, Ollama, LM Studio, OpenRouter, a self-hosted vLLM,
  *     ...) configured from Settings with endpoint + key + model. This

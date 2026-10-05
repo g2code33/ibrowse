@@ -14,11 +14,24 @@ const WINDOW_MS = 60_000;
 const LIMIT = 120;
 const buckets = new Map();
 
+// --- /api/ai : Yayra's managed AI, backed by a POOL of NVIDIA keys -------
+// NVIDIA's NIM endpoint is OpenAI-compatible; the Worker holds MANY API
+// keys (10+, any number) and spreads users across them so no single key
+// gets crowded: round-robin start + failover walk, with per-key cooldown
+// benches for keys that answer 429 (rate-limited) or 401/403 (dead key).
+const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const NVIDIA_DEFAULT_MODEL = 'meta/llama-3.3-70b-instruct';
+const AI_WINDOW_MS = 60_000;
+const AI_LIMIT = 15; // per-IP AI budget, separate from the global limiter
+const aiBuckets = new Map();
+const keyBench = new Map(); // api key -> benched-until timestamp
+let aiRotor = Math.floor(Math.random() * 0xffff); // random per-isolate start
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.protocol !== 'https:' && url.hostname !== 'localhost') return new Response('HTTPS required', { status: 400 });
-    if (!['/updates/manifest.json', '/api/suggestions', '/api/latest-release', '/auth/google/exchange'].includes(url.pathname)) {
+    if (!['/updates/manifest.json', '/api/suggestions', '/api/latest-release', '/api/ai', '/auth/google/exchange'].includes(url.pathname)) {
       return new Response('not found', { status: 404 });
     }
 
@@ -29,10 +42,136 @@ export default {
 
     if (url.pathname === '/api/suggestions') return proxySuggestions(request, url, headers, ctx);
     if (url.pathname === '/api/latest-release') return proxyLatestRelease(request, headers, env, ctx);
+    if (url.pathname === '/api/ai') return answerWithNvidiaPool(request, headers, env, ip);
     if (url.pathname === '/auth/google/exchange') return exchangeGoogleAuthCode(request, headers, env);
     return serveManifest(request, env, headers);
   }
 };
+
+/**
+ * Build the NVIDIA key pool from the Worker's secret bindings. Two styles,
+ * merged and deduped, so ANY number of keys (10, 20, 50...) works:
+ *   1. NVIDIA_API_KEYS - one secret holding many keys separated by commas,
+ *      whitespace or newlines (easiest: one `wrangler secret put` call).
+ *   2. NVIDIA_API_KEY_1, NVIDIA_API_KEY_2, ... NVIDIA_API_KEY_42 - numbered
+ *      individual secrets, so keys can be added/revoked one at a time.
+ * Keys never appear in wrangler.worker.toml or the repo - secrets only.
+ */
+function collectNvidiaKeys(env) {
+  const keys = [];
+  const push = (raw) => {
+    for (const k of String(raw || '').split(/[\s,;]+/)) {
+      if (k && !keys.includes(k)) keys.push(k);
+    }
+  };
+  push(env?.NVIDIA_API_KEYS);
+  const numbered = Object.keys(env || {})
+    .filter((name) => /^NVIDIA_API_KEY_\d+$/.test(name))
+    .sort((a, b) => Number(a.slice(15)) - Number(b.slice(15)));
+  for (const name of numbered) push(env[name]);
+  return keys;
+}
+
+/** Only well-formed chat turns reach NVIDIA; everything else is clamped. */
+function sanitizeAiMessages(raw) {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 32) return null;
+  const out = [];
+  let total = 0;
+  for (const m of raw) {
+    const role = m?.role;
+    if (!['system', 'user', 'assistant'].includes(role)) return null;
+    if (typeof m?.content !== 'string') return null;
+    const content = m.content.slice(0, 8000);
+    total += content.length;
+    if (total > 32_000) return null;
+    out.push({ role, content });
+  }
+  return out;
+}
+
+async function answerWithNvidiaPool(request, headers, env, ip) {
+  if (request.method !== 'POST') return new Response(JSON.stringify({ error: 'method not allowed' }), { status: 405, headers });
+
+  const keys = collectNvidiaKeys(env);
+  if (!keys.length) {
+    // Honest 501: the client (aiService) maps this to "backend not
+    // deployed" instead of fabricating an answer.
+    return new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers });
+  }
+
+  // Dedicated AI budget per IP (cheaper endpoints keep the global 120/min).
+  if (!takeFrom(aiBuckets, ip, Date.now(), AI_WINDOW_MS, AI_LIMIT)) {
+    return new Response(JSON.stringify({ error: 'rate_limited' }), { status: 429, headers });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify({ error: 'invalid_json' }), { status: 400, headers });
+  }
+  const messages = sanitizeAiMessages(body?.messages);
+  if (!messages) return new Response(JSON.stringify({ error: 'invalid_messages' }), { status: 400, headers });
+
+  const model = env?.NVIDIA_MODEL || NVIDIA_DEFAULT_MODEL;
+  const upstreamBody = JSON.stringify({ model, messages, temperature: 0.6, top_p: 0.9, max_tokens: 1024, stream: false });
+
+  // Round-robin start (random per isolate, advancing per request) spreads
+  // simultaneous users across DIFFERENT keys; the failover walk tries the
+  // next keys when one is benched, rate-limited or dead.
+  const now = Date.now();
+  const start = aiRotor++ % keys.length;
+  const maxAttempts = Math.min(keys.length, 5);
+  let attempted = 0;
+  let sawRateLimit = false;
+  let lastStatus = 0;
+
+  for (let i = 0; i < keys.length && attempted < maxAttempts; i += 1) {
+    const key = keys[(start + i) % keys.length];
+    const benchedUntil = keyBench.get(key) || 0;
+    if (benchedUntil > now) continue; // benched key: let it cool down
+    attempted += 1;
+
+    let upstream;
+    try {
+      upstream = await fetch(env?.NVIDIA_BASE_URL || NVIDIA_CHAT_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: upstreamBody
+      });
+    } catch {
+      lastStatus = 0;
+      continue; // network blip: try the next key
+    }
+
+    if (upstream.ok) {
+      let payload;
+      try { payload = await upstream.json(); } catch { payload = null; }
+      const answer = typeof payload?.choices?.[0]?.message?.content === 'string'
+        ? payload.choices[0].message.content.trim()
+        : '';
+      if (!answer) { lastStatus = 502; continue; }
+      return new Response(JSON.stringify({ answer }), { status: 200, headers: { ...headers, 'cache-control': 'no-store' } });
+    }
+
+    lastStatus = upstream.status;
+    if (upstream.status === 429) {
+      // This key is crowded right now - bench it a minute and move on so
+      // the next user lands on a fresh key.
+      sawRateLimit = true;
+      keyBench.set(key, Date.now() + 60_000);
+    } else if (upstream.status === 401 || upstream.status === 403) {
+      // Revoked/exhausted key - bench it long so it stops eating attempts.
+      keyBench.set(key, Date.now() + 10 * 60_000);
+      console.log(`[ai] NVIDIA key rejected (status=${upstream.status}) - benched 10min`);
+    }
+    // 5xx: just walk on to the next key.
+  }
+
+  if (sawRateLimit) return new Response(JSON.stringify({ error: 'rate_limited' }), { status: 429, headers });
+  console.log(`[ai] pool exhausted keys=${keys.length} attempted=${attempted} lastStatus=${lastStatus}`);
+  return new Response(JSON.stringify({ error: 'upstream_unavailable' }), { status: 502, headers });
+}
 
 async function serveManifest(request, env, headers) {
   const manifest = readManifest(env);
@@ -261,14 +400,18 @@ function baseHeaders() {
 }
 
 function take(key, now) {
-  const bucket = buckets.get(key) || { at: now, count: 0 };
-  if (now - bucket.at > WINDOW_MS) {
+  return takeFrom(buckets, key, now, WINDOW_MS, LIMIT);
+}
+
+function takeFrom(map, key, now, windowMs, limit) {
+  const bucket = map.get(key) || { at: now, count: 0 };
+  if (now - bucket.at > windowMs) {
     bucket.at = now;
     bucket.count = 0;
   }
   bucket.count += 1;
-  buckets.set(key, bucket);
-  return bucket.count <= LIMIT;
+  map.set(key, bucket);
+  return bucket.count <= limit;
 }
 
 async function sha256Etag(body) {

@@ -75,6 +75,27 @@ export CLOUDFLARE_PROJECT_NAME='yayra'
 npm run deploy:cloudflare
 ```
 
+## 3b. Yayra AI: the NVIDIA key pool (`/api/ai`)
+
+The Worker's `/api/ai` route powers the built-in "Ask Yayra AI" (managed mode — users never need their own key). It calls NVIDIA's OpenAI-compatible NIM endpoint (`https://integrate.api.nvidia.com/v1/chat/completions`) using a **pool of many API keys** so users are spread out and never crowd a single key: each request starts at a rotating position in the pool, rate-limited (429) keys are benched for a minute, and dead keys (401/403) are benched for ten.
+
+Create keys at <https://build.nvidia.com> (one per account/project as needed), then bind them as Worker secrets — never in `wrangler.worker.toml`, never in the repo. Two binding styles, usable together, any number of keys:
+
+```bash
+# Style 1: the whole pool in ONE secret (comma/space/newline separated)
+npx --yes wrangler@4 secret put NVIDIA_API_KEYS --config wrangler.worker.toml
+# paste: nvapi-xxx1,nvapi-xxx2,nvapi-xxx3,... (10+ keys recommended)
+
+# Style 2: numbered secrets, added/revoked one at a time
+npx --yes wrangler@4 secret put NVIDIA_API_KEY_1 --config wrangler.worker.toml
+npx --yes wrangler@4 secret put NVIDIA_API_KEY_2 --config wrangler.worker.toml
+# ... up to any NVIDIA_API_KEY_n
+```
+
+Both styles are merged and deduplicated. Optional tuning vars: `NVIDIA_MODEL` (default `meta/llama-3.3-70b-instruct`) and `NVIDIA_BASE_URL` (default NVIDIA's integrate endpoint). Until at least one key is bound, `/api/ai` honestly returns `501 not_configured` and the app tells users the managed backend is not live — it never fabricates answers.
+
+Redeploy the Worker after changing its code (`npm run deploy:cloudflare:worker`); secrets persist across deployments.
+
 ## 4. GitHub Actions behavior
 
 Every push to `main` builds the PWA, Android, Linux, and Windows artifacts. When the three Cloudflare secrets are present, the release workflow deploys the exact web bundle from the PWA build job to the Pages `main` branch and deploys `yayra-updates-api` to the account workers.dev hostname. If the secrets are absent, the workflow records a warning instead of falsely claiming that a deployment occurred.

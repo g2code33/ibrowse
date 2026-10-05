@@ -226,6 +226,144 @@ test('auth exchange passes Google OAuth error codes through without echoing requ
   }
 });
 
+// --- /api/ai (managed Yayra AI on an NVIDIA key POOL) ---------------------
+// The Worker holds MANY NVIDIA keys (10+) and spreads users across them so
+// nobody crowds a single key: round-robin start, failover walk, per-key
+// cooldown benches. Contract with aiService.js: POST { messages } ->
+// { answer }; 501 = not configured; 429 = every key is busy right now.
+
+const AI_URL = 'https://yayra-updates-api.g2code335.workers.dev/api/ai';
+
+function aiRequest(body, ip = '203.0.113.7') {
+  return new Request(AI_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': ip },
+    body: JSON.stringify(body)
+  });
+}
+
+const AI_MESSAGES = [
+  { role: 'system', content: 'You are Yayra AI.' },
+  { role: 'user', content: 'What is the capital of Ghana?' }
+];
+
+test('ai route is honestly 501 not_configured until NVIDIA keys are bound', async () => {
+  const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }), {});
+  assert.equal(response.status, 501);
+  assert.equal((await response.json()).error, 'not_configured');
+});
+
+test('ai route answers through the NVIDIA pool and NEVER leaks a key to the client', async () => {
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (target, options) => {
+    seen.push({ target: String(target), options });
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: ' Accra. ' } }] }), { status: 200 });
+  };
+  try {
+    const env = { NVIDIA_API_KEYS: 'nvapi-answer-a, nvapi-answer-b' };
+    const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.21'), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.deepEqual(body, { answer: 'Accra.' });
+    assert.equal(JSON.stringify(body).includes('nvapi-'), false, 'response must never contain an API key');
+
+    const call = seen[0];
+    assert.ok(call.target.includes('integrate.api.nvidia.com'), 'talks to NVIDIA NIM');
+    assert.match(call.options.headers.Authorization, /^Bearer nvapi-answer-/, 'key attached server-side only');
+    const upstreamBody = JSON.parse(call.options.body);
+    assert.equal(typeof upstreamBody.model, 'string');
+    assert.deepEqual(upstreamBody.messages, AI_MESSAGES);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('key pool merges NVIDIA_API_KEYS list + numbered NVIDIA_API_KEY_n secrets (10+ keys) and dedupes', async () => {
+  const originalFetch = globalThis.fetch;
+  const usedKeys = new Set();
+  // Every key is rate-limited except the very last numbered one, so the
+  // failover walk must discover keys from BOTH binding styles.
+  globalThis.fetch = async (target, options) => {
+    const key = options.headers.Authorization.replace('Bearer ', '');
+    usedKeys.add(key);
+    if (key === 'nvapi-pool-12') {
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'from key 12' } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 });
+  };
+  try {
+    // 12 keys total: 10 in the list secret (one is a duplicate of a
+    // numbered one) + 3 numbered - duplicate collapses to 12 unique.
+    const env = {
+      NVIDIA_API_KEYS: 'nvapi-pool-1,nvapi-pool-2,nvapi-pool-3,nvapi-pool-4,nvapi-pool-5\nnvapi-pool-6 nvapi-pool-7,nvapi-pool-8,nvapi-pool-9,nvapi-pool-10',
+      NVIDIA_API_KEY_1: 'nvapi-pool-10', // duplicate - must not double-count
+      NVIDIA_API_KEY_2: 'nvapi-pool-11',
+      NVIDIA_API_KEY_3: 'nvapi-pool-12'
+    };
+    // Keep asking until the walk lands on the good key (benching removes
+    // 429'd keys from later walks, so this converges fast).
+    let answer = null;
+    for (let i = 0; i < 12 && !answer; i += 1) {
+      const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.33'), env);
+      if (response.status === 200) answer = (await response.json()).answer;
+    }
+    assert.equal(answer, 'from key 12', 'failover reached the one healthy key');
+    assert.ok(usedKeys.size >= 2, 'multiple distinct keys were tried - the pool is real');
+    for (const k of usedKeys) assert.match(k, /^nvapi-pool-\d+$/, 'only configured keys ever used');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ai route spreads consecutive requests across DIFFERENT keys (round-robin, no crowding)', async () => {
+  const originalFetch = globalThis.fetch;
+  const keysPerRequest = [];
+  globalThis.fetch = async (target, options) => {
+    keysPerRequest.push(options.headers.Authorization.replace('Bearer ', ''));
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+  };
+  try {
+    const env = { NVIDIA_API_KEYS: 'nvapi-rr-1,nvapi-rr-2,nvapi-rr-3,nvapi-rr-4' };
+    for (let i = 0; i < 4; i += 1) {
+      const response = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.44'), env);
+      assert.equal(response.status, 200);
+    }
+    assert.equal(new Set(keysPerRequest).size, 4,
+      `4 consecutive requests used 4 different keys (got ${keysPerRequest.join(', ')}) - users never pile on one key`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ai route validates input and reports honest statuses: 405, 400s, 429 when every key is busy', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'busy' }), { status: 429 });
+  try {
+    const env = { NVIDIA_API_KEYS: 'nvapi-busy-1,nvapi-busy-2' };
+
+    const get = await worker.fetch(new Request(AI_URL, { headers: { 'cf-connecting-ip': '203.0.113.55' } }), env);
+    assert.equal(get.status, 405);
+
+    const badJson = await worker.fetch(new Request(AI_URL, { method: 'POST', headers: { 'cf-connecting-ip': '203.0.113.55' }, body: 'not json' }), env);
+    assert.equal(badJson.status, 400);
+    assert.equal((await badJson.json()).error, 'invalid_json');
+
+    const noMessages = await worker.fetch(aiRequest({ messages: [] }, '203.0.113.55'), env);
+    assert.equal(noMessages.status, 400);
+    assert.equal((await noMessages.json()).error, 'invalid_messages');
+
+    const badRole = await worker.fetch(aiRequest({ messages: [{ role: 'tool', content: 'x' }] }, '203.0.113.55'), env);
+    assert.equal(badRole.status, 400);
+
+    const allBusy = await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.55'), env);
+    assert.equal(allBusy.status, 429, 'every key rate-limited -> client sees rate-limited, never a fake answer');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function makeFakeEdgeCache() {
   const store = new Map();
   return {
