@@ -5714,9 +5714,15 @@ export class BrowserShell {
   startBackgroundRefresh() {
     if (typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
     if (this._bgRefreshTimer) return;
+    // 15s poll is the safety net; the 'storage' listener below is the
+    // real-time path for same-profile changes. (The old 4s cadence
+    // re-parsed history/bookmarks/downloads/settings/shortcuts almost
+    // constantly - steady background churn for zero visible benefit.)
     this._bgRefreshTimer = window.setInterval(() => {
+      // A hidden/minimized window repaints nothing - skip the whole pass.
+      if (typeof document !== 'undefined' && document.hidden === true) return;
       this.backgroundRefreshTick().catch(() => {});
-    }, 4000);
+    }, 15000);
     // Background TABS auto-refresh: inactive sites reload on a cadence so
     // switching to them shows CURRENT content, never a stale snapshot.
     if (!this._tabAutoRefreshTimer) {
@@ -5746,6 +5752,12 @@ export class BrowserShell {
     if (this.state.settings.autoRefreshBackgroundTabs === false) return;
     const now = Date.now();
     const maxAgeMs = 5 * 60 * 1000;
+    // Collect every due tab, then reload ONLY the stalest one this tick.
+    // Restored sessions stamp all tabs at the same moment, so they all
+    // came due together - reloading 10+ tabs in the SAME tick was a
+    // periodic network/CPU/GPU spike that froze the app for seconds.
+    // The 60s cadence drains the queue one tab per tick, invisibly.
+    let stalest = null;
     for (const tab of this.state.tabs) {
       if (tab.id === this.state.activeTabId) continue;
       if (tab.isLoading) continue;
@@ -5757,15 +5769,17 @@ export class BrowserShell {
         continue;
       }
       if (now - tab.lastLoadCompletedAt < maxAgeMs) continue;
-      tab.lastLoadCompletedAt = now;
-      if (this.nativeWebview && this._nativeWebviewTabIds.has(tab.id)) {
-        this.nativeWebview.reload(tab.id).catch(() => {});
-      } else if (this.webFrames && this.webFrames.has(tab.id)) {
-        const frame = this.webFrames.get(tab.id);
-        // Re-assigning src IS the reload for a pooled iframe (the only
-        // reload a cross-origin frame allows).
-        try { if (frame && frame.iframe && frame.url) frame.iframe.src = frame.url; } catch { /* frame gone */ }
-      }
+      if (!stalest || tab.lastLoadCompletedAt < stalest.lastLoadCompletedAt) stalest = tab;
+    }
+    if (!stalest) return;
+    stalest.lastLoadCompletedAt = now;
+    if (this.nativeWebview && this._nativeWebviewTabIds.has(stalest.id)) {
+      this.nativeWebview.reload(stalest.id).catch(() => {});
+    } else if (this.webFrames && this.webFrames.has(stalest.id)) {
+      const frame = this.webFrames.get(stalest.id);
+      // Re-assigning src IS the reload for a pooled iframe (the only
+      // reload a cross-origin frame allows).
+      try { if (frame && frame.iframe && frame.url) frame.iframe.src = frame.url; } catch { /* frame gone */ }
     }
   }
 

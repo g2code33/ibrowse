@@ -22,18 +22,31 @@ const FILE_NAME = 'downloads.json';
 function createDownloadsStore({ fs, userDataDir, defaultDownloadsDir }) {
   const filePath = path.join(userDataDir, FILE_NAME);
 
+  // In-memory read cache: this process is the file's only writer, so once
+  // read (or written) the parsed state is authoritative. Without it, every
+  // renderer poll and every download progress event did a SYNCHRONOUS
+  // exists+read+parse on the MAIN thread - with AV software scanning the
+  // file on Windows, those stacked up into visible app freezes.
+  let cache; // undefined = not read yet; null/object = cached disk state
+
   function readRaw() {
-    if (!fs.existsSync(filePath)) return null;
-    try {
-      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    } catch {
-      return null;
+    if (cache !== undefined) return cache;
+    if (!fs.existsSync(filePath)) {
+      cache = null;
+      return cache;
     }
+    try {
+      cache = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      cache = null;
+    }
+    return cache;
   }
 
   function writeRaw(data) {
     fs.mkdirSync(userDataDir, { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(data), { mode: 0o600 });
+    cache = data;
   }
 
   function load() {

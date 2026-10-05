@@ -597,6 +597,27 @@ function createWebviewBridge({
   }
 
   /**
+   * Encode a page snapshot CHEAPLY. toDataURL() alone produces a
+   * full-resolution PNG - a multi-megabyte base64 string per tab switch
+   * or menu open, which hammered the IPC channel and left the renderer
+   * collecting giant strings (GC pauses = micro-freezes). A snapshot is
+   * a transient still under the chrome, so a width-capped JPEG is
+   * visually identical at ~3% of the bytes. Falls back to PNG when the
+   * image object lacks resize/toJPEG (older fakes, odd platforms).
+   */
+  function snapshotDataUrl(image) {
+    try {
+      if (image && typeof image.getSize === 'function' && typeof image.resize === 'function' && typeof image.toJPEG === 'function') {
+        const { width } = image.getSize() || {};
+        const scaled = Number(width) > 1440 ? image.resize({ width: 1440 }) : image;
+        const buf = scaled.toJPEG(78);
+        if (buf && buf.length) return `data:image/jpeg;base64,${buf.toString('base64')}`;
+      }
+    } catch { /* fall through to PNG */ }
+    return image.toDataURL();
+  }
+
+  /**
    * Snapshot the page WITHOUT touching its visibility/bounds. The renderer
    * uses this to paint the still image UNDER its chrome BEFORE asking for
    * the hide - eliminating the blank flash between "native view gone" and
@@ -610,7 +631,7 @@ function createWebviewBridge({
       try {
         const image = await wc.capturePage();
         if (image && typeof image.toDataURL === 'function' && !(typeof image.isEmpty === 'function' && image.isEmpty())) {
-          return { snapshot: image.toDataURL() };
+          return { snapshot: snapshotDataUrl(image) };
         }
       } catch (err) {
         logger.error?.(`[yayra:webview] capturePage failed for ${key}`, err);
@@ -640,7 +661,7 @@ function createWebviewBridge({
       try {
         const image = await view.webContents.capturePage();
         if (image && typeof image.toDataURL === 'function' && !(typeof image.isEmpty === 'function' && image.isEmpty())) {
-          snapshot = image.toDataURL();
+          snapshot = snapshotDataUrl(image);
         }
       } catch (err) {
         logger.error?.(`[yayra:webview] capturePage failed for ${key}`, err);

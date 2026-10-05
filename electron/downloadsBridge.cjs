@@ -106,6 +106,12 @@ function createDownloadsBridge({
     activeItems.set(id, item);
     send('started', record);
 
+    // 'updated' fires for every received chunk - persisting EVERY event
+    // meant a synchronous disk write on the main thread many times per
+    // second for the whole download ("the app freezes while downloading").
+    // The live UI keeps every progress event (send() is cheap); the disk
+    // only needs a state change or a 750ms-spaced byte checkpoint.
+    const persistGate = { at: Date.now(), state: record.state };
     item.on('updated', (_event, state) => {
       const received = typeof item.getReceivedBytes === 'function' ? item.getReceivedBytes() : 0;
       const total = typeof item.getTotalBytes === 'function' ? item.getTotalBytes() : 0;
@@ -117,7 +123,12 @@ function createDownloadsBridge({
         size: formatBytes(total || received),
         progress: total > 0 ? Math.round((received / total) * 100) : null
       };
-      downloadsStore.addOrUpdateItem(updated);
+      const now = Date.now();
+      if (updated.state !== persistGate.state || now - persistGate.at >= 750) {
+        downloadsStore.addOrUpdateItem(updated);
+        persistGate.at = now;
+        persistGate.state = updated.state;
+      }
       send('progress', updated);
     });
 
