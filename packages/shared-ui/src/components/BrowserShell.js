@@ -9236,6 +9236,8 @@ export class BrowserShell {
     const dismiss = () => {
       scrim.remove();
       menu.remove();
+      // Un-obscure the native page surface (see below).
+      this.setPageObscured(false);
     };
     scrim.addEventListener('click', dismiss);
     scrim.addEventListener('contextmenu', (e) => { e.preventDefault(); dismiss(); });
@@ -9264,6 +9266,7 @@ export class BrowserShell {
         const item = items[Number(btn.dataset.idx)];
         scrim.remove();
         menu.remove();
+        this.setPageObscured(false);
         item?.action?.();
         this.render();
       });
@@ -9271,6 +9274,14 @@ export class BrowserShell {
 
     document.body.appendChild(scrim);
     document.body.appendChild(menu);
+
+    // The menu extends BELOW the tab strip, over the page area. On
+    // Electron the native page surface always paints above HTML - the
+    // menu's lower items were covered by the site (field screenshot:
+    // only "New Tab" visible, "Reload" half-cut). Swap the live view
+    // for its snapshot while the menu is open, exactly like the
+    // omnibox suggestion dropdown does.
+    this.setPageObscured(true);
 
     // Clamp to viewport so it never renders off-screen near the right/bottom edge.
     const menuWidth = 220;
@@ -10555,10 +10566,14 @@ export class BrowserShell {
     // Esc: Close Overlays
     else if (e.key === 'Escape') {
       // Tab-strip right-click menu lives outside render() state - remove
-      // it (and its scrim) directly.
+      // it (and its scrim) directly, and give the page surface back.
       if (typeof document !== 'undefined') {
-        document.body.querySelector('.fb-tab-context-menu')?.remove();
-        document.body.querySelector('.fb-dropdown-scrim[data-tab-ctx]')?.remove();
+        const openTabMenu = document.body.querySelector('.fb-tab-context-menu');
+        if (openTabMenu) {
+          openTabMenu.remove();
+          document.body.querySelector('.fb-dropdown-scrim[data-tab-ctx]')?.remove();
+          this.setPageObscured(false);
+        }
       }
       if (this.state.isRadialLauncherOpen) {
         this.closeRadialLauncher();

@@ -760,3 +760,35 @@ test('Tab right-click menu: clicking or right-clicking anywhere else removes BOT
   assert.equal(document.body.querySelector('.fb-tab-context-menu'), null, 'menu gone after outside right-click');
   assert.equal(document.body.querySelector('[data-tab-ctx]'), null, 'scrim gone after outside right-click');
 });
+
+test('Tab right-click menu paints OVER the page: native surface yields while open, returns on close', async () => {
+  const container = document.createElement('div');
+  const shell = new BrowserShell({
+    container,
+    isMobile: false,
+    settingsRepo: new SettingsRepository(new MemoryPersistenceAdapter())
+  });
+  await shell.initialize();
+  shell.render(container);
+  const tab = shell.getActiveTab();
+
+  // Open: the page is obscured (on Electron the native WebContentsView
+  // always paints above HTML - the menu's lower items were covered by
+  // the site until the view yields to its snapshot).
+  shell.renderTabContextMenu(100, 100, tab);
+  assert.equal(shell.state.isPageObscured, true, 'page surface yields while the menu is open');
+  assert.equal(shell.hasBlockingOverlay(), true, 'render() keeps the native view hidden meanwhile');
+
+  // Dismiss via the scrim: surface restored.
+  document.body.querySelector('[data-tab-ctx]').click();
+  assert.equal(shell.state.isPageObscured, false, 'page surface returns when the menu closes');
+
+  // Choosing an item restores the surface too.
+  shell.renderTabContextMenu(100, 100, tab);
+  assert.equal(shell.state.isPageObscured, true);
+  const reloadBtn = [...document.body.querySelectorAll('.fb-tab-context-menu-item')]
+    .find((b) => (b.textContent || '').includes('Reload'));
+  reloadBtn.click();
+  assert.equal(shell.state.isPageObscured, false, 'page surface returns after picking an action');
+  assert.equal(document.body.querySelector('.fb-tab-context-menu'), null, 'menu closed by the action');
+});
