@@ -38,10 +38,51 @@ test('tab shows the REAL site logo for web pages (globe only as under-image fall
   assert.match(html, /fb-tab-logo-fallback/, 'globe fallback kept underneath');
 });
 
-test('page-reported favicon wins over the icon service', async () => {
+test('CSP-safe sources only: data: favicons win, https page favicons resolve via the allowed icon host', async () => {
   const shell = await makeShell();
-  const html = shell.getTabFavicon({ id: 't1', url: 'https://example.com/', favicon: 'https://example.com/fav.png', isLoading: false });
-  assert.match(html, /src="https:\/\/example\.com\/fav\.png"/, 'the favicon the page itself reported is used');
+  // The shell CSP only allows chrome images from self/data:/the icon
+  // service - a page-reported https favicon URL would be BLOCKED and
+  // show as a broken-image glyph (the exact field bug).
+  const blocked = shell.getTabFavicon({ id: 't1', url: 'https://example.com/', favicon: 'https://example.com/fav.png', isLoading: false });
+  assert.doesNotMatch(blocked, /example\.com\/fav\.png/, 'never embeds a CSP-blocked favicon URL');
+  assert.match(blocked, /icons\.duckduckgo\.com\/ip3\/example\.com\.ico/, 'resolved through the allowed icon host instead');
+  const inlined = shell.getTabFavicon({ id: 't2', url: 'https://example.com/', favicon: 'data:image/png;base64,AAA', isLoading: false });
+  assert.match(inlined, /src="data:image\/png;base64,AAA"/, 'data: favicons are CSP-safe and win');
+});
+
+test('no inline onerror/onload (blocked by CSP) - fallbacks bound programmatically', async () => {
+  const shell = await makeShell();
+  const html = shell.getTabFavicon({ id: 't1', url: 'https://example.com/', isLoading: false });
+  assert.doesNotMatch(html, /onerror=|onload=/, 'inline handlers are dead under script-src without unsafe-inline');
+  assert.equal(typeof shell.bindTabLogoFallbacks, 'function', 'programmatic binder exists');
+
+  // Binder wires load -> hide globe, error -> remove broken img.
+  const scope = document.createElement('div');
+  const stack = document.createElement('span');
+  stack.className = 'fb-tab-logo-stack';
+  const fallback = document.createElement('span');
+  fallback.className = 'fb-tab-logo-fallback';
+  const img = document.createElement('img');
+  img.className = 'fb-tab-site-logo';
+  const handlers = {};
+  img.addEventListener = (type, fn) => { handlers[type] = fn; };
+  let removed = false;
+  img.remove = () => { removed = true; };
+  img.parentElement = stack;
+  stack.querySelector = (sel) => (sel === '.fb-tab-logo-fallback' ? fallback : null);
+  stack.appendChild(fallback);
+  stack.appendChild(img);
+  scope.appendChild(stack);
+  const realQsa = scope.querySelectorAll?.bind(scope);
+  scope.querySelectorAll = (sel) => (sel === '.fb-tab-site-logo' ? [img] : (realQsa ? realQsa(sel) : []));
+
+  shell.bindTabLogoFallbacks(scope);
+  assert.equal(typeof handlers.load, 'function', 'load listener attached');
+  assert.equal(typeof handlers.error, 'function', 'error listener attached');
+  handlers.load();
+  assert.equal(fallback.style.display, 'none', 'logo loaded -> globe hidden');
+  handlers.error();
+  assert.equal(removed, true, 'logo failed -> broken img removed, globe stays');
 });
 
 test('hourglass while loading and internal-page icons are untouched', async () => {

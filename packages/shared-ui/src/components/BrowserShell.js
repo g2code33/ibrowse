@@ -1131,6 +1131,10 @@ export class BrowserShell {
     // Maintain persistent assistive bubble in the DOM
     this.ensurePersistentAssistiveBubble();
 
+    // Site logos in tabs: attach the CSP-safe load/error fallbacks to
+    // every logo image this render just produced.
+    this.bindTabLogoFallbacks(target);
+
     // Position/show/hide the persistent web-frame layer so the live iframe
     // lines up exactly with the viewport slot rendered above. A second pass
     // on the next animation frame catches post-layout geometry.
@@ -8731,9 +8735,12 @@ export class BrowserShell {
         item.dataset.value = match.url;
         item.setAttribute('role', 'option');
         item.innerHTML = `<span class="fb-search-suggestion-icon fb-autofill-suggestion-icon">`
-          + (host ? `<img class="fb-autofill-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" onerror="this.remove()" />` : Icons.history)
+          + (host ? `<img class="fb-autofill-favicon" src="https://icons.duckduckgo.com/ip3/${host}.ico" alt="" loading="lazy" />` : Icons.history)
           + `</span><span class="fb-search-suggestion-text"><span class="fb-autofill-title"></span><span class="fb-autofill-url"></span></span>`
           + `<span class="fb-search-suggestion-use">${match.kind === 'bookmark' ? Icons.bookmark : Icons.history}</span>`;
+        // Inline onerror is blocked by the shell CSP - bind the broken-
+        // icon cleanup programmatically.
+        item.querySelector('.fb-autofill-favicon')?.addEventListener?.('error', function () { try { this.remove(); } catch { /* gone */ } });
         item.querySelector('.fb-autofill-title').textContent = match.title;
         item.querySelector('.fb-autofill-url').textContent = this.getDisplayUrl(match.url);
         item.addEventListener('mousedown', (event) => {
@@ -9765,7 +9772,11 @@ export class BrowserShell {
         || (typeof tabEl.getAttribute === 'function' ? tabEl.getAttribute('data-tab-id') : null);
       if (elTabId !== tabId) continue;
       const favicon = tabEl.querySelector?.('.fb-tab-favicon');
-      if (favicon) favicon.innerHTML = this.getTabFavicon(tab);
+      if (favicon) {
+        favicon.innerHTML = this.getTabFavicon(tab);
+        // Fresh <img> from innerHTML: re-attach the CSP-safe fallbacks.
+        this.bindTabLogoFallbacks(favicon);
+      }
     }
   }
 
@@ -10359,24 +10370,59 @@ export class BrowserShell {
     if (url.startsWith('yayra://permissions')) return Icons.lock;
     if (url.startsWith('yayra://about')) return Icons.logoOrb;
     if (url.startsWith('yayra://newtab') || !url) return tab.isPrivate ? Icons.incognito : Icons.officialOrb;
-    // Real site logo for actual web pages: prefer the favicon the page
-    // itself reported (favicon-updated event), fall back to the icon
-    // service by host. The globe only appears underneath until the logo
-    // image loads (or if it fails to load).
+    // Real site logo for actual web pages. IMPORTANT: the shell page's
+    // CSP only allows chrome images from 'self', data:, and the icon
+    // service host - a page-reported favicon URL (https://site/fav.ico)
+    // would be BLOCKED and render as a broken-image glyph. So only
+    // data:-inlined favicons are used directly; everything else resolves
+    // through the allowed icon service by host. Inline onerror/onload
+    // are also dead under the CSP (no 'unsafe-inline' scripts) - the
+    // fallback is bound programmatically by bindTabLogoFallbacks().
     if (/^https?:\/\//i.test(url)) {
       let host = '';
       try { host = new URL(url).hostname; } catch { host = ''; }
-      const reported = (typeof tab.favicon === 'string' && /^(https?:|data:image\/)/i.test(tab.favicon)) ? tab.favicon : '';
+      const reported = (typeof tab.favicon === 'string' && /^data:image\//i.test(tab.favicon)) ? tab.favicon : '';
       const src = reported || (host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : '');
       if (src) {
         const safeSrc = src.replace(/"/g, '&quot;');
         return `<span class="fb-tab-logo-stack"><span class="fb-tab-logo-fallback">${Icons.globe}</span>`
-          + `<img class="fb-tab-site-logo" src="${safeSrc}" alt="" loading="lazy" `
-          + `onload="var f=this.previousElementSibling;if(f)f.style.display='none'" `
-          + `onerror="this.remove()" /></span>`;
+          + `<img class="fb-tab-site-logo" src="${safeSrc}" alt="" loading="lazy" /></span>`;
       }
     }
     return Icons.globe;
+  }
+
+  /**
+   * CSP-safe logo fallback wiring: inline onerror/onload attributes are
+   * blocked by the shell's script-src (no 'unsafe-inline'), so every
+   * .fb-tab-site-logo image gets its listeners attached here instead -
+   * logo loads -> hide the globe underneath; logo fails -> remove the
+   * broken image so the globe stays. Idempotent; called after renders
+   * and after surgical icon updates.
+   */
+  bindTabLogoFallbacks(scope = null) {
+    const root = scope || this.lastRenderTarget || (typeof document !== 'undefined' ? document : null);
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    for (const img of root.querySelectorAll('.fb-tab-site-logo')) {
+      if (!img || img.dataset?.logoBound === 'true') continue;
+      if (img.dataset) img.dataset.logoBound = 'true';
+      if (typeof img.addEventListener !== 'function') continue;
+      const hideFallback = () => {
+        const stack = img.parentElement;
+        const fallback = stack?.querySelector?.('.fb-tab-logo-fallback');
+        if (fallback?.style) fallback.style.display = 'none';
+      };
+      img.addEventListener('load', hideFallback);
+      img.addEventListener('error', () => { try { img.remove(); } catch { /* already gone */ } });
+      // Cached images may already be settled before listeners attach.
+      if (img.complete === true) {
+        if (typeof img.naturalWidth === 'number' && img.naturalWidth === 0) {
+          try { img.remove(); } catch { /* already gone */ }
+        } else {
+          hideFallback();
+        }
+      }
+    }
   }
 
   handleViewportResize() {
