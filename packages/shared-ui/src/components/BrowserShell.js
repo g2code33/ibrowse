@@ -291,9 +291,14 @@ export class BrowserShell {
       passkeyDeviceStatus: null,
       // Yayra AI: synchronous config snapshot (renders can't await), the
       // yayra://ai conversation of this session, and the busy flag while
-      // an answer is being generated.
+      // an answer is being generated. ChatGPT-style, the conversation is
+      // one CHAT out of many (aiChats, persisted to localStorage):
+      // aiConversation is the ACTIVE chat's live messages array (same
+      // object reference, so streaming paints into the chat directly).
       aiConfig: { ...AI_DEFAULTS },
       aiConversation: [],
+      aiChats: [],
+      aiActiveChatId: null,
       aiBusy: false,
       extensionsItems: [...BUILT_IN_EXTENSIONS],
       sponsoredLinks: DEVELOPER_AD_LINKS.map((item) => ({
@@ -853,6 +858,9 @@ export class BrowserShell {
     // just close -> offer them) and any "install update when opened
     // again" scheduled last run. Both are consumed exactly once.
     this.restoreCloseSession();
+    // ChatGPT-style AI chats: restore every saved conversation so any of
+    // them can be continued later (the active thread starts fresh).
+    this._loadAiChats();
     this.processPendingInstallOnLaunch().catch(() => {});
 
     if (this.settingsRepo) {
@@ -4944,6 +4952,151 @@ export class BrowserShell {
    * answers: the page says exactly what to configure instead.
    * ----------------------------------------------------------- */
 
+  /* --------- ChatGPT-style chats: saved, listed, resumable --------- */
+
+  // Direct localStorage (profile-independent), guarded for test shims.
+  _aiChatsStore() {
+    try {
+      return typeof localStorage !== 'undefined' ? localStorage : null;
+    } catch { return null; }
+  }
+
+  static AI_CHATS_KEY = 'yayra:ai-chats';
+  static AI_CHATS_CAP = 50; // most recent chats kept
+  static AI_CHAT_MESSAGES_CAP = 200; // per chat, oldest pairs trimmed
+
+  _loadAiChats() {
+    const store = this._aiChatsStore();
+    if (!store) return;
+    try {
+      const raw = JSON.parse(store.getItem(BrowserShell.AI_CHATS_KEY) || '[]');
+      if (!Array.isArray(raw)) return;
+      const now = Date.now();
+      const chats = raw
+        .filter((c) => c && typeof c === 'object' && Array.isArray(c.messages))
+        .map((c) => ({
+          id: String(c.id || `chat-${Math.random().toString(36).slice(2, 10)}`),
+          title: String(c.title || 'New chat').slice(0, 120),
+          createdAt: Number(c.createdAt) || now,
+          updatedAt: Number(c.updatedAt) || Number(c.createdAt) || now,
+          messages: c.messages
+            .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+            .map((m) => ({ ...m, streaming: false })) // streaming never persists
+        }))
+        .filter((c) => c.messages.length > 0)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, BrowserShell.AI_CHATS_CAP);
+      this.state.aiChats = chats;
+      // ChatGPT opens on a FRESH chat; saved chats wait in the sidebar.
+      this.state.aiActiveChatId = null;
+      this.state.aiConversation = [];
+    } catch { /* corrupted store - start clean, never crash */ }
+  }
+
+  _persistAiChats() {
+    const store = this._aiChatsStore();
+    if (!store) return;
+    try {
+      const chats = this.state.aiChats
+        .filter((c) => c.messages.length > 0)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, BrowserShell.AI_CHATS_CAP)
+        .map((c) => ({
+          id: c.id,
+          title: c.title,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+          messages: c.messages
+            .slice(-BrowserShell.AI_CHAT_MESSAGES_CAP)
+            .map(({ streaming, ...rest }) => rest) // transient flag never persists
+        }));
+      store.setItem(BrowserShell.AI_CHATS_KEY, JSON.stringify(chats));
+    } catch { /* quota/serialization - chats stay alive in memory */ }
+  }
+
+  deriveAiChatTitle(text) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return 'New chat';
+    if (clean.length <= 48) return clean;
+    const cut = clean.slice(0, 48);
+    const lastSpace = cut.lastIndexOf(' ');
+    return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trim()}\u2026`;
+  }
+
+  formatAiChatTime(ts) {
+    const age = Date.now() - (Number(ts) || Date.now());
+    if (age < 60 * 1000) return 'now';
+    if (age < 60 * 60 * 1000) return `${Math.floor(age / 60000)}m`;
+    if (age < 24 * 60 * 60 * 1000) return `${Math.floor(age / 3600000)}h`;
+    if (age < 7 * 24 * 60 * 60 * 1000) return `${Math.floor(age / 86400000)}d`;
+    const d = new Date(Number(ts) || Date.now());
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  _aiChatById(id) {
+    return this.state.aiChats.find((c) => c.id === id) || null;
+  }
+
+  get activeAiChat() {
+    return this._aiChatById(this.state.aiActiveChatId);
+  }
+
+  /** Fresh empty chat (ChatGPT "New chat"): the composer starts clean. */
+  startNewAiChat() {
+    if (this.state.aiBusy) {
+      this.showTransientNotice?.('Wait for the current answer to finish first.');
+      return;
+    }
+    this.state.aiActiveChatId = null;
+    this.state.aiConversation = [];
+    this.render();
+  }
+
+  /** Resume a saved chat: its messages become the live conversation. */
+  openAiChat(id) {
+    if (this.state.aiBusy) {
+      this.showTransientNotice?.('Wait for the current answer to finish first.');
+      return;
+    }
+    const chat = this._aiChatById(id);
+    if (!chat) return;
+    this.state.aiActiveChatId = chat.id;
+    // SAME array reference: streaming/painting operate on the chat directly.
+    this.state.aiConversation = chat.messages;
+    this.render();
+  }
+
+  deleteAiChat(id) {
+    const chat = this._aiChatById(id);
+    if (!chat) return;
+    if (this.state.aiBusy && id === this.state.aiActiveChatId) {
+      this.showTransientNotice?.('Wait for the current answer to finish first.');
+      return;
+    }
+    this.state.aiChats = this.state.aiChats.filter((c) => c.id !== id);
+    if (this.state.aiActiveChatId === id) {
+      this.state.aiActiveChatId = null;
+      this.state.aiConversation = [];
+    }
+    this._persistAiChats();
+    this.render();
+  }
+
+  async renameAiChat(id) {
+    const chat = this._aiChatById(id);
+    if (!chat || typeof this._textPromptDialog !== 'function') return;
+    const name = await this._textPromptDialog({
+      title: 'Rename chat',
+      placeholder: 'Chat name',
+      initialValue: chat.title
+    });
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    chat.title = clean.slice(0, 120);
+    this._persistAiChats();
+    this.render();
+  }
+
   /** Open the AI page, optionally pre-asking `query` (omnibox handoff). */
   openAiPage(query) {
     const q = String(query || '').trim();
@@ -4962,16 +5115,37 @@ export class BrowserShell {
   }
 
   /**
-   * Ask Yayra AI and append both sides to the session conversation.
+   * Ask Yayra AI and append both sides to the ACTIVE chat, creating it on
+   * demand. With { newChat: true } (every search-engine handoff: omnibox
+   * "Ask Yayra AI", new-tab chip, yayra://ai?q=...) the question starts a
+   * brand-new chat instead of continuing the current one - ChatGPT-style.
    * Errors become honest assistant-side notices (never fake answers).
    */
-  async askYayraAi(prompt) {
+  async askYayraAi(prompt, { newChat = false } = {}) {
     const text = String(prompt || '').trim();
     if (!text || !this.aiService || this.state.aiBusy) return;
+    // Resolve the chat this question belongs to.
+    let chat = newChat ? null : this.activeAiChat;
+    if (!chat) {
+      chat = {
+        id: `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        title: this.deriveAiChatTitle(text),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messages: []
+      };
+      this.state.aiChats.unshift(chat);
+      this.state.aiActiveChatId = chat.id;
+      // aiConversation IS the active chat's messages array - streaming,
+      // painting and tests all mutate the chat directly.
+      this.state.aiConversation = chat.messages;
+    }
     const history = this.state.aiConversation
       .filter((m) => !m.error)
       .map((m) => ({ role: m.role, content: m.content }));
     this.state.aiConversation.push({ role: 'user', content: text, at: Date.now() });
+    chat.updatedAt = Date.now();
+    this._persistAiChats();
     // STREAMING (CLINICAL-RX output system): a live assistant bubble is
     // appended immediately and each token is painted into it the moment it
     // arrives - no waiting for the whole completion. Tokens update the DOM
@@ -5031,6 +5205,8 @@ export class BrowserShell {
       live.reason = result?.reason;
       live.content = describeAiReason(result?.reason);
     }
+    chat.updatedAt = Date.now();
+    this._persistAiChats();
     this.render();
   }
 
@@ -5064,43 +5240,71 @@ export class BrowserShell {
       </div>`;
     }).join('');
 
+    const activeChat = this.activeAiChat;
+    const chatItemsHtml = this.state.aiChats.length ? this.state.aiChats.map((c) => `
+              <div class="fb-ai-chat-item${c.id === this.state.aiActiveChatId ? ' fb-ai-chat-active' : ''}" data-chat-id="${c.id}" role="listitem">
+                <span class="fb-ai-chat-title"></span>
+                <span class="fb-ai-chat-time">${this.formatAiChatTime(c.updatedAt)}</span>
+                <button type="button" class="fb-ai-chat-rename" data-chat-id="${c.id}" title="Rename chat">\u270E</button>
+                <button type="button" class="fb-ai-chat-delete" data-chat-id="${c.id}" title="Delete chat">\u2715</button>
+              </div>`).join('')
+      : '<div class="fb-ai-chat-empty">No saved chats yet \u2014 every conversation you have is kept here.</div>';
+
     page.innerHTML = `
-      <div class="fb-internal-container fb-ai-container">
-        <div class="fb-internal-header fb-ai-header">
-          <h1>${Icons.sparkles} Yayra AI</h1>
-          <div style="display:flex; gap:8px; align-items:center;">
-            <span class="fb-ai-provider-chip" title="Active provider">${cfg.enabled ? providerLabel : 'AI is off'}</span>
-            <button class="fb-btn fb-btn-secondary fb-ai-clear" ${this.state.aiConversation.length ? '' : 'disabled'}>Clear chat</button>
-            <button class="fb-btn fb-btn-secondary fb-ai-settings">AI settings</button>
+      <div class="fb-internal-container fb-ai-container fb-ai-chat-layout">
+        <aside class="fb-ai-sidebar">
+          <button type="button" class="fb-btn fb-btn-primary fb-ai-new-chat">+ New chat</button>
+          <div class="fb-ai-chat-list" role="list">
+            ${chatItemsHtml}
           </div>
-        </div>
-        ${cfg.enabled ? '' : `
+        </aside>
+        <div class="fb-ai-main">
+          <div class="fb-internal-header fb-ai-header">
+            <h1>${Icons.sparkles} <span class="fb-ai-heading-title">Yayra AI</span></h1>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <span class="fb-ai-provider-chip" title="Active provider">${cfg.enabled ? providerLabel : 'AI is off'}</span>
+              <button class="fb-btn fb-btn-secondary fb-ai-settings">AI settings</button>
+            </div>
+          </div>
+          ${cfg.enabled ? '' : `
           <div class="fb-ai-setup-note">
             Yayra AI is turned off. Enable it in <strong>Settings &gt; Yayra AI</strong>.
           </div>`}
-        ${cfg.enabled && !ready ? `
+          ${cfg.enabled && !ready ? `
           <div class="fb-ai-setup-note">
             No AI provider is configured yet - add an OpenAI-compatible endpoint in <strong>Settings &gt; Yayra AI</strong>.
           </div>` : ''}
-        <div class="fb-ai-thread" aria-live="polite">
-          ${this.state.aiConversation.length ? messagesHtml : `
+          <div class="fb-ai-thread" aria-live="polite">
+            ${this.state.aiConversation.length ? messagesHtml : `
             <div class="fb-ai-empty">
               <div class="fb-ai-empty-icon">${Icons.sparkles}</div>
               <h2>Ask anything</h2>
-              <p>Yayra AI answers questions right inside the browser - type below, or pick \u201cAsk Yayra AI\u201d on any search suggestion, Chrome-style.</p>
+              <p>Yayra AI answers questions right inside the browser - type below, or pick \u201cAsk Yayra AI\u201d on any search suggestion, Chrome-style. Every conversation is saved in the sidebar and can be continued later.</p>
             </div>`}
-          ${this.state.aiBusy && !this.state.aiConversation.some((m) => m.streaming) ? `
+            ${this.state.aiBusy && !this.state.aiConversation.some((m) => m.streaming) ? `
             <div class="fb-ai-msg fb-ai-msg-assistant fb-ai-msg-busy">
               <span class="fb-ai-msg-avatar">${Icons.sparkles}</span>
               <div class="fb-ai-msg-body">Thinking&hellip;</div>
             </div>` : ''}
+          </div>
+          <form class="fb-ai-form">
+            <input type="text" class="fb-input fb-ai-input" placeholder="Ask Yayra AI&hellip;" autocomplete="off" ${this.state.aiBusy ? 'disabled' : ''} />
+            <button type="submit" class="fb-btn fb-btn-primary fb-ai-send" ${this.state.aiBusy ? 'disabled' : ''}>Ask</button>
+          </form>
         </div>
-        <form class="fb-ai-form">
-          <input type="text" class="fb-input fb-ai-input" placeholder="Ask Yayra AI&hellip;" autocomplete="off" ${this.state.aiBusy ? 'disabled' : ''} />
-          <button type="submit" class="fb-btn fb-btn-primary fb-ai-send" ${this.state.aiBusy ? 'disabled' : ''}>Ask</button>
-        </form>
       </div>
     `;
+
+    // User-derived text (chat titles, heading) is injected via textContent -
+    // never parsed as HTML.
+    const headingTitle = page.querySelector('.fb-ai-heading-title');
+    if (headingTitle && activeChat) headingTitle.textContent = activeChat.title;
+    for (const item of Array.from(page.querySelectorAll('.fb-ai-chat-item'))) {
+      const chat = this._aiChatById(item.dataset?.chatId);
+      if (!chat) continue;
+      const titleEl = item.querySelector('.fb-ai-chat-title');
+      if (titleEl) titleEl.textContent = chat.title;
+    }
 
     // Message text is injected via textContent - AI/user content must
     // never be parsed as HTML.
@@ -5134,10 +5338,26 @@ export class BrowserShell {
       });
     }
 
-    page.querySelector('.fb-ai-clear')?.addEventListener('click', () => {
-      this.state.aiConversation = [];
-      this.render();
+    page.querySelector('.fb-ai-new-chat')?.addEventListener('click', () => {
+      this.startNewAiChat();
     });
+    for (const item of Array.from(page.querySelectorAll('.fb-ai-chat-item'))) {
+      item.addEventListener('click', () => {
+        this.openAiChat(item.dataset?.chatId);
+      });
+    }
+    for (const btn of Array.from(page.querySelectorAll('.fb-ai-chat-rename'))) {
+      btn.addEventListener('click', (e) => {
+        if (typeof e?.stopPropagation === 'function') e.stopPropagation();
+        this.renameAiChat(btn.dataset?.chatId);
+      });
+    }
+    for (const btn of Array.from(page.querySelectorAll('.fb-ai-chat-delete'))) {
+      btn.addEventListener('click', (e) => {
+        if (typeof e?.stopPropagation === 'function') e.stopPropagation();
+        this.deleteAiChat(btn.dataset?.chatId);
+      });
+    }
     page.querySelector('.fb-ai-settings')?.addEventListener('click', () => {
       this.state.settingsActiveCategory = 'ai';
       this.state.activeSettingsCategory = 'ai';
@@ -5156,14 +5376,16 @@ export class BrowserShell {
     viewport.appendChild(page);
 
     // yayra://ai?q=... auto-asks exactly once per navigation (the omnibox
-    // "Ask Yayra AI" handoff) - guarded so re-renders never re-ask.
+    // "Ask Yayra AI" handoff) - guarded so re-renders never re-ask. Every
+    // SEARCH-ENGINE handoff starts a BRAND-NEW chat (ChatGPT-style), never
+    // continues the currently open one.
     const query = this.getAiQueryFromUrl(activeTab?.url);
     if (query && activeTab) {
       const guard = `${activeTab.id}::${query}`;
       if (!this._aiAutoAsked) this._aiAutoAsked = new Set();
       if (!this._aiAutoAsked.has(guard)) {
         this._aiAutoAsked.add(guard);
-        this.askYayraAi(query);
+        this.askYayraAi(query, { newChat: true });
       }
     }
   }
