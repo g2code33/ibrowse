@@ -569,10 +569,25 @@ function registerIpcBridges() {
   // see createAppModeWindow() + electron/appMode.cjs.
   ipcMain.handle('yayra:install-page-as-app', (_event, { url, title } = {}) => {
     try {
-      const iconCandidate = path.join(__dirname, '..', 'build', 'icons', 'hicolor', '256x256', 'apps', 'yayra.png');
+      // SHORTCUT TARGET FIX: inside a running AppImage, process.execPath
+      // is the TEMPORARY squashfs mount (/tmp/.mount_yayraXXX/yayra)
+      // which stops existing the moment the app closes - every shortcut
+      // written that way was dead on next launch. Point at the .AppImage
+      // FILE itself (it is executable and accepts the same args).
+      let execPath = process.execPath;
+      if (typeof process.env.APPIMAGE === 'string' && process.env.APPIMAGE.trim() !== '' && fs.existsSync(process.env.APPIMAGE)) {
+        execPath = process.env.APPIMAGE;
+      }
+      // SHORTCUT ICON FIX: build/icons is NOT packaged with the app, and
+      // Windows .lnk icons need .ico (not .png) anyway. Windows shortcuts
+      // inherit the target exe's own embedded icon when none is set -
+      // that is the correct setting there. Linux .desktop files take an
+      // icon NAME resolved through hicolor: 'yayra' is installed by the
+      // .deb and registered by AppImage desktop integration.
+      const iconPath = process.platform === 'linux' ? 'yayra' : null;
       const plan = buildInstallPlan({
         platform: process.platform,
-        execPath: process.execPath,
+        execPath,
         url,
         title,
         desktopDir: app.getPath('desktop'),
@@ -582,7 +597,7 @@ function registerIpcBridges() {
         startMenuDir: process.platform === 'win32'
           ? path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs')
           : null,
-        iconPath: fs.existsSync(iconCandidate) ? iconCandidate : null
+        iconPath
       });
       if (!plan.ok) return plan;
       let primaryPath = null;

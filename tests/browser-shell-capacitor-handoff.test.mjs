@@ -82,7 +82,7 @@ test('Capacitor (Android/iOS): navigating to a sign-in host opens the native in-
   }
 });
 
-test('Capacitor (Android/iOS): a google SEARCH renders real results in-app (embeddable DDG frame + banner) - searches are never a dead card', async () => {
+test('Capacitor (Android/iOS): a google SEARCH opens in the native secure browser view - never a dead card (no engine allows embedded results since Oct 2026)', async () => {
   const { opened, uninstall } = installFakeCapacitorBrowser();
   try {
     const container = document.createElement('div');
@@ -91,19 +91,24 @@ test('Capacitor (Android/iOS): a google SEARCH renders real results in-app (embe
 
     shell.navigateActiveTab('https://www.google.com/search?q=ghana');
     const el = shell.rootElement;
-
-    const frame = el.querySelector('iframe');
-    assert.ok(frame, 'search results ARE rendered in-app');
-    assert.equal(frame.src, 'https://lite.duckduckgo.com/lite/?q=ghana', 'same query, embeddable engine');
-    assert.ok(el.querySelector('.fb-frame-serp-banner'), 'honest banner about the engine swap');
-    assert.equal(el.querySelector('.fb-frame-blocked-fallback'), null, 'no dead blocked-card for searches');
-
-    // The banner's button hands the ORIGINAL Google URL to the native
-    // secure browser view.
-    el.querySelector('.fb-serp-open-original').click();
     await Promise.resolve();
     await Promise.resolve();
-    assert.deepEqual(opened, ['https://www.google.com/search?q=ghana']);
+
+    // VERIFIED Oct 2026: lite/html.duckduckgo.com now send
+    // X-Frame-Options: SAMEORIGIN - the old DDG-iframe fallback rendered
+    // a REFUSED blank frame. The search now genuinely opens.
+    assert.deepEqual(opened, ['https://www.google.com/search?q=ghana'],
+      'the REAL google search opens in the secure browser view automatically');
+    assert.equal(el.querySelector('iframe'), null, 'no dead embedded results frame');
+    const card = el.querySelector('.fb-serp-handoff-fallback');
+    assert.ok(card, 'honest search-handoff card stays in the tab');
+    assert.match(card.querySelector('.fb-frame-blocked-open-btn').textContent, /Open search/);
+
+    // The card's button hands the ORIGINAL Google URL over again.
+    card.querySelector('.fb-frame-blocked-open-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(opened.length, 2, 'the button re-opens the real search on demand');
   } finally {
     uninstall();
   }

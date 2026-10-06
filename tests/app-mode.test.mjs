@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const { parseAppModeUrl, sanitizeAppName, buildInstallPlan } = require('../electron/appMode.cjs');
@@ -123,4 +124,39 @@ test('buildInstallPlan rejects invalid or non-http urls and missing paths', () =
     buildInstallPlan({ platform: 'linux', execPath: '', url: 'https://example.com', desktopDir: '/d' }),
     { ok: false, reason: 'missing-paths' }
   );
+});
+
+
+/* ------- P67: the two REAL install-as-app defects (field report) ------- */
+
+test('install handler (source pin): AppImage shortcuts target the .AppImage FILE, not the vanishing temp mount', () => {
+  const src = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+  const start = src.indexOf("ipcMain.handle('yayra:install-page-as-app'");
+  const block = src.slice(start, start + 1600);
+  assert.ok(start > -1, 'handler exists');
+  assert.match(block, /process\.env\.APPIMAGE/, 'the .AppImage file path is preferred when running from one');
+  // ...and the dead PNG icon candidate (never shipped in the package,
+  // and .png is not a valid .lnk icon anyway) is gone for good.
+  assert.ok(!block.includes('iconCandidate'), 'no unshipped PNG icon candidate');
+});
+
+test('install handler (source pin): Windows .lnk gets no explicit icon (inherits the exe\u2019s own icon); Linux uses the hicolor name', () => {
+  const src = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+  const start = src.indexOf("ipcMain.handle('yayra:install-page-as-app'");
+  const block = src.slice(start, start + 1600);
+  assert.match(block, /iconPath = process\.platform === 'linux' \? 'yayra' : null/, 'per-platform icon policy');
+});
+
+test('buildInstallPlan linux: a bare hicolor icon NAME is written verbatim (Icon=yayra)', () => {
+  const plan = buildInstallPlan({
+    platform: 'linux',
+    execPath: '/home/me/Applications/yayra.AppImage',
+    url: 'https://music.youtube.com/',
+    title: 'YouTube Music',
+    desktopDir: '/home/me/Desktop',
+    iconPath: 'yayra'
+  });
+  assert.equal(plan.ok, true);
+  assert.ok(plan.artifacts[0].contents.includes('Icon=yayra\n'));
+  assert.ok(plan.artifacts[0].contents.includes('Exec="/home/me/Applications/yayra.AppImage" --app="https://music.youtube.com/"'));
 });

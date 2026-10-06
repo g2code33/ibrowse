@@ -109,6 +109,7 @@ const FRAME_EMBEDDING_BLOCKED_HOSTS = [
   'pinterest.com',
   'reddit.com',
   'yahoo.com',
+  'duckduckgo.com', 'startpage.com',
   'stackoverflow.com', 'stackexchange.com',
   'nytimes.com', 'wsj.com',
   'twitch.tv',
@@ -2254,33 +2255,87 @@ export class BrowserShell {
   }
 
   /**
-   * For frame-blocked SEARCH result pages (google.com/search, bing.com/
-   * search, ...) on platforms without the native engine (web/PWA and the
-   * Capacitor Android/iOS apps render sites in iframes), the search can
-   * still be answered IN-APP: DuckDuckGo's lite endpoint serves the same
-   * query and permits iframe embedding. Returns { src, query } for a
-   * recognised blocked SERP, or null for everything else. The tab's URL
-   * stays the original engine URL - this only swaps what the embedded
-   * frame renders, with an honest banner saying so.
+   * Recognise a SEARCH-RESULTS url and extract its query: Google, Bing,
+   * Yahoo, Startpage and DuckDuckGo SERPs. Returns { engine, query } or
+   * null. VERIFIED Oct 2026: NO major search engine - including
+   * DuckDuckGo's lite and html endpoints - allows its results to be
+   * embedded in another app's frame anymore (lite.duckduckgo.com and
+   * html.duckduckgo.com now send X-Frame-Options: SAMEORIGIN plus
+   * CSP frame-ancestors 'self'). So a blocked SERP gets a real HANDOFF
+   * (the search opens outside the frame - see
+   * maybeAutoOpenSerpExternally), never a dead embedded results page.
    */
-  getEmbeddableSearchFallback(url) {
+  getSearchIntent(url) {
     try {
       const u = new URL(url);
       const host = u.hostname.toLowerCase().replace(/^www\./, '');
-      let query = null;
+      const q = (param) => (u.searchParams.get(param) || '').trim();
       if ((host === 'google.com' || host.endsWith('.google.com')) && u.pathname.startsWith('/search')) {
-        query = u.searchParams.get('q');
+        if (q('q')) return { engine: 'Google', query: q('q') };
       } else if (host === 'bing.com' && u.pathname.startsWith('/search')) {
-        query = u.searchParams.get('q');
+        if (q('q')) return { engine: 'Bing', query: q('q') };
       } else if ((host === 'yahoo.com' || host === 'search.yahoo.com') && u.pathname.startsWith('/search')) {
-        query = u.searchParams.get('p') || u.searchParams.get('q');
+        const query = q('p') || q('q');
+        if (query) return { engine: 'Yahoo', query };
+      } else if (host === 'startpage.com' && (u.pathname.startsWith('/do/dsearch') || u.pathname.startsWith('/sp/search'))) {
+        if (q('query')) return { engine: 'Startpage', query: q('query') };
+      } else if (host === 'duckduckgo.com') {
+        if (q('q')) return { engine: 'DuckDuckGo', query: q('q') };
       }
-      query = (query || '').trim();
-      if (!query) return null;
-      return { src: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, query };
+      return null;
     } catch (_err) {
       return null;
     }
+  }
+
+  /**
+   * SEARCH HANDOFF: open the REAL search url outside the embedded frame.
+   * - Android/iOS: the secure system browser view (Chrome Custom Tab /
+   *   SFSafariViewController) - always works, feels in-app.
+   * - Web/PWA: a new browser tab via window.open - real search
+   *   navigations carry the user's activation (they pressed Enter or
+   *   picked a suggestion), so popup blockers allow it; session restores
+   *   and other activation-less loads fall back to the in-tab card's
+   *   button. Once per tab+url (re-renders never reopen anything).
+   */
+  maybeAutoOpenSerpExternally(url, tabId) {
+    if (!this._autoExternalOpened) this._autoExternalOpened = new Set();
+    const key = `${tabId || 'tab'}::serp::${url}`;
+    if (this._autoExternalOpened.has(key)) return true;
+    this._autoExternalOpened.add(key);
+    if (this.capacitorBrowser && typeof this.capacitorBrowser.open === 'function') {
+      Promise.resolve(this.openExternally(url)).catch(() => {});
+      return true;
+    }
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      try {
+        const opened = window.open(url, '_blank', 'noopener,noreferrer');
+        if (opened) return true;
+      } catch { /* popup-blocked - the card's button covers it */ }
+    }
+    return false;
+  }
+
+  /** Honest in-tab card for a handed-off search (the tab URL stays the
+   *  original engine url; one click re-opens the search). */
+  buildSerpHandoffFallback(url, intent, { autoOpened = false } = {}) {
+    const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+    const fallback = document.createElement('div');
+    fallback.className = 'fb-frame-blocked-fallback fb-serp-handoff-fallback';
+    fallback.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:#15171c; color:#d7dbe3; text-align:center; padding:24px; z-index:1;';
+    const message = autoOpened
+      ? `${intent.engine} doesn\u2019t allow its results inside other apps, so your search for \u201C${escapeHtml(intent.query)}\u201D opened in your browser.`
+      : `${intent.engine} doesn\u2019t allow its results inside other apps.`;
+    fallback.innerHTML = `
+      <div style="font-size:0.9rem; max-width:380px; line-height:1.5;">${message}</div>
+      <button type="button" class="fb-btn fb-frame-blocked-open-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">Open search</button>
+    `;
+    fallback.querySelector('.fb-frame-blocked-open-btn')?.addEventListener('click', () => {
+      this.openExternally(url);
+    });
+    return fallback;
   }
 
   /**
@@ -2355,35 +2410,19 @@ export class BrowserShell {
     // Known case: don't even attempt to embed it — avoids the raw browser
     // "refused to connect" error ever flashing inside the frame.
     if (this.isKnownFrameBlockedUrl(url)) {
-      // SEARCHES STILL WORK IN-APP: a blocked Google/Bing/Yahoo results
-      // page is answered by DuckDuckGo's embeddable results for the SAME
-      // query, with an honest banner. The tab URL stays the original.
-      const serp = this.getEmbeddableSearchFallback(url);
-      if (serp) {
-        const banner = document.createElement('div');
-        banner.className = 'fb-frame-serp-banner';
-        banner.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 12px; font-size:0.78rem; background:#1b1e27; color:#9aa3b2; border-bottom:1px solid rgba(255,255,255,0.08);';
-        banner.innerHTML = `
-          <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">This engine blocks embedded results \u2014 showing DuckDuckGo results instead.</span>
-          <button type="button" class="fb-btn fb-serp-open-original" style="padding:3px 10px; border-radius:6px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.75rem; flex:none;">Open original \u2197</button>
-        `;
-        banner.querySelector('.fb-serp-open-original')?.addEventListener('click', () => {
-          this.openExternally(url);
-        });
-        const column = document.createElement('div');
-        column.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column;';
-        const serpFrame = document.createElement('iframe');
-        if (frameClassName) serpFrame.className = frameClassName;
-        serpFrame.src = serp.src;
-        serpFrame.style.cssText = 'flex:1; border:none; width:100%; height:100%;';
-        serpFrame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
-        serpFrame.addEventListener('load', () => {
-          if (typeof onLoaded === 'function') onLoaded();
-        });
-        column.appendChild(banner);
-        column.appendChild(serpFrame);
-        wrapper.appendChild(column);
-        return { wrapper, iframe: serpFrame };
+      // SEARCHES: no major engine allows embedded results anymore
+      // (verified Oct 2026 - even DuckDuckGo's lite/html endpoints send
+      // X-Frame-Options: SAMEORIGIN), so the old "render DuckDuckGo
+      // results in the frame" fallback produced a DEAD blank frame. The
+      // search now genuinely OPENS - the secure system browser view on
+      // Android/iOS, a user-activated new browser tab on web - with an
+      // honest one-click "Open search" card kept in the tab.
+      const intent = this.getSearchIntent(url);
+      if (intent) {
+        const autoOpened = this.maybeAutoOpenSerpExternally(url, tabId);
+        wrapper.appendChild(this.buildSerpHandoffFallback(url, intent, { autoOpened }));
+        if (typeof onLoaded === 'function') onLoaded();
+        return { wrapper, iframe: null };
       }
       // Everything else that refuses embedding: on the Capacitor native
       // apps it opens AUTOMATICALLY in the secure system browser view

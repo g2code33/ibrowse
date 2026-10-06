@@ -122,29 +122,60 @@ test('OVERLAY FIX: watcher is idempotent and destroy() stops it (no leaked inter
 
 /* ------------------- 3. Google on Android and web -------------------- */
 
-test('GOOGLE FIX: blocked Google/Bing/Yahoo SERPs map to embeddable DuckDuckGo results for the SAME query', () => {
+test('GOOGLE FIX: search urls from every major engine are recognised (engine + query)', () => {
   const { shell } = makeShell();
-  const g = shell.getEmbeddableSearchFallback('https://www.google.com/search?q=accra%20weather');
+  const g = shell.getSearchIntent('https://www.google.com/search?q=accra%20weather');
   assert.ok(g, 'google SERP recognised');
-  assert.equal(g.src, 'https://lite.duckduckgo.com/lite/?q=accra%20weather');
+  assert.equal(g.engine, 'Google');
   assert.equal(g.query, 'accra weather');
-  const b = shell.getEmbeddableSearchFallback('https://www.bing.com/search?q=yayra');
-  assert.equal(b.src, 'https://lite.duckduckgo.com/lite/?q=yayra');
-  const y = shell.getEmbeddableSearchFallback('https://search.yahoo.com/search?p=kimi%20k3');
-  assert.equal(y.src, 'https://lite.duckduckgo.com/lite/?q=kimi%20k3');
-  assert.equal(shell.getEmbeddableSearchFallback('https://www.google.com/'), null, 'google homepage is NOT a SERP');
-  assert.equal(shell.getEmbeddableSearchFallback('https://example.com/search?q=x'), null, 'unknown hosts untouched');
+  assert.equal(shell.getSearchIntent('https://www.bing.com/search?q=yayra').engine, 'Bing');
+  assert.equal(shell.getSearchIntent('https://search.yahoo.com/search?p=kimi%20k3').query, 'kimi k3');
+  assert.equal(shell.getSearchIntent('https://www.startpage.com/do/dsearch?query=privacy').engine, 'Startpage');
+  assert.equal(shell.getSearchIntent('https://duckduckgo.com/?q=embeddable').engine, 'DuckDuckGo');
+  assert.equal(shell.getSearchIntent('https://www.google.com/'), null, 'google homepage is NOT a SERP');
+  assert.equal(shell.getSearchIntent('https://example.com/search?q=x'), null, 'unknown hosts untouched');
   shell.destroy();
 });
 
-test('GOOGLE FIX: a google search renders REAL results in-app via the DDG frame + honest banner (web/Capacitor iframe engine)', () => {
+test('GOOGLE FIX (Oct 2026): no engine allows embedded results anymore - a search OPENS outside the frame, never a dead DDG iframe', async () => {
+  // VERIFIED: lite.duckduckgo.com and html.duckduckgo.com now send
+  // X-Frame-Options: SAMEORIGIN + CSP frame-ancestors 'self' - the old
+  // "render DuckDuckGo results in the frame" fallback produced a blank
+  // refused frame ("the website is not working for google").
+  const opened = [];
+  window.Capacitor = {
+    isNativePlatform: () => true,
+    Plugins: { Browser: { open: async ({ url }) => { opened.push(url); } } }
+  };
   const { shell } = makeShell();
-  const { wrapper, iframe } = shell.createWebContentFrame('https://www.google.com/search?q=ghana', { allowNative: false });
-  assert.ok(iframe, 'an actual results frame is rendered - no dead card');
-  assert.equal(iframe.src, 'https://lite.duckduckgo.com/lite/?q=ghana');
-  assert.ok(wrapper.querySelector('.fb-frame-serp-banner'), 'banner explains the engine swap');
-  assert.ok(wrapper.querySelector('.fb-serp-open-original'), 'original URL one click away');
-  assert.equal(wrapper.querySelector('.fb-frame-blocked-fallback'), null, 'no blocked-card for searches');
+  try {
+    const { wrapper, iframe } = shell.createWebContentFrame('https://www.google.com/search?q=ghana', { tabId: 'tab-s1', allowNative: false });
+    assert.equal(iframe, null, 'no embedded results frame (every engine refuses framing now)');
+    await Promise.resolve();
+    assert.deepEqual(opened, ['https://www.google.com/search?q=ghana'],
+      'the REAL google search opens in the secure browser view');
+    const card = wrapper.querySelector('.fb-serp-handoff-fallback');
+    assert.ok(card, 'honest search-handoff card stays in the tab');
+    assert.match(card.querySelector('.fb-frame-blocked-open-btn').textContent, /Open search/);
+
+    // Re-render of the same tab+url must NOT reopen.
+    shell.createWebContentFrame('https://www.google.com/search?q=ghana', { tabId: 'tab-s1', allowNative: false });
+    await Promise.resolve();
+    assert.equal(opened.length, 1, 'strictly once per tab+url');
+  } finally {
+    shell.destroy();
+    delete window.Capacitor;
+  }
+});
+
+test('GOOGLE FIX (web): the search handoff never dead-ends without Capacitor - one click always opens it', () => {
+  delete window.Capacitor;
+  const { shell } = makeShell({ platform: 'linux' });
+  const { wrapper, iframe } = shell.createWebContentFrame('https://www.google.com/search?q=accra', { tabId: 'tab-s2', allowNative: false });
+  assert.equal(iframe, null);
+  const card = wrapper.querySelector('.fb-serp-handoff-fallback');
+  assert.ok(card, 'search-handoff card shown');
+  assert.match(card.querySelector('.fb-frame-blocked-open-btn').textContent, /Open search/);
   shell.destroy();
 });
 
