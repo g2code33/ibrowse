@@ -798,6 +798,12 @@ export class BrowserShell {
   // and this file ships in the plain web/PWA/Capacitor bundle too.
   static SYSTEM_BROWSER_AUTH_HOSTS = ['accounts.google.com', 'appleid.apple.com', 'login.live.com', 'login.microsoftonline.com'];
 
+  // Chrome-style keep-alive: loaded pages are never reloaded in the
+  // background; the live-page pool is bounded by an LRU cap instead
+  // (memory saver). 8 live pages is Chrome-grade generosity while keeping
+  // a lid on memory on low-end Android devices.
+  static MAX_POOLED_FRAMES = 8;
+
   isSystemBrowserAuthHost(url) {
     try {
       const hostname = new URL(url).hostname.toLowerCase();
@@ -1323,7 +1329,30 @@ export class BrowserShell {
       if (stale) stale.remove();
       frame.iframe.src = tab.url;
     }
+    frame.lastMountedAt = Date.now();
+    this.evictIdlePooledFrames();
     return true;
+  }
+
+  /**
+   * Chrome "memory saver" semantics for the iframe pool: keep at most
+   * MAX_POOLED_FRAMES live pages (the most recently used ones), discard the
+   * rest. A discarded tab simply mounts FRESH when the user switches back
+   * to it - a visible, on-demand load, exactly like Chrome rehydrating a
+   * discarded tab - and never a silent background reload of a live page.
+   * The active tab's frame is untouchable.
+   */
+  evictIdlePooledFrames() {
+    if (!this.webFrames || this.webFrames.size <= BrowserShell.MAX_POOLED_FRAMES) return;
+    const candidates = Array.from(this.webFrames.entries())
+      .filter(([tabId]) => tabId !== this.state.activeTabId)
+      .sort((a, b) => (a[1].lastMountedAt || 0) - (b[1].lastMountedAt || 0));
+    const excess = this.webFrames.size - BrowserShell.MAX_POOLED_FRAMES;
+    for (let i = 0; i < Math.min(excess, candidates.length); i += 1) {
+      const [tabId, frame] = candidates[i];
+      try { frame.host.remove(); } catch { /* already detached */ }
+      this.webFrames.delete(tabId);
+    }
   }
 
   syncWebFrameLayer() {
@@ -3835,13 +3864,6 @@ export class BrowserShell {
               </div>
               <input type="checkbox" id="fb-in-set-restore-session" ${this.state.settings.restoreSessionOnLaunch !== false ? 'checked' : ''} />
             </div>
-            <div class="fb-setting-toggle-row">
-              <div>
-                <strong>Auto-refresh Background Tabs</strong>
-                <p>Inactive tabs reload every 5 minutes so they always show current content when you switch back.</p>
-              </div>
-              <input type="checkbox" id="fb-in-set-auto-refresh-tabs" ${this.state.settings.autoRefreshBackgroundTabs !== false ? 'checked' : ''} />
-            </div>
           </section>
 
           <!-- Shortcuts: every keyboard shortcut, system-wide hotkey and
@@ -4051,7 +4073,8 @@ export class BrowserShell {
     bindToggle('#fb-in-set-https', (on) => { this.state.settings.httpsFirst = on; });
     bindToggle('#fb-in-set-adblock', (on) => { this.state.settings.adBlockEnabled = on; });
     bindToggle('#fb-in-set-restore-session', (on) => { this.state.settings.restoreSessionOnLaunch = on; });
-    bindToggle('#fb-in-set-auto-refresh-tabs', (on) => { this.state.settings.autoRefreshBackgroundTabs = on; });
+    // (Chrome-style keep-alive: loaded pages are never auto-refreshed -
+    // see mountPooledWebFrame(). The old auto-refresh toggle is gone.)
     bindToggle('#fb-in-set-floating-default', (on) => { this.state.settings.floatingEnabledByDefault = on; });
 
     // Transparency/size sliders already preview live on 'input'; persist
@@ -5975,13 +5998,14 @@ export class BrowserShell {
       if (typeof document !== 'undefined' && document.hidden === true) return;
       this.backgroundRefreshTick().catch(() => {});
     }, 15000);
-    // Background TABS auto-refresh: inactive sites reload on a cadence so
-    // switching to them shows CURRENT content, never a stale snapshot.
-    if (!this._tabAutoRefreshTimer) {
-      this._tabAutoRefreshTimer = window.setInterval(() => {
-        try { this.autoRefreshBackgroundTabs(); } catch { /* never break the shell */ }
-      }, 60 * 1000);
-    }
+    // DELIBERATELY NO background-tab reload timer. Chrome never reloads a
+    // loaded page: it stays exactly as the user left it - intact, alive and
+    // instantly interactive on switch-back. Auto-reloading background tabs
+    // (the old behaviour) destroyed SPA state, logged sessions out, and on
+    // suspended mobile WebViews left half-discarded dead pages behind.
+    // Frame memory is bounded the Chrome way instead: the pooled-frame LRU
+    // in mountPooledWebFrame() discards only under real pressure and only
+    // reloads a discarded tab ON SWITCH-BACK, visibly, never in background.
     this._bgStorageListener = (e) => {
       // Another same-profile window wrote shared state - sync right away.
       if (e && e.key && !String(e.key).startsWith('yayra')) return;
@@ -5991,59 +6015,21 @@ export class BrowserShell {
   }
 
   /**
-   * Keep every BACKGROUND tab fresh: an inactive http(s) tab that has
-   * not completed a load for 5+ minutes is reloaded in place, so
-   * switching back to it shows live content instead of a page frozen
-   * at whatever state it had when the user left ("looks like it is
-   * still loading until I manually refresh"). The active tab is never
-   * touched (the user is interacting with it), loading tabs are
-   * skipped, and the cadence restarts from each completed load.
-   * Settings > "Auto-refresh background tabs" turns this off.
+   * Chrome-style tab keep-alive: a loaded page is NEVER reloaded in the
+   * background - it stays exactly as the user left it (scroll position,
+   * SPA state, playing media, open menus), instantly interactive the
+   * moment they switch back. Memory is bounded by the pooled-frame LRU
+   * cap in mountPooledWebFrame() (the Chrome "memory saver" equivalent:
+   * discard only under pressure, reload only on the user's return, never
+   * behind their back). Refreshing happens ONLY on explicit user action:
+   * the reload button, F5/Ctrl-R, or the Refresh-all menu item.
    */
-  autoRefreshBackgroundTabs() {
-    if (this.state.settings.autoRefreshBackgroundTabs === false) return;
-    const now = Date.now();
-    const maxAgeMs = 5 * 60 * 1000;
-    // Collect every due tab, then reload ONLY the stalest one this tick.
-    // Restored sessions stamp all tabs at the same moment, so they all
-    // came due together - reloading 10+ tabs in the SAME tick was a
-    // periodic network/CPU/GPU spike that froze the app for seconds.
-    // The 60s cadence drains the queue one tab per tick, invisibly.
-    let stalest = null;
-    for (const tab of this.state.tabs) {
-      if (tab.id === this.state.activeTabId) continue;
-      if (tab.isLoading) continue;
-      if (!/^https?:\/\//i.test(tab.url || '')) continue;
-      if (!tab.lastLoadCompletedAt) {
-        // No load stamp yet (tab restored from a session) - start the
-        // clock now instead of instantly reloading everything at boot.
-        tab.lastLoadCompletedAt = now;
-        continue;
-      }
-      if (now - tab.lastLoadCompletedAt < maxAgeMs) continue;
-      if (!stalest || tab.lastLoadCompletedAt < stalest.lastLoadCompletedAt) stalest = tab;
-    }
-    if (!stalest) return;
-    stalest.lastLoadCompletedAt = now;
-    if (this.nativeWebview && this._nativeWebviewTabIds.has(stalest.id)) {
-      this.nativeWebview.reload(stalest.id).catch(() => {});
-    } else if (this.webFrames && this.webFrames.has(stalest.id)) {
-      const frame = this.webFrames.get(stalest.id);
-      // Re-assigning src IS the reload for a pooled iframe (the only
-      // reload a cross-origin frame allows).
-      try { if (frame && frame.iframe && frame.url) frame.iframe.src = frame.url; } catch { /* frame gone */ }
-    }
-  }
 
   stopBackgroundRefresh() {
     if (this._bgRefreshTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
       window.clearInterval(this._bgRefreshTimer);
     }
     this._bgRefreshTimer = null;
-    if (this._tabAutoRefreshTimer && typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
-      window.clearInterval(this._tabAutoRefreshTimer);
-    }
-    this._tabAutoRefreshTimer = null;
     if (this._bgStorageListener && typeof window !== 'undefined') {
       window.removeEventListener('storage', this._bgStorageListener);
       this._bgStorageListener = null;
@@ -10072,9 +10058,6 @@ export class BrowserShell {
     if (tab) {
       const changed = tab.isLoading !== Boolean(isLoading);
       tab.isLoading = Boolean(isLoading);
-      // Drives the background-tab auto-refresh cadence: 5 minutes from
-      // the last COMPLETED load, not from some arbitrary boot clock.
-      if (changed && !tab.isLoading) tab.lastLoadCompletedAt = Date.now();
       if (changed && tab.isLoading) {
         tab.loadingStartedAt = Date.now();
         this._ensureLoadingWatchdog();

@@ -46,9 +46,9 @@ globalThis.localStorage = {
 
 const { BrowserShell } = await import('../packages/shared-ui/src/components/BrowserShell.js');
 
-// ---- 1. background auto-refresh is staggered ---------------------------
+// ---- 1. background tabs are NEVER reloaded (Chrome keep-alive) ---------
 
-test('auto-refresh reloads at most ONE background tab per tick - restored sessions never reload in a herd', async () => {
+test('background tabs are never reloaded, not even one per tick - restored sessions never reload in a herd (Chrome keep-alive)', async () => {
   disk.clear();
   const reloads = [];
   globalThis.window.yayra = {
@@ -77,14 +77,14 @@ test('auto-refresh reloads at most ONE background tab per tick - restored sessio
   mkTab('t-oldest', 60 * 60 * 1000);
   shell.state.activeTabId = activeId;
 
-  shell.autoRefreshBackgroundTabs();
-  assert.deepEqual(reloads, ['t-oldest'], 'tick 1: ONLY the stalest tab reloads');
-  shell.autoRefreshBackgroundTabs();
-  assert.deepEqual(reloads, ['t-oldest', 't-older'], 'tick 2: the next stalest');
-  shell.autoRefreshBackgroundTabs();
-  assert.deepEqual(reloads, ['t-oldest', 't-older', 't-old'], 'tick 3: the queue drains one per tick');
-  shell.autoRefreshBackgroundTabs();
-  assert.equal(reloads.length, 3, 'nothing else due - no further reloads');
+  // Chrome keep-alive: however stale they are, loaded pages are left
+  // completely alone - no herd, no stagger, no reloads at all. Let time
+  // pass and poke the shell's own background services.
+  shell.startBackgroundRefresh();
+  await new Promise((r) => setTimeout(r, 30));
+  shell.stopBackgroundRefresh();
+  assert.deepEqual(reloads, [], 'zero background reloads - every loaded page stays intact');
+  shell.destroy();
   delete globalThis.window.yayra;
 });
 
