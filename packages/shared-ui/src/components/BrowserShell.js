@@ -1618,7 +1618,9 @@ export class BrowserShell {
     // unlike the old decorative cluster that was removed when the native
     // frame was still present. Web/PWA builds never render them (the
     // browser provides the window chrome there).
-    const winControls = this.windowControls;
+    // The frameless mini window has its own slim titlebar (expand/hide) -
+    // never render a second min/max/close cluster there.
+    const winControls = this.options?.isMiniShell ? null : this.windowControls;
     if (winControls) {
       const controls = document.createElement('div');
       controls.className = 'fb-window-controls';
@@ -3763,6 +3765,34 @@ export class BrowserShell {
     `;
   }
 
+  /**
+   * Yayra mini's view preference: 'desktop' (the DEFAULT - the same tab
+   * strip and toolbar as the main browser) or 'mobile' (the compact
+   * layout with controls at the bottom). Its own shared-profile storage
+   * key so the mini window can read it at boot; Settings > Floating
+   * toggles it.
+   */
+  getMiniLayoutPref() {
+    if (typeof localStorage === 'undefined') return 'desktop';
+    try {
+      return localStorage.getItem('yayra:mini-layout') === 'mobile' ? 'mobile' : 'desktop';
+    } catch { return 'desktop'; }
+  }
+
+  setMiniLayoutPref(pref) {
+    const value = pref === 'mobile' ? 'mobile' : 'desktop';
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('yayra:mini-layout', value);
+    } catch { /* storage unavailable - the choice still applies this session */ }
+    // Apply live when THIS shell is the mini panel itself (Settings opened
+    // inside yayra mini): the storage event only fires in OTHER windows.
+    if (this.options?.isMiniShell && this.state.isMobile !== (value === 'mobile')) {
+      this.state.isMobile = value === 'mobile';
+      this.render();
+    }
+    return value;
+  }
+
   renderInternalSettingsPage(viewport) {
     const page = document.createElement('div');
     page.className = 'fb-internal-page fb-settings-app fb-settings-inpage-layout';
@@ -3832,6 +3862,14 @@ export class BrowserShell {
                 <p>Launches directly into the floating browser window without opening a dashboard.</p>
               </div>
               <input type="checkbox" id="fb-in-set-floating-default" ${this.state.settings.floatingEnabledByDefault ? 'checked' : ''} />
+            </div>
+
+            <div class="fb-setting-toggle-row">
+              <div>
+                <strong>Yayra mini: desktop view</strong>
+                <p>On: the mini window uses the same desktop tab strip and toolbar as the main browser. Off: the compact mobile view with the controls at the bottom. Applies to an open mini window immediately.</p>
+              </div>
+              <input type="checkbox" id="fb-in-set-mini-desktop" ${this.getMiniLayoutPref() === 'desktop' ? 'checked' : ''} />
             </div>
 
             <div class="fb-setting-slider-row">
@@ -4257,6 +4295,14 @@ export class BrowserShell {
     // (Chrome-style keep-alive: loaded pages are never auto-refreshed -
     // see mountPooledWebFrame(). The old auto-refresh toggle is gone.)
     bindToggle('#fb-in-set-floating-default', (on) => { this.state.settings.floatingEnabledByDefault = on; });
+
+    // Yayra mini view: desktop chrome (default) or the compact mobile
+    // layout. Persisted to the shared profile storage so the mini window
+    // boots in the chosen view - and switches live while it is open.
+    page.querySelector('#fb-in-set-mini-desktop')?.addEventListener('change', (e) => {
+      const desktop = !!(e?.target?.checked ?? page.querySelector('#fb-in-set-mini-desktop')?.checked);
+      this.setMiniLayoutPref(desktop ? 'desktop' : 'mobile');
+    });
 
     // Transparency/size sliders already preview live on 'input'; persist
     // the final value once the user releases the handle ('change'). Bubble
@@ -11638,6 +11684,16 @@ export class BrowserShell {
   }
 
   handleViewportResize() {
+    // The mini panel's layout is the user's CHOICE (Settings > Floating:
+    // desktop or mobile view), never the window width - a narrow mini
+    // window must keep the desktop chrome when the user picked it.
+    if (this.options?.isMiniShell) {
+      this.syncWebFrameLayer();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => this.syncWebFrameLayer());
+      }
+      return;
+    }
     const isMobile = this.checkMobileViewport();
     if (isMobile !== this.state.isMobile) {
       this.state.isMobile = isMobile;

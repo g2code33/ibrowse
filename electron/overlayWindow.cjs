@@ -733,7 +733,9 @@ function createOverlayBridge({
    * ----------------------------------------------------------- */
 
   function miniDefaultBounds() {
-    const width = 420;
+    // 480px: comfortable room for the DEFAULT desktop view's tab strip +
+    // toolbar (back/forward/reload + omnibox + actions) in the mini panel.
+    const width = 480;
     const height = 640;
     try {
       const area = screen.getPrimaryDisplay().workAreaSize;

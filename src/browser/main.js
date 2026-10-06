@@ -16,6 +16,18 @@ const target = detectTarget();
 // and gets the compact layout + a slim draggable titlebar instead of the
 // full desktop chrome. See electron/overlayWindow.cjs.
 const isMiniShell = typeof location !== 'undefined' && new URLSearchParams(location.search || '').get('shell') === 'mini';
+
+// Yayra mini's view: 'desktop' (DEFAULT - the same tab strip and toolbar
+// as the main browser) or 'mobile' (the compact layout with controls at
+// the bottom). The user chooses in Settings > Floating; the choice lives
+// in the shared profile storage so the mini window reads it at boot.
+function resolveMiniLayoutPref() {
+  try {
+    return storage.getItem('yayra:mini-layout') === 'mobile' ? 'mobile' : 'desktop';
+  } catch {
+    return 'desktop';
+  }
+}
 const installedVersion = document.documentElement.dataset.version || '0.1.0';
 const storage = globalThis.localStorage || new MemoryStorage();
 const service = new UpdateService({
@@ -122,7 +134,9 @@ if (root) {
     // The mini panel is a ~420px-wide window: the compact (mobile) layout
     // is the right chrome for it, while still using the native per-tab
     // WebContentsView engine through the same preload bridge.
-    isMobile: isMiniShell || ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
+    isMobile: isMiniShell
+      ? resolveMiniLayoutPref() === 'mobile'
+      : ['android', 'ios', 'pwa', 'pwa-installed'].includes(target),
     // The mini panel shares the profile's storage with the main window -
     // it must NEVER write the rolling last-session snapshot, or every
     // bubble use wipes the "Continue with these tabs?" offer.
@@ -137,6 +151,20 @@ if (root) {
   // and the main window needs to receive such handoffs - both via the
   // overlay bridge (Electron only; a no-op elsewhere).
   window.__yayraShell = browserShell;
+  if (isMiniShell) {
+    // Live view switching: the Settings toggle (in the main window or the
+    // mini's own Settings page) writes the shared profile storage, and the
+    // storage event fires in every OTHER same-origin window - exactly how
+    // an open mini learns about the new preference.
+    window.addEventListener?.('storage', (e) => {
+      if (e && e.key && e.key !== 'yayra:mini-layout') return;
+      const wantMobile = resolveMiniLayoutPref() === 'mobile';
+      if (browserShell.state.isMobile !== wantMobile) {
+        browserShell.state.isMobile = wantMobile;
+        browserShell.render(root);
+      }
+    });
+  }
   if (!isMiniShell) {
     const overlayApi = (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
     overlayApi?.onOpenUrl?.(({ url } = {}) => browserShell.openUrlHandoff?.(url));
@@ -161,7 +189,11 @@ if (!isMiniShell) registerPwaUpdateHandler(DEFAULT_UPDATE_CONFIG);
 function mountMiniShellChrome() {
   const overlay = (window.yayra && window.yayra.overlay) || (window.ibrowse && window.ibrowse.overlay) || null;
   const style = document.createElement('style');
-  style.textContent = '#app { height: calc(100vh - 30px) !important; margin-top: 30px !important; }';
+  // The shell inside must fit the SHRUNKEN app area: .fb-browser-shell is
+  // height:100vh by default, so with the 30px titlebar above it the shell's
+  // bottom 30px (the mobile view's back/forward row) were pushed off-screen
+  // - "the buttons at the bottom of the mini yayra are not showing".
+  style.textContent = '#app { height: calc(100vh - 30px) !important; margin-top: 30px !important; } #app .fb-browser-shell { height: 100% !important; }';
   document.head.appendChild(style);
   const bar = document.createElement('div');
   bar.id = 'yayra-mini-titlebar';
