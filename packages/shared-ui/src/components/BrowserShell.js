@@ -404,6 +404,10 @@ export class BrowserShell {
     this.boundResizeHandler = () => this.handleViewportResize();
     this.boundKeyHandler = (e) => this.handleGlobalKeyDown(e);
     this._bookmarkCheckId = 0;
+    // PRODUCTION SHIELD: one stray exception in any handler must never
+    // look like a frozen app - errors are logged (rate-limited) and the
+    // UI loop keeps running (see installGlobalErrorShield).
+    this.installGlobalErrorShield();
 
     // Native website-rendering engine bridge (Electron desktop only - see
     // electron/webviewBridge.cjs). Subscribed once here, not per-render,
@@ -2662,9 +2666,11 @@ export class BrowserShell {
           this.updateBookmarkState(tab.url);
           // A reload reports the SAME url - rebuilding the whole chrome
           // for it is the "blink on refresh". Only a real address change
-          // needs a full render; reloads update surgically in place.
+          // needs a full render; reloads update surgically in place. Real
+          // changes go through requestRender() so a restore/navigate storm
+          // (many tabs landing at once) collapses into ONE rebuild.
           if (tab.url === previousUrl) this.refreshNavigationUi(tab);
-          else this.render();
+          else this.requestRender();
         }
         break;
       }
@@ -8306,18 +8312,18 @@ export class BrowserShell {
       }
     } else if (evt.type === 'download-failed') {
       this.state.updateState = { ...this.state.updateState, status: 'error', notes: evt.reason || 'download failed' };
-      this.render();
+      this.requestRender();
     } else if (evt.type === 'install-finished') {
       // Package manager finished (e.g. pkexec dpkg -i) - the main process
       // relaunches Yayra on the new version right after this event.
       this.state.updateState = { ...this.state.updateState, status: 'installing' };
-      this.render();
+      this.requestRender();
       this.showTransientNotice(`Update${evt.version ? ` v${evt.version}` : ''} installed - Yayra is restarting on the new version…`);
     } else if (evt.type === 'install-failed') {
       // Honest failure (declined password prompt, dpkg error, …): the
       // verified download stays staged so Install can be retried.
       this.state.updateState = { ...this.state.updateState, status: 'staged', notes: evt.reason || 'install failed' };
-      this.render();
+      this.requestRender();
       const reason = evt.reason === 'authorization-declined'
         ? 'the system password prompt was cancelled'
         : (evt.reason || 'unknown error');
@@ -11470,6 +11476,54 @@ export class BrowserShell {
     }
   }
 
+  /**
+   * PRODUCTION FREEZE SHIELD: a stray exception in any event handler must
+   * never look like a dead app. Uncaught errors and rejected promises are
+   * logged (rate-limited) and surfaced as a one-off notice - the UI loop
+   * itself keeps running. Installed once in the constructor.
+   */
+  installGlobalErrorShield() {
+    if (this._errorShieldInstalled || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    this._errorShieldInstalled = true;
+    let lastNoticeAt = 0;
+    const shield = (label) => (err) => {
+      try { this.logger?.(`[shield] ${label}: ${err && (err.message || err)}`); } catch { /* logging must never throw */ }
+      const now = Date.now();
+      if (now - lastNoticeAt > 15000) {
+        lastNoticeAt = now;
+        try { this.showTransientNotice?.('Something hiccuped in the background - Yayra recovered and kept your session.'); } catch { /* notice is best-effort */ }
+      }
+    };
+    this._errorShieldOnWindowError = shield('window error');
+    this._errorShieldOnRejection = shield('unhandled rejection');
+    try {
+      window.addEventListener('error', this._errorShieldOnWindowError);
+      window.addEventListener('unhandledrejection', this._errorShieldOnRejection);
+    } catch { /* older shims */ }
+  }
+
+  /**
+   * PRODUCTION RENDER COALESCING (anti-lag): bursts of state changes -
+   * session restore, multi-tab navigation storms, update events - each
+   * calling render() in the same frame caused back-to-back full DOM
+   * rebuilds, the classic startup jank. requestRender() batches any number
+   * of calls within one animation frame into a SINGLE render. Where
+   * requestAnimationFrame doesn't exist (tests, minimal shims) it falls
+   * back to a synchronous render, so behaviour is identical everywhere.
+   */
+  requestRender() {
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      this.render();
+      return;
+    }
+    if (this._renderFramePending) return;
+    this._renderFramePending = true;
+    window.requestAnimationFrame(() => {
+      this._renderFramePending = false;
+      this.render();
+    });
+  }
+
   handleGlobalKeyDown(e) {
     // Ctrl+T: New Tab
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 't') {
@@ -11620,6 +11674,13 @@ export class BrowserShell {
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.boundResizeHandler);
       window.removeEventListener('keydown', this.boundKeyHandler);
+      // Production error shield (installed in the constructor).
+      if (this._errorShieldOnWindowError) {
+        try { window.removeEventListener('error', this._errorShieldOnWindowError); } catch { /* shim */ }
+      }
+      if (this._errorShieldOnRejection) {
+        try { window.removeEventListener('unhandledrejection', this._errorShieldOnRejection); } catch { /* shim */ }
+      }
     }
     this.stopBackgroundUpdateChecks();
     this.stopBackgroundRefresh();

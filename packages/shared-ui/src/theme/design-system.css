@@ -1210,7 +1210,9 @@ html {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(10px);
+  /* PRODUCTION PERF: no backdrop-filter here - blurring the ENTIRE live
+     viewport behind every modal was the single most expensive paint on
+     low-end Android devices. A plain dim composites for free. */
   display: flex;
   align-items: center;
   justify-content: center;

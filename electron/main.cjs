@@ -849,6 +849,34 @@ function createWindow() {
     Menu.buildFromTemplate(template).popup({ window: win });
   });
 
+  // PRODUCTION FREEZE GUARDS: a renderer crash must never leave a dead
+  // white window that looks like a frozen app - reload it automatically,
+  // rate-limited so a genuine crash-loop can never spin the CPU.
+  let rendererReloads = 0;
+  let rendererReloadWindowStarted = 0;
+  win.webContents.on('render-process-gone', (_event, details) => {
+    const reason = details && details.reason;
+    if (reason !== 'crashed' && reason !== 'oom' && reason !== 'killed') return;
+    const now = Date.now();
+    if (now - rendererReloadWindowStarted > 60000) {
+      rendererReloadWindowStarted = now;
+      rendererReloads = 0;
+    }
+    rendererReloads += 1;
+    console.error(`[yayra] renderer gone (${reason}) - reload #${rendererReloads}`);
+    if (rendererReloads > 5) {
+      console.error('[yayra] renderer is crash-looping - not reloading again automatically');
+      return;
+    }
+    try { if (!win.isDestroyed()) win.webContents.reload(); } catch { /* already closing */ }
+  });
+  win.webContents.on('unresponsive', () => {
+    console.warn('[yayra] renderer reported unresponsive (busy page) - window stays alive');
+  });
+  win.webContents.on('responsive', () => {
+    console.log('[yayra] renderer responsive again');
+  });
+
   // Closing the main window only tears down ITS tab views; the floating
   // bubble/mini window (and their views) stay alive independently. The
   // webContents reference is captured now because the BrowserWindow proxy
