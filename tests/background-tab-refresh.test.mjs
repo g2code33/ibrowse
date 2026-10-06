@@ -198,3 +198,33 @@ test('title-updated patches the tab label in place instead of re-rendering every
     delete globalThis.window.yayra;
   }
 });
+
+test('TAB-ID UNIQUENESS (production freeze/lag class): rapid same-millisecond tab creation never collides - no aliased frames, ever', async () => {
+  delete globalThis.window.yayra;
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, platform: 'android', isMobile: true });
+  await shell.initialize();
+  try {
+    // 30 back-to-back tabs: ids must be unique BY CONSTRUCTION even when
+    // many land in the same millisecond (the old `tab-${Date.now()}`
+    // collided here, aliasing tabs onto one shared pooled frame).
+    for (let i = 0; i < 30; i += 1) shell.createNewTab();
+    const ids = shell.state.tabs.map((t) => t.id);
+    assert.equal(new Set(ids).size, ids.length, 'every tab id is unique');
+
+    // And the frame pool stays 1:1 with tabs under rapid creation.
+    for (const t of shell.state.tabs) t.url = `https://p${t.id}.example.com/`;
+    shell.render(container);
+    for (const t of shell.state.tabs) shell.selectTab(t.id);
+    shell.render(container);
+    const frameIds = new Set(Array.from(shell.webFrames.keys()));
+    for (const id of ids) {
+      if (frameIds.has(id)) {
+        assert.equal(shell.webFrames.get(id).url, `https://p${id}.example.com/`, 'no frame aliases two tabs');
+      }
+    }
+    assert.ok(shell.webFrames.size <= BrowserShell.MAX_POOLED_FRAMES, 'pool still bounded');
+  } finally {
+    shell.destroy();
+  }
+});

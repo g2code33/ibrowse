@@ -140,3 +140,20 @@ test('AI + suggestions are ON by default for production (nothing dormant)', asyn
   assert.match(svc, /enabled:\s*true/, 'AI enabled by default');
   assert.match(svc, /suggestInOmnibox:\s*true/, 'omnibox AI suggestions on by default');
 });
+
+test('PHONE-APPROVAL POLL HARDENING (source pin): error-guarded ticks + hard failsafe + unref - no leaked intervals', () => {
+  const src = readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
+  const start = src.indexOf('phoneApprovalStatus');
+  assert.ok(start > 0, 'phone approval poll exists');
+  const block = src.slice(start - 1200, start + 900);
+  assert.match(block, /catch \{\s*\n\s*finish\(false, 'The phone approval connection dropped - try again\.'\)/, 'a failing status call ends the wait cleanly');
+  assert.match(block, /150000/, 'hard 2.5-minute failsafe stops the poll');
+  assert.match(block, /typeof timer\.unref === 'function'/, 'timer unref\'d so it can never hold a process');
+});
+
+test('PWA PROMPT CAPTURE (source pin): the beforeinstallprompt listener installs exactly once', () => {
+  const src = readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
+  const start = src.indexOf('_capturePwaInstallPrompt() {');
+  const block = src.slice(start, src.indexOf('}', src.indexOf('}', start + 10) + 1) + 60);
+  assert.match(block, /_pwaPromptCaptured\)/, 'double-install guard present');
+});

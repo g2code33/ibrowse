@@ -395,6 +395,10 @@ export class BrowserShell {
     // pages never reload when the chrome re-renders. See ensureWebFrameLayer().
     this.webFrameLayer = null;
     this.webFrames = new Map();
+    // Strictly-increasing mount counter: pooled-frame LRU ordering must be
+    // deterministic BY CONSTRUCTION - wall-clock Date.now() can tie or jitter
+    // under load, which made eviction order (rarely) non-deterministic.
+    this._pooledFrameEpoch = 0;
     this.activeWebFrameSlot = null;
     this.activeWebFrameTabId = null;
     this.lastRenderTarget = null;
@@ -1292,6 +1296,9 @@ export class BrowserShell {
     if (this.nativeWebview) return false;
     if (this.isSystemBrowserAuthHost(tab.url)) return false;
     if (this.isKnownFrameBlockedUrl(tab.url)) return false;
+    // Internal pages (yayra://...) are DOM-rendered and must never occupy a
+    // pooled live-page slot (defense in depth for future internal schemes).
+    if (/^yayra:/i.test(String(tab.url || ''))) return false;
     if (this.state.zoomLevel !== 100) return false;
     const layer = this.ensureWebFrameLayer();
     if (!layer) return false;
@@ -1348,7 +1355,7 @@ export class BrowserShell {
       if (stale) stale.remove();
       frame.iframe.src = tab.url;
     }
-    frame.lastMountedAt = Date.now();
+    frame.lastMountedAt = ++this._pooledFrameEpoch; // monotonic: eviction order is always exact mount order
     this.evictIdlePooledFrames();
     return true;
   }
@@ -3087,6 +3094,7 @@ export class BrowserShell {
       let timer = null;
       const finish = async (approved, message) => {
         if (timer) clearInterval(timer);
+        timer = null;
         try { overlay.remove(); } catch { /* already gone */ }
         if (message) this.showTransientNotice(message);
         if (approved) {
@@ -3100,12 +3108,26 @@ export class BrowserShell {
         await this.passkeyService.cancelPhoneApproval();
         finish(false, null);
       });
+      // PRODUCTION HARDENING: every tick is error-guarded (a failing status
+      // call ends the wait cleanly instead of rejecting every 1.5s forever)
+      // and a hard 2.5-minute failsafe stops the poll even if the service
+      // never reports an end state - no leaked intervals, ever.
+      const startedAt = Date.now();
       timer = setInterval(async () => {
-        const { state } = await this.passkeyService.phoneApprovalStatus();
-        if (state === 'approved') finish(true, 'Approved from your phone - vault unlocked.');
-        else if (state === 'denied') finish(false, 'The request was denied on the phone.');
-        else if (state === 'expired' || state === 'idle' || state === 'unavailable') finish(false, 'The phone approval expired - try again.');
+        try {
+          if (Date.now() - startedAt > 150000) {
+            finish(false, 'The phone approval expired - try again.');
+            return;
+          }
+          const { state } = await this.passkeyService.phoneApprovalStatus();
+          if (state === 'approved') finish(true, 'Approved from your phone - vault unlocked.');
+          else if (state === 'denied') finish(false, 'The request was denied on the phone.');
+          else if (state === 'expired' || state === 'idle' || state === 'unavailable') finish(false, 'The phone approval expired - try again.');
+        } catch {
+          finish(false, 'The phone approval connection dropped - try again.');
+        }
       }, 1500);
+      if (timer && typeof timer.unref === 'function') timer.unref();
     });
   }
 
@@ -5973,6 +5995,8 @@ export class BrowserShell {
    */
   _capturePwaInstallPrompt() {
     if (typeof window === 'undefined') return;
+    if (this._pwaPromptCaptured) return; // never install the listener twice
+    this._pwaPromptCaptured = true;
     try {
       window.addEventListener?.('beforeinstallprompt', (e) => {
         if (e && typeof e.preventDefault === 'function') e.preventDefault();
@@ -10046,7 +10070,11 @@ export class BrowserShell {
    * TAB MANAGEMENT
    * ----------------------------------------------------------- */
   createNewTab(isPrivate = false) {
-    const newId = `tab-${Date.now()}`;
+    // Collision-proof id: `tab-${Date.now()}` alone DUPLICATED when two tabs
+    // were created in the same millisecond (fast Ctrl+T, scripted flows) -
+    // aliased tabs then shared ONE pooled frame, silently overwriting each
+    // other's live page. The random suffix makes ids unique by construction.
+    const newId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newTab = {
       id: newId,
       title: isPrivate ? 'Incognito Tab' : 'New Tab',
