@@ -315,8 +315,38 @@ test('key pool merges NVIDIA_API_KEYS list + numbered NVIDIA_API_KEY_n secrets (
       if (response.status === 200) answer = (await response.json()).answer;
     }
     assert.equal(answer, 'from key 12', 'failover reached the one healthy key');
-    assert.ok(usedKeys.size >= 2, 'multiple distinct keys were tried - the pool is real');
+    // NOTE: the rotor's start index is RANDOM per isolate (good production
+    // behaviour - it spreads simultaneous users across keys), so the walk
+    // may legitimately reach the healthy key in a single step when the
+    // random start lands on it. What must ALWAYS hold here: only keys from
+    // the configured bindings are ever used. (An old `usedKeys.size >= 2`
+    // assertion here made this test fail ~1 run in 12 purely by chance -
+    // it flipped the release build. The merge/dedupe count is proven
+    // deterministically below instead.)
     for (const k of usedKeys) assert.match(k, /^nvapi-pool-\d+$/, 'only configured keys ever used');
+
+    // DETERMINISTIC merge + dedupe proof: a fresh key set (fresh bench
+    // state - keyBench is module-level), every key 429s, and enough
+    // requests for the 5-attempt walk + benching to sweep the ENTIRE
+    // pool. Exactly 12 distinct keys must be tried: 13 would mean the
+    // duplicate was not deduped; fewer would mean a binding was dropped.
+    const seenAll = new Set();
+    globalThis.fetch = async (target, options) => {
+      seenAll.add(options.headers.Authorization.replace('Bearer ', ''));
+      return new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 });
+    };
+    const env2 = {
+      NVIDIA_API_KEYS: 'nvapi-merge-1,nvapi-merge-2,nvapi-merge-3,nvapi-merge-4,nvapi-merge-5\nnvapi-merge-6 nvapi-merge-7,nvapi-merge-8,nvapi-merge-9,nvapi-merge-10',
+      NVIDIA_API_KEY_1: 'nvapi-merge-10', // duplicate - must collapse
+      NVIDIA_API_KEY_2: 'nvapi-merge-11',
+      NVIDIA_API_KEY_3: 'nvapi-merge-12'
+    };
+    for (let i = 0; i < 8; i += 1) {
+      await worker.fetch(aiRequest({ messages: AI_MESSAGES }, '203.0.113.34'), env2);
+    }
+    assert.equal(seenAll.size, 12, 'exactly the 12 unique merged keys exist (both binding styles, duplicate deduped)');
+    for (const k of seenAll) assert.match(k, /^nvapi-merge-\d+$/, 'only configured keys ever used');
+    assert.ok(seenAll.has('nvapi-merge-11') && seenAll.has('nvapi-merge-12'), 'numbered bindings are part of the pool');
   } finally {
     globalThis.fetch = originalFetch;
   }

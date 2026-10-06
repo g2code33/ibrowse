@@ -158,16 +158,16 @@ class YayraOverlayPlugin : Plugin() {
             // Legacy path (pre-Android-8 or launchers without pin support):
             // the INSTALL_SHORTCUT broadcast (permission is declared in the
             // manifest, injected by scripts/ensure-capacitor-platform.mjs).
+            val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
             val broadcast = Intent("com.android.launcher.action.INSTALL_SHORTCUT").apply {
                 putExtra(Intent.EXTRA_SHORTCUT_NAME, title)
                 putExtra(Intent.EXTRA_SHORTCUT_INTENT, launchIntent)
-            }
-            val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
-            if (logoResId != 0) {
-                putExtra(
-                    Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
-                    Intent.ShortcutIconResource.fromContext(context, logoResId)
-                )
+                if (logoResId != 0) {
+                    putExtra(
+                        Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
+                        Intent.ShortcutIconResource.fromContext(context, logoResId)
+                    )
+                }
             }
             context.sendBroadcast(broadcast)
             call.resolve(JSObject().put("ok", true).put("method", "legacy-broadcast"))
