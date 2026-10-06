@@ -563,6 +563,16 @@ html {
   color: var(--fb-accent-primary);
 }
 
+/* Tab-group colour dot (menu > Tab groups): same colour = same group. */
+.fb-tab-group-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.4);
+}
+
 /* Real site logo in the tab: the globe fallback sits UNDER the logo
    image and is hidden the moment the logo loads (onload), or kept if
    the logo fails (onerror removes the img). */

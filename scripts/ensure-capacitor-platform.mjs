@@ -154,6 +154,7 @@ async function installAndroidOverlayNative() {
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="com.android.launcher.permission.INSTALL_SHORTCUT" />
 `;
       const service = `
         <!-- ${OVERLAY_MARKER}: user-controlled foreground service hosting the

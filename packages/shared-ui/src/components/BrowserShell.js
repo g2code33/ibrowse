@@ -861,6 +861,13 @@ export class BrowserShell {
     // ChatGPT-style AI chats: restore every saved conversation so any of
     // them can be continued later (the active thread starts fresh).
     this._loadAiChats();
+    // Web/PWA: capture the browser's install prompt so "Install page as
+    // app..." can trigger the REAL install flow (see installPageAsApp).
+    this._capturePwaInstallPrompt();
+    // Android: "installed site" home-screen shortcuts deep-link back into
+    // Yayra via com.yayra.app:/browse?url=... - handle them on launch and
+    // on every cold/warm reopen.
+    this._handleAppModeLaunchUrls();
     this.processPendingInstallOnLaunch().catch(() => {});
 
     if (this.settingsRepo) {
@@ -1444,6 +1451,16 @@ export class BrowserShell {
       faviconWrap.className = 'fb-tab-favicon';
       faviconWrap.innerHTML = this.getTabFavicon(tab);
       tabEl.appendChild(faviconWrap);
+
+      // Tab-group colour dot (menu > Tab groups): same colour = same group.
+      if (tab.group && tab.group.color) {
+        const groupDot = document.createElement('span');
+        groupDot.className = 'fb-tab-group-dot';
+        groupDot.style.background = tab.group.color;
+        groupDot.setAttribute('title', `Group: ${tab.group.name}`);
+        groupDot.setAttribute('aria-label', `Tab group ${tab.group.name}`);
+        tabEl.appendChild(groupDot);
+      }
 
       // Title
       const titleEl = document.createElement('span');
@@ -5944,10 +5961,58 @@ export class BrowserShell {
   }
 
   /**
-   * Chrome-style "Install page as app...": on the desktop app the site
-   * gets a REAL launcher entry (desktop icon + applications menu /
-   * Start Menu) that reopens it in its own minimal app window - like a
-   * PWA install. Honest messages where the platform can't do it.
+   * Web/PWA: catch the browser's beforeinstallprompt so Yayra itself can be
+   * installed from the menu (the only "install as app" a plain web page is
+   * allowed to perform). No-op everywhere the event doesn't exist.
+   */
+  _capturePwaInstallPrompt() {
+    if (typeof window === 'undefined') return;
+    try {
+      window.addEventListener?.('beforeinstallprompt', (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        this._pwaInstallPrompt = e;
+      });
+    } catch { /* older shims */ }
+  }
+
+  /**
+   * Android deep links from "installed site" home-screen shortcuts:
+   * com.yayra.app:/browse?url=<encoded site URL> (created by
+   * YayraOverlayPlugin.installSiteAsApp). Tapping the shortcut opens Yayra
+   * straight on the site. OAuth redirects and everything else are ignored
+   * here - they have their own handlers.
+   */
+  _handleAppModeLaunchUrls() {
+    try {
+      const app = typeof window !== 'undefined' ? window.Capacitor?.Plugins?.App : null;
+      if (!app || typeof app.addListener !== 'function') return;
+      const handle = (raw) => {
+        const url = String((raw && raw.url) || raw || '');
+        const match = /^com\.yayra\.app:\/browse\?url=(.+)$/.exec(url);
+        if (!match) return;
+        let target = null;
+        try { target = decodeURIComponent(match[1]); } catch { /* bad encoding */ }
+        if (!target || !/^https?:\/\//i.test(target)) return;
+        if (this.state.isMinimizedToBubble && typeof this.restoreFromBubble === 'function') {
+          this.restoreFromBubble();
+        }
+        this.navigateActiveTab(target);
+      };
+      app.addListener('appUrlOpen', (data) => handle(data));
+      if (typeof app.getLaunchUrl === 'function') {
+        Promise.resolve(app.getLaunchUrl()).then(handle).catch(() => {});
+      }
+    } catch { /* optional plugin */ }
+  }
+
+  /**
+   * Chrome-style "Install page as app...": a REAL launcher entry on every
+   * platform - Android gets a pinned home-screen shortcut that opens Yayra
+   * straight on the site (YayraOverlayPlugin.installSiteAsApp); the desktop
+   * app writes a real launcher entry (desktop icon + apps/Start menu) that
+   * reopens the site in its own minimal app window; web/PWA can only
+   * install Yayra itself, so it triggers the browser's own install flow
+   * when available and is honest otherwise.
    */
   async installPageAsApp() {
     const tab = this.getActiveTab();
@@ -5955,6 +6020,21 @@ export class BrowserShell {
       this.showTransientNotice('Open a website first - internal pages can\'t be installed as apps.');
       return;
     }
+    const title = String(tab.title || tab.url).slice(0, 60);
+    // 1. Android: REAL home-screen shortcut, deep-links back into Yayra.
+    const overlay = this.capacitorOverlay;
+    if (overlay && typeof overlay.installSiteAsApp === 'function') {
+      try {
+        const res = await overlay.installSiteAsApp({ url: tab.url, title });
+        if (res && res.ok) {
+          this.showTransientNotice(`Added \u201C${title}\u201D to your home screen - tap it to open Yayra straight on the site.`);
+          return;
+        }
+        this.showTransientNotice(`Couldn\u2019t add the site to your home screen${res && res.reason ? ` (${res.reason})` : ''}.`);
+        return;
+      } catch { /* fall through to other platforms */ }
+    }
+    // 2. Desktop app: launcher entry + its own app window.
     if (this.systemBridge && typeof this.systemBridge.installPageAsApp === 'function') {
       try {
         const res = await this.systemBridge.installPageAsApp({ url: tab.url, title: tab.title || tab.url });
@@ -5968,9 +6048,24 @@ export class BrowserShell {
         }
         this.showTransientNotice(`Couldn't install the app${res && res.reason ? ` (${res.reason})` : ''}.`);
         return;
-      } catch { /* fall through to the honest message */ }
+      } catch { /* fall through to the web path */ }
     }
-    this.showTransientNotice('Installing sites as apps needs the Yayra desktop app - in a browser, use its own "Install" / "Add to home screen".');
+    // 3. Web/PWA: a web page may only install ITSELF. Trigger the browser's
+    // real install flow for Yayra when it's available; be honest otherwise.
+    if (this._pwaInstallPrompt && typeof this._pwaInstallPrompt.prompt === 'function') {
+      try {
+        await this._pwaInstallPrompt.prompt();
+        const choice = await this._pwaInstallPrompt.userChoice;
+        this._pwaInstallPrompt = null; // one-shot per the platform contract
+        if (choice && choice.outcome === 'accepted') {
+          this.showTransientNotice('Installing Yayra as an app - it gets its own window and taskbar entry.');
+          return;
+        }
+        this.showTransientNotice('Install cancelled.');
+        return;
+      } catch { /* fall through to honesty */ }
+    }
+    this.showTransientNotice('A web page can\u2019t install another site as an app - use the Yayra desktop or Android app for that. To install Yayra itself, use your browser\u2019s install / add-to-home-screen option.');
   }
 
   /** Real desktop shortcut for the current page (desktop app only). */
@@ -6110,6 +6205,245 @@ export class BrowserShell {
     this.showTransientNotice(saved > 0
       ? `Bookmarked ${saved} open tab${saved === 1 ? '' : 's'}.`
       : 'No web pages open to bookmark.');
+  }
+
+  /**
+   * Parse an exported bookmarks file: Chrome/Firefox/Edge "Export
+   * bookmarks" HTML (NETSCAPE-Bookmark-file format) or a JSON array of
+   * {url,title}. Returns [{url,title}] - capped, http(s)-only, deduped.
+   */
+  parseBookmarksImport(text) {
+    const raw = String(text || '');
+    const found = [];
+    const push = (url, title) => {
+      const cleanUrl = String(url || '').trim();
+      const cleanTitle = String(title || '').trim() || cleanUrl;
+      if (!/^https?:\/\//i.test(cleanUrl)) return;
+      if (found.some((b) => b.url === cleanUrl)) return;
+      if (found.length >= 500) return;
+      found.push({ url: cleanUrl, title: cleanTitle.slice(0, 120) });
+    };
+    const asJson = (() => {
+      try { return JSON.parse(raw); } catch { return null; }
+    })();
+    if (Array.isArray(asJson)) {
+      for (const item of asJson) {
+        if (item && typeof item === 'object' && item.url) push(item.url, item.title);
+        else if (typeof item === 'string') push(item);
+      }
+      return found;
+    }
+    // NETSCAPE-Bookmark-file: <A HREF="url" ...>title</A>
+    const linkRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
+    let m;
+    while ((m = linkRe.exec(raw)) !== null) push(m[1], m[2].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, '\''));
+    return found;
+  }
+
+  /** Open the OS file picker (accepts .html/.json bookmark exports). */
+  _openFilePicker({ accept = '.html,.htm,.json' } = {}) {
+    return new Promise((resolve) => {
+      if (typeof document === 'undefined' || !document.body) { resolve(null); return; }
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = accept;
+      input.style.display = 'none';
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        try { input.remove(); } catch { /* already gone */ }
+        resolve(value || null);
+      };
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (file) {
+          Promise.resolve(file.text()).then((text) => finish(text)).catch(() => finish(null));
+        } else {
+          finish(null);
+        }
+      });
+      input.addEventListener('cancel', () => finish(null));
+      document.body.appendChild(input);
+      try { input.click(); } catch { finish(null); }
+    });
+  }
+
+  /**
+   * Import bookmarks from an export file (real parser above) into the
+   * bookmarks repo - Chrome/Firefox/Edge HTML exports and JSON arrays.
+   */
+  async importBookmarks() {
+    if (!this.bookmarksRepo) {
+      this.showTransientNotice('Bookmarks are unavailable on this device.');
+      return;
+    }
+    const text = await this._openFilePicker();
+    if (text === null || text === undefined || !String(text).trim()) return; // cancelled
+    const parsed = this.parseBookmarksImport(text);
+    if (!parsed.length) {
+      this.showTransientNotice('No bookmarks found in that file - export bookmarks from Chrome/Firefox as HTML first.');
+      return;
+    }
+    const before = new Set((await this.bookmarksRepo.getAllBookmarks()).map((b) => b.url));
+    for (const b of parsed) {
+      if (!before.has(b.url)) await this.bookmarksRepo.addBookmark({ url: b.url, title: b.title });
+    }
+    try { this.state.bookmarksItems = await this.bookmarksRepo.getAllBookmarks(); } catch { /* keep stale list */ }
+    const added = this.state.bookmarksItems.filter((b) => !before.has(b.url)).length;
+    this.render();
+    this.showTransientNotice(added > 0
+      ? `Imported ${added} bookmark${added === 1 ? '' : 's'} (${parsed.length - added} already existed).`
+      : 'All those bookmarks already exist - nothing new to import.');
+  }
+
+  /* ---------------- Real tab groups (name + colour) ---------------- */
+
+  static TAB_GROUP_COLORS = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899'];
+
+  _nextTabGroupColor() {
+    const used = new Set(this.state.tabs.map((t) => t.group && t.group.color).filter(Boolean));
+    const free = BrowserShell.TAB_GROUP_COLORS.find((c) => !used.has(c));
+    return free || BrowserShell.TAB_GROUP_COLORS[this.state.tabs.length % BrowserShell.TAB_GROUP_COLORS.length];
+  }
+
+  /** Create a named, colour-coded tab group from the active tab + open a
+   *  fresh tab inside it (exactly like Chrome's "New tab group"). */
+  async createTabGroup() {
+    const tab = this.getActiveTab();
+    if (!tab) return;
+    const name = await this._textPromptDialog({
+      title: 'New tab group',
+      description: 'Tabs in a group share a colour dot in the tab strip.',
+      placeholder: 'e.g. Research, Shopping, Work',
+      initialValue: ''
+    });
+    if (name === null) return;
+    const groupName = String(name || '').trim() || 'Group';
+    const color = this._nextTabGroupColor();
+    tab.group = { name: groupName, color };
+    this.render();
+    this.showTransientNotice(`Group \u201C${groupName}\u201D created - new tabs open into it until you ungroup.`);
+    this.createNewTab();
+    const fresh = this.getActiveTab();
+    if (fresh) fresh.group = { name: groupName, color };
+    this.render();
+  }
+
+  /** Add the active tab to a named group (Chrome's "Group current tab"). */
+  async groupCurrentTab() {
+    const tab = this.getActiveTab();
+    if (!tab) return;
+    const name = await this._textPromptDialog({
+      title: 'Group current tab',
+      description: 'Give the group a name - tabs in it share a colour dot.',
+      placeholder: 'e.g. Research',
+      initialValue: tab.group ? tab.group.name : ''
+    });
+    if (name === null) return;
+    const groupName = String(name || '').trim();
+    if (!groupName) {
+      this.showTransientNotice('Group name was empty - tab left ungrouped.');
+      return;
+    }
+    const existing = this.state.tabs.find((t) => t.group && t.group.name === groupName);
+    tab.group = existing
+      ? { name: existing.group.name, color: existing.group.color }
+      : { name: groupName, color: this._nextTabGroupColor() };
+    this.render();
+    this.showTransientNotice(`\u201C${tab.title || 'Tab'}\u201D added to group \u201C${groupName}\u201D.`);
+  }
+
+  /** Remove every tab from its group (Chrome's "Ungroup"). */
+  ungroupAllTabs() {
+    let count = 0;
+    for (const tab of this.state.tabs) {
+      if (tab.group) {
+        tab.group = null;
+        count += 1;
+      }
+    }
+    this.render();
+    this.showTransientNotice(count > 0
+      ? `${count} tab${count === 1 ? '' : 's'} removed from their group${count === 1 ? '' : 's'}.`
+      : 'No grouped tabs to ungroup.');
+  }
+
+  /**
+   * Translate the current page via Google's translate.goog proxy (the
+   * current "translate this page" mechanism; the old
+   * translate.google.com/translate?u= endpoint is dead). Prompts for the
+   * target language, defaults to English.
+   */
+  buildTranslatedPageUrl(url, targetLang = 'en') {
+    try {
+      const u = new URL(url);
+      if (!/^https?:$/.test(u.protocol)) return null;
+      if (u.hostname.endsWith('.translate.goog')) return null; // already translated
+      const host = `${u.hostname.replace(/-/g, '--').replace(/\./g, '-')}.translate.goog`;
+      const out = new URL(`${u.protocol}//${host}${u.pathname}${u.search}`);
+      out.searchParams.set('_x_tr_sl', 'auto');
+      out.searchParams.set('_x_tr_tl', String(targetLang || 'en').slice(0, 8));
+      out.searchParams.set('_x_tr_hl', 'en');
+      out.searchParams.set('_x_tr_pto', 'wapp');
+      out.searchParams.set('_x_tr_u', url);
+      return out.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  async translateActivePage() {
+    const tab = this.getActiveTab();
+    if (!tab || !/^https?:\/\//i.test(String(tab.url || ''))) {
+      this.showTransientNotice('Open a web page first - internal pages can\'t be translated.');
+      return;
+    }
+    const lang = await this._textPromptDialog({
+      title: 'Translate this page',
+      description: 'Translate the current page with Google Translate.',
+      placeholder: 'Two-letter language code, e.g. en, fr, es, sw',
+      initialValue: 'en'
+    });
+    if (lang === null) return;
+    const target = String(lang || '').trim().toLowerCase() || 'en';
+    const translated = this.buildTranslatedPageUrl(tab.url, target);
+    if (!translated) {
+      this.showTransientNotice('This page can\'t be translated.');
+      return;
+    }
+    this.navigateActiveTab(translated);
+    this.showTransientNotice(`Translating this page to \u201C${target}\u201D\u2026`);
+  }
+
+  /**
+   * Menu > Paste: execCommand('paste') is dead in every modern browser
+   * (pages may never read the clipboard without a user gesture + the async
+   * clipboard API). Do the real thing: read the clipboard (the browser
+   * asks permission) and insert into the focused editable field; if no
+   * Yayra field is focused, tell the user exactly what to do.
+   */
+  async pasteIntoFocusedField() {
+    const el = typeof document !== 'undefined' ? document.activeElement : null;
+    const editable = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.disabled && !el.readOnly ? el : null;
+    if (!editable) {
+      this.showTransientNotice('Tap into a text field first, then use Paste (or press Ctrl+V).');
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        this.showTransientNotice('The clipboard is empty.');
+        return;
+      }
+      const start = editable.selectionStart ?? editable.value.length;
+      const end = editable.selectionEnd ?? editable.value.length;
+      editable.value = editable.value.slice(0, start) + text + editable.value.slice(end);
+      if (typeof Event === 'function') editable.dispatchEvent?.(new Event('input', { bubbles: true }));
+      this.showTransientNotice('Pasted from the clipboard.');
+    } catch {
+      this.showTransientNotice('This browser blocked clipboard access - click the field and press Ctrl+V.');
+    }
   }
 
   /**
@@ -6531,6 +6865,7 @@ export class BrowserShell {
           ${this.state.tabs.map((tab) => `
             <div class="fb-tab-item fb-mini-tab-item ${tab.id === this.state.activeTabId ? 'active' : ''}" role="tab" aria-selected="${tab.id === this.state.activeTabId ? 'true' : 'false'}" data-tab-id="${tab.id}">
               <span class="fb-tab-favicon">${this.getTabFavicon(tab)}</span>
+              ${tab.group && tab.group.color ? `<span class="fb-tab-group-dot" style="background:${tab.group.color}"></span>` : ''}
               <span class="fb-tab-title">${tab.title || 'New Tab'}</span>
               <button class="fb-tab-close-btn fb-mini-tab-close" data-tab-id="${tab.id}" title="Close tab" aria-label="Close tab">${Icons.close}</button>
             </div>
@@ -8238,19 +8573,17 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-tg-new')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      this.createNewTab();
+      this.createTabGroup();
     });
 
     drawer.querySelector('.fb-dr-tg-add')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      this.openModal('tab-switcher');
+      this.groupCurrentTab();
     });
 
     drawer.querySelector('.fb-dr-tg-ungroup')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      this.render();
-      // Honest: Yayra has no tab grouping yet, so there is nothing to ungroup.
-      this.showTransientNotice('Tab groups are not available in Yayra yet - no group to remove this tab from.');
+      this.ungroupAllTabs();
     });
 
     drawer.querySelector('.fb-dr-downloads')?.addEventListener('click', () => {
@@ -8287,7 +8620,8 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-bm-import')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      this.openInternalPage('yayra://bookmarks');
+      this.render();
+      this.importBookmarks();
     });
 
     drawer.querySelector('.fb-dr-extensions')?.addEventListener('click', () => {
@@ -8359,7 +8693,8 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-paste')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      document.execCommand?.('paste');
+      this.render();
+      this.pasteIntoFocusedField();
     });
 
     drawer.querySelector('.fb-dr-zoom-in')?.addEventListener('click', () => {
@@ -8392,8 +8727,8 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-translate')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      const url = activeTab.url || 'https://yayra.app';
-      this.navigateActiveTab(`https://translate.google.com/translate?u=${encodeURIComponent(url)}`);
+      this.render();
+      this.translateActivePage();
     });
 
     // Cast, Save, and Share Actions

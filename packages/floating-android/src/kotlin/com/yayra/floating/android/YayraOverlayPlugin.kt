@@ -1,6 +1,11 @@
 package com.yayra.floating.android
 
 import android.content.Intent
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.drawable.Icon
+import android.net.Uri
+import android.os.Build
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -101,6 +106,73 @@ class YayraOverlayPlugin : Plugin() {
             call.resolve()
         } else {
             call.reject("no-activity")
+        }
+    }
+
+    /**
+     * Chrome-style "Install page as app..." on Android: a REAL launcher
+     * entry (pinned home-screen shortcut) for the site. Tapping it
+     * deep-links straight back INTO Yayra on that site via the existing
+     * com.yayra.app custom-scheme intent filter
+     * (com.yayra.app:/browse?url=...), exactly like a Chrome
+     * "Add to Home screen" web app.
+     */
+    @PluginMethod
+    fun installSiteAsApp(call: PluginCall) {
+        val url = call.getString("url")
+        if (url.isNullOrBlank()) {
+            call.reject("url-required")
+            return
+        }
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            call.reject("invalid-url")
+            return
+        }
+        val title = (call.getString("title") ?: url).trim().ifEmpty { url }
+        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
+        val launchIntent = Intent(Intent.ACTION_VIEW, Uri.parse("com.yayra.app:/browse?url=$encoded")).apply {
+            setPackage(context.packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val shortcutManager = context.getSystemService(ShortcutManager::class.java)
+                if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported) {
+                    val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
+                    val icon = if (logoResId != 0) {
+                        Icon.createWithResource(context, logoResId)
+                    } else {
+                        Icon.createWithResource(context, android.R.drawable.ic_menu_view)
+                    }
+                    val shortcut = ShortcutInfo.Builder(context, "yayra-site-${url.hashCode()}")
+                        .setShortLabel(title.take(10))
+                        .setLongLabel(title.take(40))
+                        .setIcon(icon)
+                        .setIntent(launchIntent)
+                        .build()
+                    shortcutManager.requestPinShortcut(shortcut, null)
+                    call.resolve(JSObject().put("ok", true).put("method", "pinned-shortcut"))
+                    return
+                }
+            }
+            // Legacy path (pre-Android-8 or launchers without pin support):
+            // the INSTALL_SHORTCUT broadcast (permission is declared in the
+            // manifest, injected by scripts/ensure-capacitor-platform.mjs).
+            val broadcast = Intent("com.android.launcher.action.INSTALL_SHORTCUT").apply {
+                putExtra(Intent.EXTRA_SHORTCUT_NAME, title)
+                putExtra(Intent.EXTRA_SHORTCUT_INTENT, launchIntent)
+            }
+            val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
+            if (logoResId != 0) {
+                putExtra(
+                    Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
+                    Intent.ShortcutIconResource.fromContext(context, logoResId)
+                )
+            }
+            context.sendBroadcast(broadcast)
+            call.resolve(JSObject().put("ok", true).put("method", "legacy-broadcast"))
+        } catch (err: Exception) {
+            call.reject("install-failed: ${err.message}")
         }
     }
 }
