@@ -6288,7 +6288,9 @@ export class BrowserShell {
       try {
         const res = await this.systemBridge.installPageAsApp({ url: tab.url, title: tab.title || tab.url });
         if (res && res.ok) {
-          this.showTransientNotice(`Installed "${res.name}" - it's on your desktop${res.inLauncher ? ' and in your apps menu' : ''}, and opens in its own window.`);
+          this.showTransientNotice(res.pwa
+            ? `Installed "${res.name}" as an app - its own icon is on your desktop${res.inLauncher ? ' and in your apps menu' : ''}, and it opens in its own window.`
+            : `Installed "${res.name}" - it's on your desktop${res.inLauncher ? ' and in your apps menu' : ''}, and opens in its own window.`);
           return;
         }
         if (res && res.reason === 'unsupported-platform') {

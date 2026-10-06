@@ -9,6 +9,7 @@ const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
 const { createWebviewBridge, buildContextMenuTemplate, buildBrowserUserAgent } = require('./webviewBridge.cjs');
 const { parseAppModeUrl, buildInstallPlan } = require('./appMode.cjs');
+const { extractManifestLink, parseManifest, pickInstallIdentity, isPngBuffer, isIcoBuffer, pngToIco } = require('./pwaManifest.cjs');
 const { startGlobalHotkeys } = require('./globalHotkeys.cjs');
 const { createAuthBridge } = require('./authBridge.cjs');
 const { createAuthStore } = require('./authStore.cjs');
@@ -263,6 +264,89 @@ function createAppModeWindow(url) {
   });
   win.loadURL(url);
   return win;
+}
+
+/**
+ * TRUE PWA INSTALL - the site's own identity for "Install page as app":
+ * reads the site's Web App Manifest (its OWN name, OWN icon, OWN
+ * start_url) and downloads its own icon into userData/pwa-icons, so the
+ * desktop entry is a PWA OF THAT SITE - exactly like Chrome's install -
+ * not a shortcut stamped with Yayra's branding. Windows .lnk icons need
+ * .ico, so a PNG icon is wrapped via pngToIco(); Linux .desktop entries
+ * take the absolute PNG path. Non-PWA sites fall back honestly (page
+ * title, the site's favicon.ico on Windows, the Yayra hicolor name on
+ * Linux). Everything is strictly time-boxed and never throws - a slow
+ * or missing manifest can only degrade the branding, never the install.
+ */
+async function resolvePwaInstallIdentity(url, pageTitle) {
+  const fallback = { name: pageTitle || '', startUrl: url, iconFile: null, pwa: false };
+  try {
+    if (!url || !/^https?:\/\//i.test(String(url))) return fallback;
+    const ua = buildBrowserUserAgent({ platform: process.platform, chromeVersion: process.versions.chrome });
+    const fetchBoxed = async (target, ms) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ms);
+      try {
+        const res = await net.fetch(target, { signal: controller.signal, headers: { 'User-Agent': ua, Accept: '*/*' }, redirect: 'follow' });
+        return res && res.ok ? res : null;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    // 1. The page's HTML -> its manifest link -> the manifest itself.
+    let manifest = null;
+    let manifestUrl = null;
+    const pageRes = await fetchBoxed(url, 6000);
+    if (pageRes) {
+      const html = await pageRes.text().catch(() => '');
+      manifestUrl = extractManifestLink(html, url);
+      if (manifestUrl) {
+        const manifestRes = await fetchBoxed(manifestUrl, 6000);
+        if (manifestRes) manifest = parseManifest(await manifestRes.text().catch(() => ''));
+      }
+    }
+    const identity = pickInstallIdentity({ manifest, manifestUrl, pageUrl: url, pageTitle });
+
+    // 2. The site's OWN icon: the manifest icon, else favicon.ico.
+    let iconUrl = identity.iconSrc;
+    if (!iconUrl) {
+      try { iconUrl = new URL('/favicon.ico', url).toString(); } catch { iconUrl = null; }
+    }
+    let iconFile = null;
+    if (iconUrl) {
+      const iconRes = await fetchBoxed(iconUrl, 6000);
+      if (iconRes) {
+        const bytes = Buffer.from(await iconRes.arrayBuffer().catch(() => new ArrayBuffer(0)));
+        if (bytes.length > 0 && bytes.length <= 3 * 1024 * 1024) {
+          const dir = path.join(app.getPath('userData'), 'pwa-icons');
+          fs.mkdirSync(dir, { recursive: true });
+          const slug = crypto.createHash('sha1').update(identity.startUrl).digest('hex').slice(0, 16);
+          if (isPngBuffer(bytes)) {
+            const pngPath = path.join(dir, `${slug}.png`);
+            fs.writeFileSync(pngPath, bytes);
+            if (process.platform === 'win32') {
+              const icoPath = path.join(dir, `${slug}.ico`);
+              fs.writeFileSync(icoPath, pngToIco(bytes));
+              iconFile = icoPath;
+            } else {
+              iconFile = pngPath; // Linux .desktop: absolute PNG path
+            }
+          } else if (isIcoBuffer(bytes) && process.platform === 'win32') {
+            const icoPath = path.join(dir, `${slug}.ico`);
+            fs.writeFileSync(icoPath, bytes);
+            iconFile = icoPath;
+          } // Linux can't use .ico in Icon= - the hicolor fallback stays
+        }
+      }
+    }
+    return { name: identity.name, startUrl: identity.startUrl, iconFile, pwa: identity.pwa };
+  } catch (err) {
+    console.warn('[yayra] pwa identity lookup fell back to plain install', err && err.message);
+    return fallback;
+  }
 }
 
 app.whenReady().then(async () => {
@@ -567,7 +651,7 @@ function registerIpcBridges() {
   // menu on Linux, desktop + Start Menu .lnk on Windows) that reopens
   // the site in its own minimal app window via `yayra --app=<url>` -
   // see createAppModeWindow() + electron/appMode.cjs.
-  ipcMain.handle('yayra:install-page-as-app', (_event, { url, title } = {}) => {
+  ipcMain.handle('yayra:install-page-as-app', async (_event, { url, title } = {}) => {
     try {
       // SHORTCUT TARGET FIX: inside a running AppImage, process.execPath
       // is the TEMPORARY squashfs mount (/tmp/.mount_yayraXXX/yayra)
@@ -578,18 +662,20 @@ function registerIpcBridges() {
       if (typeof process.env.APPIMAGE === 'string' && process.env.APPIMAGE.trim() !== '' && fs.existsSync(process.env.APPIMAGE)) {
         execPath = process.env.APPIMAGE;
       }
-      // SHORTCUT ICON FIX: build/icons is NOT packaged with the app, and
-      // Windows .lnk icons need .ico (not .png) anyway. Windows shortcuts
-      // inherit the target exe's own embedded icon when none is set -
-      // that is the correct setting there. Linux .desktop files take an
-      // icon NAME resolved through hicolor: 'yayra' is installed by the
-      // .deb and registered by AppImage desktop integration.
-      const iconPath = process.platform === 'linux' ? 'yayra' : null;
+      // TRUE PWA INSTALL: the desktop entry carries the SITE'S OWN name,
+      // OWN icon and OWN start url from its Web App Manifest (see
+      // resolvePwaInstallIdentity + electron/pwaManifest.cjs). When the
+      // site has no icon to give, Windows .lnk icons inherit the exe's
+      // own embedded icon and Linux .desktop entries fall back to the
+      // hicolor name 'yayra' (installed by the .deb, registered by
+      // AppImage desktop integration).
+      const identity = await resolvePwaInstallIdentity(url, title);
+      const iconPath = identity.iconFile || (process.platform === 'linux' ? 'yayra' : null);
       const plan = buildInstallPlan({
         platform: process.platform,
         execPath,
-        url,
-        title,
+        url: identity.startUrl,
+        title: identity.name,
         desktopDir: app.getPath('desktop'),
         applicationsDir: process.platform === 'linux'
           ? path.join(os.homedir(), '.local', 'share', 'applications')
@@ -618,7 +704,7 @@ function registerIpcBridges() {
         }
       }
       if (!primaryPath) return { ok: false, reason: 'write-failed' };
-      return { ok: true, name: plan.name, path: primaryPath, inLauncher: plan.inLauncher };
+      return { ok: true, name: plan.name, path: primaryPath, inLauncher: plan.inLauncher, pwa: identity.pwa };
     } catch (err) {
       console.error('[yayra] install page as app failed', err);
       return { ok: false, reason: 'failed' };
