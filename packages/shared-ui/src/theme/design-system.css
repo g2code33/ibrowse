@@ -5760,6 +5760,11 @@ html {
 }
 
 .fb-update-splash.fb-update-splash-leave {
+  /* FREEZE FIX: the leaving splash must stop eating clicks/scroll the
+     INSTANT dismissal starts - its removal timer can be throttled away in
+     a hidden window, and an invisible-but-present overlay is a full UI
+     freeze with nothing visible to explain it. */
+  pointer-events: none;
   animation: fb-splash-fade-out 0.45s ease-in both;
 }
 

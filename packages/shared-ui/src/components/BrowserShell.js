@@ -1092,14 +1092,44 @@ export class BrowserShell {
           ${previousVersion ? `<span class="fb-update-splash-from">from v${previousVersion}</span>` : ''}
         </div>
       </div>`;
+    // FREEZE FIX: stamp the birth time - render() force-retires any splash
+    // still on screen after 10s, no matter what happened to its timers.
+    try { splash.dataset.shownAt = String(Date.now()); } catch { /* dataset is a plain object in shims */ }
+    let dismissed = false;
     const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      // The leave state must stop eating input IMMEDIATELY: an animated
+      // but present splash still swallows every click and wheel event, and
+      // its removal timer can be throttled away in a hidden window.
       splash.classList.add('fb-update-splash-leave');
-      setTimeout(() => { try { splash.remove(); } catch { /* already gone */ } }, 450);
+      const kill = () => { try { splash.remove(); } catch { /* already gone */ } };
+      // Hidden page: don't wait for an animation or a follow-up timer -
+      // both are frozen/throttled in background windows. Remove NOW.
+      if (typeof document !== 'undefined' && document.hidden === true) {
+        kill();
+        return;
+      }
+      splash.addEventListener?.('animationend', kill);
+      setTimeout(kill, 600); // belt and braces: removal never hangs on one timer
     };
     splash.addEventListener('click', dismiss);
     document.body.appendChild(splash);
     // Quick by design: ~2.6s on screen, then it fades itself away.
     setTimeout(dismiss, 2600);
+    // FREEZE FIX (the reported one): timers in a backgrounded/minimized
+    // window are throttled or FROZEN by the engine, so the 2.6s dismiss
+    // above could simply never fire - leaving a full-screen blur that ate
+    // every click and scroll until the app was restarted. Three
+    // independent recovery triggers, any one of which is sufficient:
+    try {
+      document.addEventListener('visibilitychange', () => {
+        // The user just came back - retire the splash this instant.
+        if (typeof document === 'undefined' || document.hidden !== true) dismiss();
+      }, { once: true });
+      window.addEventListener?.('pointerdown', dismiss, { once: true });
+      window.addEventListener?.('keydown', dismiss, { once: true });
+    } catch { /* older shims */ }
   }
 
   getActiveTab() {
@@ -1111,6 +1141,19 @@ export class BrowserShell {
     if (!target) return null;
 
     this.lastRenderTarget = target;
+
+    // FREEZE FIX (stuck update splash): if every one of its dismissal
+    // triggers somehow failed (frozen timers, exotic embedders), any
+    // render force-retires a splash that is past its welcome - the UI can
+    // never be left behind a dead full-screen blur.
+    try {
+      if (typeof document !== 'undefined' && document.querySelector) {
+        const staleSplash = document.querySelector('.fb-update-splash');
+        if (staleSplash && Date.now() - Number(staleSplash.dataset?.shownAt || 0) > 10000) {
+          staleSplash.remove();
+        }
+      }
+    } catch { /* the sweep is best-effort */ }
 
     // Keep the "last session" snapshot rolling: every render follows a
     // state change, and the JSON-compare inside makes no-op calls free.
@@ -5942,7 +5985,13 @@ export class BrowserShell {
         </div>
       </div>`;
     document.body.appendChild(overlay);
-    const close = () => overlay.remove();
+    // DESKTOP: the native page view paints above HTML - hide it (with a
+    // snapshot) so this dialog is actually visible there.
+    if (this.nativeWebview) this.setPageObscured(true);
+    const close = () => {
+      overlay.remove();
+      if (this.nativeWebview) this.setPageObscured(false);
+    };
     overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) close(); });
     overlay.querySelector('.fb-qr-close')?.addEventListener('click', close);
     overlay.querySelector('.fb-qr-copy')?.addEventListener('click', () => {
@@ -6155,7 +6204,13 @@ export class BrowserShell {
         ${body}
       </article>`;
     document.body.appendChild(overlay);
-    overlay.querySelector('.fb-reader-close')?.addEventListener('click', () => overlay.remove());
+    // DESKTOP: hide the native page view (with snapshot) so the reader is
+    // visible above it; restore the live page on close.
+    if (this.nativeWebview) this.setPageObscured(true);
+    overlay.querySelector('.fb-reader-close')?.addEventListener('click', () => {
+      overlay.remove();
+      if (this.nativeWebview) this.setPageObscured(false);
+    });
   }
 
   /**
@@ -6212,7 +6267,11 @@ export class BrowserShell {
         ${heapLine}
       </div>`;
     document.body.appendChild(overlay);
-    const close = () => overlay.remove();
+    if (this.nativeWebview) this.setPageObscured(true);
+    const close = () => {
+      overlay.remove();
+      if (this.nativeWebview) this.setPageObscured(false);
+    };
     overlay.addEventListener('pointerdown', (e) => { if (e.target === overlay) close(); });
     overlay.querySelector('.fb-taskmgr-close')?.addEventListener('click', close);
   }
@@ -11552,6 +11611,51 @@ export class BrowserShell {
     });
   }
 
+  /**
+   * FREEZE RECOVERY - the universal escape hatch: closes EVERY full-screen
+   * overlay in one call, state chrome (drawer, modals, dropdowns, find
+   * bar, radial, mini window) AND the body-appended dialogs (reader, task
+   * manager, QR, passkey, update splash). Wired to Esc, so a stuck
+   * overlay can never hold the UI hostage - there is always one key that
+   * gives the page back. Returns true when it actually dismissed
+   * something (so callers can decide about preventDefault/render).
+   */
+  dismissAllOverlays() {
+    let dismissed = false;
+    const s = this.state;
+    if (s.isSideDrawerOpen) { s.isSideDrawerOpen = false; dismissed = true; }
+    if (s.activeModal) { this.closeModal(); dismissed = true; }
+    if (s.isSecurityDropdownOpen) { s.isSecurityDropdownOpen = false; dismissed = true; }
+    if (s.isAccountMenuOpen) { s.isAccountMenuOpen = false; dismissed = true; }
+    if (s.isDownloadsDropdownOpen) { s.isDownloadsDropdownOpen = false; dismissed = true; }
+    if (s.isRadialLauncherOpen) { try { this.closeRadialLauncher(); } catch { /* shim */ } dismissed = true; }
+    if (s.findInPage && s.findInPage.isOpen) { s.findInPage.isOpen = false; dismissed = true; }
+    if (s.isFloatingMiniOpen) { try { this.closeFloatingMini(); } catch { /* shim */ } dismissed = true; }
+    if (typeof document !== 'undefined' && document.body) {
+      const detach = (el, label) => {
+        if (!el) return;
+        try { el.remove(); } catch { /* already gone */ }
+        dismissed = true;
+        this.logger?.(`[overlays] Esc dismissed ${label}`);
+      };
+      // Tab-strip right-click menu + its scrim (state lives outside render()).
+      detach(document.body.querySelector('.fb-tab-context-menu'), 'tab context menu');
+      detach(document.body.querySelector('.fb-dropdown-scrim'), 'dropdown scrim');
+      // Body-appended dialogs (each also has its own close button).
+      detach(document.getElementById('yayra-reader-overlay'), 'reader');
+      detach(document.getElementById('yayra-taskmgr-overlay'), 'task manager');
+      detach(document.getElementById('yayra-url-qr-overlay'), 'QR dialog');
+      detach(document.body.querySelector('.fb-passkey-dialog-overlay'), 'passkey dialog');
+      detach(document.querySelector('.fb-update-splash'), 'update splash');
+    }
+    if (dismissed) {
+      // Give the page surface back (desktop native view) and repaint once.
+      try { this.setPageObscured(false); } catch { /* no native view */ }
+      this.render();
+    }
+    return dismissed;
+  }
+
   handleGlobalKeyDown(e) {
     // Ctrl+T: New Tab
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 't') {
@@ -11667,34 +11771,10 @@ export class BrowserShell {
     }
     // Esc: Close Overlays
     else if (e.key === 'Escape') {
-      // Tab-strip right-click menu lives outside render() state - remove
-      // it (and its scrim) directly, and give the page surface back.
-      if (typeof document !== 'undefined') {
-        const openTabMenu = document.body.querySelector('.fb-tab-context-menu');
-        if (openTabMenu) {
-          openTabMenu.remove();
-          document.body.querySelector('.fb-dropdown-scrim[data-tab-ctx]')?.remove();
-          this.setPageObscured(false);
-        }
-      }
-      if (this.state.isRadialLauncherOpen) {
-        this.closeRadialLauncher();
-      }
-      if (this.state.isFloatingMiniOpen) {
-        this.closeFloatingMini();
-      }
-      if (this.state.isSecurityDropdownOpen) {
-        this.state.isSecurityDropdownOpen = false;
-        this.render();
-      }
-      if (this.state.isAccountMenuOpen) {
-        this.state.isAccountMenuOpen = false;
-        this.render();
-      }
-      if (this.state.isSideDrawerOpen) {
-        this.state.isSideDrawerOpen = false;
-        this.render();
-      }
+      // FREEZE RECOVERY: one key gives the whole UI back - every state
+      // overlay AND every body-appended dialog (see dismissAllOverlays).
+      const dismissed = this.dismissAllOverlays();
+      if (dismissed && typeof e.preventDefault === 'function') e.preventDefault();
     }
   }
 
