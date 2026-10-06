@@ -709,10 +709,87 @@ export class BrowserShell {
         this.showTransientNotice('Allow "Display over other apps" so the Yayra bubble can float over everything.');
         await overlay.requestPermission?.();
       }
+      // THE FIX for "granted the permission but the bubble never appears":
+      // Android grants this permission on a separate Settings page, so
+      // requestPermission() always resolves with the PRE-grant state. Watch
+      // for the grant (app-resume + a bounded poll) and start the bubble
+      // the moment it lands - no restart, no second tap needed.
+      this._watchOverlayPermissionGrant();
     } catch (err) {
       this.logger?.(`[overlay] system bubble unavailable: ${err?.message || err}`);
     }
     return false;
+  }
+
+  /**
+   * Watches for the "Display over other apps" grant after the user has been
+   * sent to the system Settings page, and starts the system bubble the
+   * instant the permission turns up. Three triggers, all feature-detected:
+   * document visibilitychange (user returns to the app), Capacitor's
+   * App.appStateChange, and a bounded 1.5s poll (3 minutes max) for OEMs
+   * that show Settings as a floating pane without a visibility change.
+   * Idempotent - only one watcher runs at a time; stopped on grant,
+   * timeout, or destroy().
+   */
+  _watchOverlayPermissionGrant() {
+    if (this._overlayGrantWatchActive) return;
+    const overlay = this.capacitorOverlay;
+    if (!overlay || typeof overlay.hasPermission !== 'function') return;
+    this._overlayGrantWatchActive = true;
+
+    let pollTimer = null;
+    let appListener = null;
+    const doc = typeof document !== 'undefined' ? document : null;
+
+    const stopWatch = () => {
+      this._overlayGrantWatchActive = false;
+      this._stopOverlayGrantWatch = null;
+      if (pollTimer && typeof clearInterval === 'function') clearInterval(pollTimer);
+      pollTimer = null;
+      try { doc?.removeEventListener?.('visibilitychange', onVisible); } catch { /* shim */ }
+      try { appListener?.remove?.(); } catch { /* plugin gone */ }
+      appListener = null;
+    };
+    this._stopOverlayGrantWatch = stopWatch;
+
+    const recheck = async () => {
+      try {
+        const res = await overlay.hasPermission();
+        if (!res || !res.granted) return false;
+        stopWatch();
+        await overlay.show();
+        this.state.systemBubbleActive = true;
+        this.showTransientNotice?.('Yayra bubble is on - it now floats over your other apps.');
+        this.render();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const onVisible = () => {
+      if (!doc || doc.hidden !== true) recheck();
+    };
+
+    try { doc?.addEventListener?.('visibilitychange', onVisible); } catch { /* shim */ }
+    try {
+      const app = typeof window !== 'undefined' ? window.Capacitor?.Plugins?.App : null;
+      if (app && typeof app.addListener === 'function') {
+        appListener = app.addListener('appStateChange', (state) => {
+          if (state && state.isActive) recheck();
+        });
+      }
+    } catch { /* plugin optional */ }
+    if (typeof setInterval === 'function') {
+      let polls = 0;
+      pollTimer = setInterval(() => {
+        polls += 1;
+        if (polls > 120) { stopWatch(); return; } // 3 minutes, then stand down
+        recheck();
+      }, 1500);
+      // Node-only (no-op in browsers/WebViews): never keep a test runner's
+      // event loop alive just because a permission poll is pending.
+      if (pollTimer && typeof pollTimer.unref === 'function') pollTimer.unref();
+    }
   }
 
   // Keep in sync with SYSTEM_BROWSER_AUTH_HOSTS in electron/webviewBridge.cjs
@@ -2034,18 +2111,70 @@ export class BrowserShell {
     }
   }
 
-  buildFrameBlockedFallback(url) {
+  buildFrameBlockedFallback(url, { autoOpened = false } = {}) {
     const fallback = document.createElement('div');
     fallback.className = 'fb-frame-blocked-fallback';
     fallback.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:#15171c; color:#d7dbe3; text-align:center; padding:24px; z-index:1;';
+    const message = autoOpened
+      ? 'This site doesn\u2019t allow embedded browsing, so it was opened for you in a secure browser view.'
+      : 'This site doesn\u2019t allow embedded browsing and must be opened in its own tab.';
+    const buttonLabel = autoOpened ? 'Open again' : 'Open in new tab';
     fallback.innerHTML = `
-      <div style="font-size:0.9rem; max-width:360px; line-height:1.5;">This site doesn't allow embedded browsing and must be opened in its own tab.</div>
-      <button type="button" class="fb-btn fb-frame-blocked-open-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">Open in new tab</button>
+      <div style="font-size:0.9rem; max-width:360px; line-height:1.5;">${message}</div>
+      <button type="button" class="fb-btn fb-frame-blocked-open-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">${buttonLabel}</button>
     `;
     fallback.querySelector('.fb-frame-blocked-open-btn')?.addEventListener('click', () => {
       this.openExternally(url);
     });
     return fallback;
+  }
+
+  /**
+   * For frame-blocked SEARCH result pages (google.com/search, bing.com/
+   * search, ...) on platforms without the native engine (web/PWA and the
+   * Capacitor Android/iOS apps render sites in iframes), the search can
+   * still be answered IN-APP: DuckDuckGo's lite endpoint serves the same
+   * query and permits iframe embedding. Returns { src, query } for a
+   * recognised blocked SERP, or null for everything else. The tab's URL
+   * stays the original engine URL - this only swaps what the embedded
+   * frame renders, with an honest banner saying so.
+   */
+  getEmbeddableSearchFallback(url) {
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase().replace(/^www\./, '');
+      let query = null;
+      if ((host === 'google.com' || host.endsWith('.google.com')) && u.pathname.startsWith('/search')) {
+        query = u.searchParams.get('q');
+      } else if (host === 'bing.com' && u.pathname.startsWith('/search')) {
+        query = u.searchParams.get('q');
+      } else if ((host === 'yahoo.com' || host === 'search.yahoo.com') && u.pathname.startsWith('/search')) {
+        query = u.searchParams.get('p') || u.searchParams.get('q');
+      }
+      query = (query || '').trim();
+      if (!query) return null;
+      return { src: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, query };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  /**
+   * On the Capacitor native apps, frame-blocked sites are opened
+   * AUTOMATICALLY in the system secure browser view (Chrome Custom Tab /
+   * SFSafariViewController) the first time a tab lands on them - the user
+   * asked for google.com, so google.com opens, instead of a dead card.
+   * Once per tab+url (re-renders never reopen it); returns whether the
+   * auto-open happened for the fallback card's wording.
+   */
+  maybeAutoOpenBlockedExternally(url, tabId) {
+    if (!this.capacitorBrowser) return false;
+    if (!this._autoExternalOpened) this._autoExternalOpened = new Set();
+    const key = `${tabId || 'tab'}::${url}`;
+    if (this._autoExternalOpened.has(key)) return true;
+    this._autoExternalOpened.add(key);
+    Promise.resolve(this.openExternally(url)).catch(() => {});
+    return true;
   }
 
   buildSystemBrowserHandoffFallback(url) {
@@ -2102,7 +2231,42 @@ export class BrowserShell {
     // Known case: don't even attempt to embed it — avoids the raw browser
     // "refused to connect" error ever flashing inside the frame.
     if (this.isKnownFrameBlockedUrl(url)) {
-      wrapper.appendChild(this.buildFrameBlockedFallback(url));
+      // SEARCHES STILL WORK IN-APP: a blocked Google/Bing/Yahoo results
+      // page is answered by DuckDuckGo's embeddable results for the SAME
+      // query, with an honest banner. The tab URL stays the original.
+      const serp = this.getEmbeddableSearchFallback(url);
+      if (serp) {
+        const banner = document.createElement('div');
+        banner.className = 'fb-frame-serp-banner';
+        banner.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 12px; font-size:0.78rem; background:#1b1e27; color:#9aa3b2; border-bottom:1px solid rgba(255,255,255,0.08);';
+        banner.innerHTML = `
+          <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">This engine blocks embedded results \u2014 showing DuckDuckGo results instead.</span>
+          <button type="button" class="fb-btn fb-serp-open-original" style="padding:3px 10px; border-radius:6px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.75rem; flex:none;">Open original \u2197</button>
+        `;
+        banner.querySelector('.fb-serp-open-original')?.addEventListener('click', () => {
+          this.openExternally(url);
+        });
+        const column = document.createElement('div');
+        column.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column;';
+        const serpFrame = document.createElement('iframe');
+        if (frameClassName) serpFrame.className = frameClassName;
+        serpFrame.src = serp.src;
+        serpFrame.style.cssText = 'flex:1; border:none; width:100%; height:100%;';
+        serpFrame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups');
+        serpFrame.addEventListener('load', () => {
+          if (typeof onLoaded === 'function') onLoaded();
+        });
+        column.appendChild(banner);
+        column.appendChild(serpFrame);
+        wrapper.appendChild(column);
+        return { wrapper, iframe: serpFrame };
+      }
+      // Everything else that refuses embedding: on the Capacitor native
+      // apps it opens AUTOMATICALLY in the secure system browser view
+      // (Chrome Custom Tab) - the user asked for the site, so the site
+      // opens; the card stays behind with an "Open again" button.
+      const autoOpened = this.maybeAutoOpenBlockedExternally(url, tabId);
+      wrapper.appendChild(this.buildFrameBlockedFallback(url, { autoOpened }));
       if (typeof onLoaded === 'function') onLoaded();
       return { wrapper, iframe: null };
     }
@@ -10808,6 +10972,11 @@ export class BrowserShell {
     if (this._sessionSnapshotTimer) {
       clearTimeout(this._sessionSnapshotTimer);
       this._sessionSnapshotTimer = null;
+    }
+    // Android overlay-permission grant watcher (poll + listeners).
+    if (this._stopOverlayGrantWatch) {
+      try { this._stopOverlayGrantWatch(); } catch { /* already stopped */ }
+      this._stopOverlayGrantWatch = null;
     }
     if (this.webFrameLayer) {
       this.webFrameLayer.remove();

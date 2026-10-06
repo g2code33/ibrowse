@@ -205,13 +205,45 @@ async function installAndroidOverlayNative() {
 if (platform === 'android') {
   await injectAndroidUrlSchemeIntentFilter();
   await installAndroidOverlayNative();
-  for (const density of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
-    const src = path.join(root, 'native-assets/android', density, 'ic_launcher.png');
-    const destDir = path.join(root, 'android/app/src/main/res', density);
-    if (existsSync(src) && existsSync(path.join(root, 'android'))) {
+  // --- Launcher icon: the COMPLETE set, not just the legacy PNG. ---------
+  // Android 8+ (every modern device) ignores ic_launcher.png whenever
+  // mipmap-anydpi-v26/ic_launcher.xml exists: the adaptive icon XML wins,
+  // and Capacitor's template XML points at ic_launcher_foreground +
+  // ic_launcher_background - which used to stay the Capacitor defaults.
+  // That is exactly why the APK showed the wrong/missing logo. Now every
+  // layer is installed: legacy PNGs, round PNGs, adaptive foregrounds
+  // (brand logo inside the 66dp safe zone), the background colour, and
+  // the anydpi-v26 XMLs are rewritten to reference them.
+  if (existsSync(path.join(root, 'android'))) {
+    const resRoot = path.join(root, 'android/app/src/main/res');
+    for (const density of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
+      const srcDir = path.join(root, 'native-assets/android', density);
+      const destDir = path.join(resRoot, density);
       await mkdir(destDir, { recursive: true });
-      await cp(src, path.join(destDir, 'ic_launcher.png'));
+      for (const file of ['ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png']) {
+        const src = path.join(srcDir, file);
+        if (existsSync(src)) await cp(src, path.join(destDir, file));
+      }
     }
+    // Adaptive icon XMLs (overwrite the template's so they always point at
+    // the brand assets just installed).
+    const anydpi = path.join(resRoot, 'mipmap-anydpi-v26');
+    await mkdir(anydpi, { recursive: true });
+    const adaptiveXml = '<?xml version="1.0" encoding="utf-8"?>\n'
+      + '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+      + '    <background android:drawable="@color/ic_launcher_background"/>\n'
+      + '    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n'
+      + '</adaptive-icon>\n';
+    await writeFile(path.join(anydpi, 'ic_launcher.xml'), adaptiveXml);
+    await writeFile(path.join(anydpi, 'ic_launcher_round.xml'), adaptiveXml);
+    // Brand backdrop behind the transparent logo foreground.
+    const valuesDir = path.join(resRoot, 'values');
+    await mkdir(valuesDir, { recursive: true });
+    await writeFile(
+      path.join(valuesDir, 'ic_launcher_background.xml'),
+      '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#0B1220</color>\n</resources>\n'
+    );
+    console.log('installed complete Android launcher icon set (legacy + round + adaptive foreground/background)');
   }
 }
 if (platform === 'ios') {

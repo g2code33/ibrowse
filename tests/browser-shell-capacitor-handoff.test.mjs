@@ -82,7 +82,7 @@ test('Capacitor (Android/iOS): navigating to a sign-in host opens the native in-
   }
 });
 
-test('Capacitor (Android/iOS): a known frame-hostile site (e.g. google.com general browsing) shows the fallback card, and its button opens the native in-app browser', async () => {
+test('Capacitor (Android/iOS): a google SEARCH renders real results in-app (embeddable DDG frame + banner) - searches are never a dead card', async () => {
   const { opened, uninstall } = installFakeCapacitorBrowser();
   try {
     const container = document.createElement('div');
@@ -92,13 +92,42 @@ test('Capacitor (Android/iOS): a known frame-hostile site (e.g. google.com gener
     shell.navigateActiveTab('https://www.google.com/search?q=ghana');
     const el = shell.rootElement;
 
-    assert.equal(el.querySelector('iframe'), null);
-    const openBtn = el.querySelector('.fb-frame-blocked-open-btn');
-    assert.ok(openBtn, 'fallback card with an explicit open action is shown');
-    openBtn.click();
+    const frame = el.querySelector('iframe');
+    assert.ok(frame, 'search results ARE rendered in-app');
+    assert.equal(frame.src, 'https://lite.duckduckgo.com/lite/?q=ghana', 'same query, embeddable engine');
+    assert.ok(el.querySelector('.fb-frame-serp-banner'), 'honest banner about the engine swap');
+    assert.equal(el.querySelector('.fb-frame-blocked-fallback'), null, 'no dead blocked-card for searches');
+
+    // The banner's button hands the ORIGINAL Google URL to the native
+    // secure browser view.
+    el.querySelector('.fb-serp-open-original').click();
     await Promise.resolve();
     await Promise.resolve();
     assert.deepEqual(opened, ['https://www.google.com/search?q=ghana']);
+  } finally {
+    uninstall();
+  }
+});
+
+test('Capacitor (Android/iOS): a frame-hostile NON-search site (google.com homepage) auto-opens in the native secure browser view, card stays with Open again', async () => {
+  const { opened, uninstall } = installFakeCapacitorBrowser();
+  try {
+    const container = document.createElement('div');
+    const shell = new BrowserShell({ container, platform: 'android', isMobile: true });
+    await shell.initialize();
+
+    shell.navigateActiveTab('https://www.google.com/');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(opened, ['https://www.google.com/'], 'the user asked for google.com, so google.com OPENS - automatically');
+
+    const el = shell.rootElement;
+    const openBtn = el.querySelector('.fb-frame-blocked-open-btn');
+    assert.ok(openBtn, 'fallback card remains behind with a re-open action');
+    openBtn.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(opened, ['https://www.google.com/', 'https://www.google.com/']);
   } finally {
     uninstall();
   }
