@@ -4790,22 +4790,33 @@ export class BrowserShell {
     // arrives - no waiting for the whole completion. Tokens update the DOM
     // SURGICALLY (textContent on the live bubble), never via full render(),
     // so streaming stays smooth with zero flicker.
-    const live = { role: 'assistant', content: '', streaming: true, at: Date.now() };
+    const live = { role: 'assistant', content: '', thinking: '', streaming: true, at: Date.now() };
     this.state.aiConversation.push(live);
     this.state.aiBusy = true;
     this.render();
-    let thinkingChars = 0;
+    // Arena-agent-style live transparency: everything the model does in the
+    // background is SHOWN as it happens - the stage ("Connecting...",
+    // "Thinking...", then the answer), the actual reasoning text streaming
+    // into the open thinking panel, and a live token count. All painted
+    // surgically (textContent), never via full render() - zero flicker.
+    const last = (list) => (list && list.length ? list[list.length - 1] : null);
     const paintLiveAiBubble = () => {
       try {
-        const bodies = this.container?.querySelectorAll?.('.fb-ai-msg-body');
-        const el = bodies && bodies.length ? bodies[bodies.length - 1] : null;
-        if (!el) return;
-        // Reasoning models (Kimi K3...) think before answering - show live
-        // progress so the bubble is NEVER frozen while the model works.
-        el.textContent = live.content
-          || (thinkingChars > 0
-            ? `Thinking\u2026 (${Math.max(1, Math.round(thinkingChars / 4))} reasoning tokens)`
-            : 'Thinking\u2026');
+        const body = last(this.container?.querySelectorAll?.('.fb-ai-msg-body'));
+        if (body) {
+          body.textContent = live.content
+            || (live.thinking ? 'Thinking\u2026' : 'Connecting\u2026');
+        }
+        const thinkBody = last(this.container?.querySelectorAll?.('.fb-ai-think-body'));
+        if (thinkBody) thinkBody.textContent = live.thinking || '';
+        const toggle = last(this.container?.querySelectorAll?.('.fb-ai-think-toggle'));
+        if (toggle) {
+          toggle.textContent = live.thinking
+            ? `Thinking live\u2026 (${Math.max(1, Math.round(live.thinking.length / 4))} tokens)`
+            : 'Thinking live\u2026';
+        }
+        const thread = this.container?.querySelector?.('.fb-ai-thread');
+        if (thread && typeof thread.scrollHeight === 'number') thread.scrollTop = thread.scrollHeight;
       } catch { /* painting is best-effort; state holds the truth */ }
     };
     let result;
@@ -4817,7 +4828,7 @@ export class BrowserShell {
           paintLiveAiBubble();
         },
         onThinking: (delta) => {
-          thinkingChars += String(delta).length;
+          live.thinking += String(delta);
           paintLiveAiBubble();
         }
       });
@@ -4845,11 +4856,26 @@ export class BrowserShell {
       ? `your provider${cfg.model ? ` (${cfg.model})` : ''}`
       : 'Yayra\u2019s built-in AI';
 
-    const messagesHtml = this.state.aiConversation.map((m) => `
+    // Arena-agent-style transparency: assistant messages carry their live
+    // reasoning stream (m.thinking). While streaming, the thinking panel is
+    // OPEN and fills in real time - you watch the model work. Finished
+    // messages keep the transcript behind a "Show thinking" toggle.
+    const approxTokens = (s) => Math.max(1, Math.round(String(s || '').length / 4));
+    const messagesHtml = this.state.aiConversation.map((m, i) => {
+      const hasThink = m.role === 'assistant' && !m.error && (m.thinking || m.streaming);
+      return `
       <div class="fb-ai-msg fb-ai-msg-${m.role}${m.error ? ' fb-ai-msg-error' : ''}">
         <span class="fb-ai-msg-avatar">${m.role === 'user' ? Icons.finderFace : Icons.sparkles}</span>
-        <div class="fb-ai-msg-body"></div>
-      </div>`).join('');
+        <div class="fb-ai-msg-main">
+          ${hasThink ? `
+          <div class="fb-ai-think${m.streaming ? ' fb-ai-think-open' : ''}" data-i="${i}">
+            <button type="button" class="fb-ai-think-toggle">${m.streaming ? 'Thinking live\u2026' : `Show thinking (${approxTokens(m.thinking)} tokens)`}</button>
+            <div class="fb-ai-think-body"></div>
+          </div>` : ''}
+          <div class="fb-ai-msg-body"></div>
+        </div>
+      </div>`;
+    }).join('');
 
     page.innerHTML = `
       <div class="fb-internal-container fb-ai-container">
@@ -4892,11 +4918,34 @@ export class BrowserShell {
     // Message text is injected via textContent - AI/user content must
     // never be parsed as HTML.
     const bodies = page.querySelectorAll('.fb-ai-msg-body');
+    const thinkBodies = page.querySelectorAll('.fb-ai-think-body');
+    let thinkIdx = 0;
     this.state.aiConversation.forEach((m, i) => {
       // A still-empty streaming bubble reads "Thinking..." until the first
       // token lands (tokens then paint into it surgically, see askYayraAi).
       if (bodies[i]) bodies[i].textContent = m.content || (m.streaming ? 'Thinking\u2026' : '');
+      const hasThink = m.role === 'assistant' && !m.error && (m.thinking || m.streaming);
+      if (hasThink) {
+        if (thinkBodies[thinkIdx]) thinkBodies[thinkIdx].textContent = m.thinking || '';
+        thinkIdx += 1;
+      }
     });
+
+    // "Show thinking" toggles (programmatic listeners - shell CSP forbids
+    // inline handlers).
+    const thinkToggles = page.querySelectorAll('.fb-ai-think-toggle');
+    for (const btn of Array.from(thinkToggles || [])) {
+      btn.addEventListener('click', () => {
+        const wrap = btn.parentElement;
+        if (!wrap) return;
+        const open = wrap.classList.contains('fb-ai-think-open');
+        wrap.classList.toggle('fb-ai-think-open', !open);
+        const msg = this.state.aiConversation[Number(wrap.dataset?.i)] || {};
+        if (!msg.streaming) {
+          btn.textContent = `${open ? 'Show' : 'Hide'} thinking (${approxTokens(msg.thinking)} tokens)`;
+        }
+      });
+    }
 
     page.querySelector('.fb-ai-clear')?.addEventListener('click', () => {
       this.state.aiConversation = [];

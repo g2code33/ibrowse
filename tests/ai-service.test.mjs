@@ -447,20 +447,31 @@ test('STREAM THINKING: reasoning deltas fire onThinking live and NEVER pollute t
   assert.equal(result.answer, 'Final answer.', 'reasoning never leaks into the answer');
 });
 
-test('Shell STREAM THINKING: the live bubble shows reasoning progress instead of a frozen Thinking...', async () => {
-  let sawProgress = false;
+test('Shell STREAM THINKING (Arena-style): the live panel streams the ACTUAL reasoning text while the model works', async () => {
+  let liveChecks = null;
   let container;
+  const reasoning = 'The user greets me, so a short warm greeting back is the right answer here.';
   const aiService = {
     getConfig: async () => ({ ...AI_DEFAULTS }),
     updateConfig: async (p) => ({ ...AI_DEFAULTS, ...p }),
-    // Deterministic: fire onThinking mid-flight, then check the live bubble
-    // BEFORE resolving - the progress text must already be painted.
+    // Deterministic: fire onThinking mid-flight, then inspect the live DOM
+    // BEFORE resolving - the reasoning must already be painted, visible.
     ask: (prompt, { onThinking } = {}) => new Promise((resolve) => {
       setTimeout(() => {
-        onThinking('some reasoning tokens streaming in from the model right now');
+        onThinking(reasoning);
+        const thinkBodies = container.querySelectorAll('.fb-ai-think-body');
+        const thinkBody = thinkBodies[thinkBodies.length - 1];
+        const toggles = container.querySelectorAll('.fb-ai-think-toggle');
+        const toggle = toggles[toggles.length - 1];
         const bodies = container.querySelectorAll('.fb-ai-msg-body');
-        const el = bodies[bodies.length - 1];
-        sawProgress = /reasoning tokens/.test(el.textContent);
+        const body = bodies[bodies.length - 1];
+        liveChecks = {
+          reasoningPainted: thinkBody ? thinkBody.textContent : '(missing)',
+          panelOpen: thinkBody && thinkBody.parentElement
+            ? thinkBody.parentElement.classList.contains('fb-ai-think-open') : false,
+          toggleLabel: toggle ? toggle.textContent : '(missing)',
+          stage: body ? body.textContent : '(missing)'
+        };
         resolve({ success: true, answer: 'Hello!' });
       }, 0);
     }),
@@ -472,6 +483,20 @@ test('Shell STREAM THINKING: the live bubble shows reasoning progress instead of
   shell.state.tabs[0].url = 'yayra://ai';
   shell.render(container);
   await shell.askYayraAi('hi');
-  assert.equal(sawProgress, true, 'bubble showed "Thinking… (N reasoning tokens)" while the model thought');
+  assert.equal(liveChecks.reasoningPainted, reasoning, 'the ACTUAL reasoning text streams into the panel');
+  assert.equal(liveChecks.panelOpen, true, 'thinking panel is OPEN while streaming - you watch it work');
+  assert.match(liveChecks.toggleLabel, /Thinking live\u2026 \(\d+ tokens\)/, 'live token count ticks on the header');
+  assert.equal(liveChecks.stage, 'Thinking\u2026', 'answer bubble shows the current stage');
   assert.equal(shell.state.aiConversation[1].content, 'Hello!');
+  assert.equal(shell.state.aiConversation[1].thinking, reasoning, 'reasoning transcript preserved on the message');
+
+  // After finalizing + re-render: transcript collapses behind a toggle.
+  const wrapAfter = container.querySelector('.fb-ai-think');
+  assert.ok(wrapAfter, 'thinking block survives the final render');
+  assert.equal(wrapAfter.classList.contains('fb-ai-think-open'), false, 'collapsed once the answer is in');
+  const toggleAfter = container.querySelector('.fb-ai-think-toggle');
+  assert.match(toggleAfter.textContent, /Show thinking \(\d+ tokens\)/);
+  toggleAfter.click();
+  assert.equal(wrapAfter.classList.contains('fb-ai-think-open'), true, 'toggle reopens the transcript');
+  assert.match(toggleAfter.textContent, /Hide thinking \(\d+ tokens\)/);
 });

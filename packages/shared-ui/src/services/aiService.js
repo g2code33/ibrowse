@@ -50,7 +50,10 @@ const MAX_HISTORY_MESSAGES = 12;
 
 const SYSTEM_PROMPT = 'You are Yayra AI, the built-in assistant of the Yayra browser. '
   + 'Answer concisely and helpfully. When the user asks about a web page or search query, '
-  + 'give a direct useful answer first, then any brief follow-up suggestions.';
+  + 'give a direct useful answer first, then any brief follow-up suggestions. '
+  // Speed: reasoning models honour this - simple questions should not
+  // trigger long hidden deliberation before the first visible word.
+  + 'Think briefly; start answering as soon as you reasonably can and never overthink simple questions.';
 
 export class YayraAiService {
   constructor({ storage, fetchImpl, yayraEndpoint = YAYRA_AI_ENDPOINT } = {}) {
