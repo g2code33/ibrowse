@@ -1,0 +1,209 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { setupDomShim } from './dom-shim.mjs';
+
+setupDomShim();
+
+import { BrowserShell } from '../packages/shared-ui/src/components/BrowserShell.js';
+
+/**
+ * THE SECOND FREEZE CLASS (field report: "refreshing does not even work
+ * during this time, it only unfreezes back to normal after I click the
+ * search bar and search or run the site again - after doing that all the
+ * remaining pages now snap back with it").
+ *
+ * On desktop the live page is a NATIVE surface. Whenever Yayra chrome
+ * overlays it, the surface is hidden and replaced by a still snapshot.
+ * The "obscured" flag is sticky state - ONE missed close path (frozen
+ * background timer, exception, re-render mid-interaction) and the flag
+ * outlives its overlay: the user stares at a dead snapshot that swallows
+ * every click and wheel event. Refresh runs invisibly BEHIND the hidden
+ * surface (looks dead), every tab is frozen the same way, and only a
+ * fresh navigation happens to clear the flag - which is exactly why
+ * "running a site again" made all the remaining pages snap back at once.
+ *
+ * THE FIX, pinned here:
+ *  1. Truth-based invariant healStuckPageSurface(): if the flag says
+ *     obscured but NO genuine overlay exists on screen, the live surface
+ *     is restored - from render(), reload(), hardReload() and the moment
+ *     the user returns to the window.
+ *  2. The update splash yields the native surface on desktop (the native
+ *     view paints above all HTML) and EVERY dismiss path restores it.
+ *  3. A loaded page stays LIVE: no network-state listener ever reloads
+ *     or obscures it - the app only reacts to the user's own actions.
+ */
+
+async function makeShell(withBridge = false) {
+  const calls = [];
+  if (withBridge) {
+    globalThis.window.yayra = {
+      webview: {
+        ensure: async () => ({}), setBounds: async () => {},
+        setVisible: async (tabId, visible) => { calls.push(['setVisible', tabId, visible]); },
+        stop: async () => {}, goBack: async () => {}, goForward: async () => {},
+        reload: async (tabId) => { calls.push(['reload', tabId]); },
+        destroy: async () => {}, capture: async () => ({}), onEvent: () => () => {}
+      }
+    };
+  }
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, isMobile: false });
+  await shell.initialize();
+  if (withBridge) {
+    shell.state.tabs[0].url = 'https://example.com/live-page';
+    shell._nativeWebviewTabIds.add(shell.state.tabs[0].id);
+  }
+  shell.render(container);
+  return { shell, container, calls };
+}
+
+function lastVisibleCall(calls) {
+  return [...calls].reverse().find((c) => c[0] === 'setVisible') || null;
+}
+
+test('LIVE SURFACE: a stuck obscured flag (dead snapshot, dead scrolling) is healed by the next render', async () => {
+  const { shell, container, calls } = await makeShell(true);
+  try {
+    // Simulate the exact desync: a popup obscured the page and its close
+    // path never ran (frozen timer / missed blur) - flag stuck TRUE with
+    // NOTHING on screen.
+    shell.setPageObscured(true);
+    await new Promise((r) => setTimeout(r, 0)); // let the capture/hide microtask settle
+    assert.equal(shell.state.isPageObscured, true);
+    assert.ok(calls.some((c) => c[0] === 'setVisible' && c[2] === false),
+      'the live surface was hidden behind its still image');
+
+    shell.render(container); // ANY state change / repaint heals
+    assert.equal(shell.state.isPageObscured, false,
+      'no overlay on screen = no justification for a hidden page');
+    const last = lastVisibleCall(calls);
+    assert.ok(last && last[2] === true, 'the live native surface is visible again');
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+  }
+});
+
+test('REFRESH HEALS: reload() hands back the live surface even when nothing else ran', async () => {
+  const { shell, calls } = await makeShell(true);
+  try {
+    shell.setPageObscured(true);
+    await new Promise((r) => setTimeout(r, 0));
+    shell.reload();
+    assert.equal(shell.state.isPageObscured, false, 'refresh always restores the live page');
+    assert.ok(calls.some((c) => c[0] === 'reload'), 'the page reload itself also ran');
+    const last = lastVisibleCall(calls);
+    assert.ok(last && last[2] === true, 'surface visible again');
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+  }
+});
+
+test('RETURN HEALS: coming back to the window repairs a stuck surface instantly', async () => {
+  const { shell } = await makeShell(true);
+  try {
+    // The shim document has no event API - capture the listener the
+    // shell registers (exactly what a real visibilitychange fires).
+    const listeners = [];
+    document.addEventListener = (type, fn) => { listeners.push({ type, fn }); };
+    shell.setPageObscured(true); // arms the return-to-window heal
+    delete document.addEventListener; // restore the shim's default (absent)
+    assert.ok(listeners.some((l) => l.type === 'visibilitychange'),
+      'obscuring a surface arms the return-heal');
+
+    // The user comes back to the window (hidden -> false).
+    document.hidden = false;
+    for (const l of listeners) if (l.type === 'visibilitychange') l.fn();
+    assert.equal(shell.state.isPageObscured, false,
+      'the moment the user is back, the live surface is back');
+    delete document.hidden;
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+    try { delete document.hidden; } catch { /* already gone */ }
+  }
+});
+
+test('LEGIT OVERLAYS: real chrome is never fought by the heal - and the splash round-trips the surface', async () => {
+  const { shell, container } = await makeShell(true);
+  try {
+    shell.setPageObscured(true);
+    shell.state.isSideDrawerOpen = true; // genuine chrome on screen
+    shell.render(container);
+    assert.equal(shell.state.isPageObscured, true, 'drawer up = page legitimately obscured');
+    shell.state.isSideDrawerOpen = false;
+
+    // A young splash is legitimate chrome too - and on desktop the
+    // surface must yield so the splash is actually VISIBLE.
+    shell.showUpdateSplash('9.9.9', '9.9.8');
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(shell.state.isPageObscured, true, 'splash showing = surface yielded');
+    shell.render(container);
+    assert.equal(shell.state.isPageObscured, true, 'a young splash is not retired by the sweep');
+    assert.ok(document.querySelector('.fb-update-splash'), 'splash still on screen');
+
+    // ...and dismissing it (click path) hands the live surface back.
+    document.querySelector('.fb-update-splash').click();
+    assert.equal(shell.state.isPageObscured, false, 'dismiss restores the live page surface');
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+  }
+});
+
+test('COMPOSITION: a frozen splash (aged past 10s) is retired by render AND the surface heals in the SAME render', async () => {
+  const { shell, container } = await makeShell(true);
+  try {
+    shell.showUpdateSplash('9.9.9', '9.9.8');
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(shell.state.isPageObscured, true, 'desktop yields the surface to the splash');
+    const splash = document.querySelector('.fb-update-splash');
+    splash.dataset.shownAt = String(Date.now() - 20000); // every dismiss trigger died
+    shell.render(container);
+    assert.equal(document.querySelector('.fb-update-splash'), null, 'sweep retires the dead splash');
+    assert.equal(shell.state.isPageObscured, false,
+      'the same render heals the surface - blur wall AND dead snapshot both gone');
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+  }
+});
+
+test('ESC closes the omnibox suggestion dropdown too (it also obscures the page)', async () => {
+  const { shell } = await makeShell(false);
+  try {
+    const list = document.createElement('div');
+    list.className = 'fb-search-suggestions';
+    list.hidden = false;
+    document.body.appendChild(list);
+    let prevented = 0;
+    shell.handleGlobalKeyDown({ key: 'Escape', preventDefault() { prevented += 1; } });
+    assert.equal(list.hidden, true, 'the suggestion dropdown is closed by Esc');
+    assert.equal(prevented, 1, 'the key press is consumed');
+  } finally {
+    shell.destroy();
+  }
+});
+
+test('STAYS LIVE (source pin): no network-state listener ever reacts - and the heal is wired into every recovery path', () => {
+  const src = readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
+  // A loaded page must remain live even with disconnected internet: the
+  // shell NEVER subscribes to network state - only the user acts.
+  assert.doesNotMatch(src, /addEventListener\(\s*['"]online['"]/, 'no online listener');
+  assert.doesNotMatch(src, /addEventListener\(\s*['"]offline['"]/, 'no offline listener');
+  // The heal invariant is wired into render(), reload() and hardReload().
+  const renderStart = src.indexOf('render(container = null) {');
+  const renderHead = src.slice(renderStart, renderStart + 2000);
+  assert.match(renderHead, /healStuckPageSurface\(\)/, 'render() heals a stuck surface');
+  const reloadStart = src.indexOf('  reload() {');
+  const reloadBlock = src.slice(reloadStart, reloadStart + 800);
+  assert.match(reloadBlock, /healStuckPageSurface\(\)/, 'reload() heals');
+  const hardStart = src.indexOf('  async hardReload() {');
+  const hardBlock = src.slice(hardStart, hardStart + 800);
+  assert.match(hardBlock, /healStuckPageSurface\(\)/, 'hardReload() heals');
+  // Obscuring a surface arms the return-to-window heal.
+  assert.match(src, /this\.ensureSurfaceHealOnReturn\(\);/, 'obscure arms the return-heal');
+  assert.match(src, /visibilitychange[\s\S]{0,200}healStuckPageSurface\(\)/, 'the return listener heals');
+});

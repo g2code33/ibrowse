@@ -1099,6 +1099,10 @@ export class BrowserShell {
     const dismiss = () => {
       if (dismissed) return;
       dismissed = true;
+      // Hand the live page surface back (desktop) the instant the splash
+      // starts leaving - every dismiss path restores it, and the page is
+      // interactive again immediately (the leave state ignores input).
+      try { if (this.nativeWebview) this.setPageObscured(false); } catch { /* no native view */ }
       // The leave state must stop eating input IMMEDIATELY: an animated
       // but present splash still swallows every click and wheel event, and
       // its removal timer can be throttled away in a hidden window.
@@ -1115,6 +1119,11 @@ export class BrowserShell {
     };
     splash.addEventListener('click', dismiss);
     document.body.appendChild(splash);
+    // Desktop: the native page surface paints above ALL HTML - without
+    // yielding it the splash could not appear over the content area.
+    // Every dismiss path restores it, and healStuckPageSurface() catches
+    // any restore that a frozen timer might have eaten.
+    try { if (this.nativeWebview) this.setPageObscured(true); } catch { /* no native view */ }
     // Quick by design: ~2.6s on screen, then it fades itself away.
     setTimeout(dismiss, 2600);
     // FREEZE FIX (the reported one): timers in a backgrounded/minimized
@@ -1154,6 +1163,11 @@ export class BrowserShell {
         }
       }
     } catch { /* the sweep is best-effort */ }
+
+    // FREEZE FIX (stuck page surface): a sticky obscured flag with no
+    // overlay on screen = a dead snapshot instead of the live page.
+    // Truth-check it on EVERY render - the page stays live, always.
+    try { this.healStuckPageSurface(); } catch { /* best-effort heal */ }
 
     // Keep the "last session" snapshot rolling: every render follows a
     // state change, and the JSON-compare inside makes no-op calls free.
@@ -2639,6 +2653,9 @@ export class BrowserShell {
     if (isInternal) return;
 
     if (flag) {
+      // FREEZE FIX: surfaces obscured while the window is hidden are the
+      // ones whose close paths can freeze - arm the return-to-window heal.
+      this.ensureSurfaceHealOnReturn();
       this.syncNativeWebviewVisibility(tab.id, false, { captureActive: true });
       if (typeof document !== 'undefined') {
         const slot = this.viewportElement?.querySelector('.fb-native-webview-slot');
@@ -2661,6 +2678,74 @@ export class BrowserShell {
       if (restored && typeof restored.catch === 'function') restored.catch(() => {});
       this.restoreActiveNativeBounds(tab.id);
     }
+  }
+
+  /**
+   * FREEZE FIX (stuck page surface - "everything frozen, not even
+   * scrolling, refresh does not even work, until I ran a new search and
+   * all the remaining pages snapped back with it"): on desktop the live
+   * page is a native surface that is hidden and swapped for a still
+   * snapshot whenever Yayra chrome overlays it. That "obscured" flag is
+   * sticky STATE - if a popup's close path was ever missed (frozen
+   * background timer, exception, re-render mid-interaction), the flag
+   * outlives its overlay: the user stares at a dead snapshot that
+   * swallows every click and wheel event, refresh runs invisibly behind
+   * the hidden surface, and only a fresh navigation happens to repair
+   * it. This invariant replaces trust with truth: if the flag says
+   * obscured but no genuine obscuring overlay EXISTS on screen right
+   * now, restore the live surface immediately. Called from render(),
+   * reload(), hardReload() and the moment the user returns to the
+   * window - a loaded page must REMAIN live, always.
+   */
+  healStuckPageSurface() {
+    if (!this.state.isPageObscured) return false;
+    const s = this.state;
+    // Render-tracked chrome that legitimately obscures the page.
+    if (s.isSideDrawerOpen || s.activeModal || s.isSecurityDropdownOpen ||
+        s.isAccountMenuOpen || s.isDownloadsDropdownOpen || s.isFloatingMiniOpen ||
+        s.isRadialLauncherOpen || (s.findInPage && s.findInPage.isOpen) ||
+        s.pendingPasswordSave || s.closePrompt) return false;
+    // Transient popups that live OUTSIDE render() (they obscure too).
+    if (typeof document !== 'undefined' && document.body) {
+      try {
+        const up = (el) => Boolean(el) && el.hidden !== true;
+        if (up(document.querySelector('.fb-update-splash'))) return false;
+        if (up(document.querySelector('.fb-tab-context-menu'))) return false;
+        if (up(document.querySelector('.fb-dropdown-scrim'))) return false;
+        if (up(document.querySelector('.fb-passkey-dialog-overlay'))) return false;
+        if (up(document.getElementById('yayra-reader-overlay'))) return false;
+        if (up(document.getElementById('yayra-taskmgr-overlay'))) return false;
+        if (up(document.getElementById('yayra-url-qr-overlay'))) return false;
+        const lists = document.querySelectorAll('.fb-search-suggestions');
+        for (const list of (lists || [])) {
+          if (up(list)) return false; // omnibox / new-tab suggestion dropdown
+        }
+      } catch { /* best-effort DOM probe */ }
+    }
+    // Nothing on screen justifies hiding the page: restore the live
+    // surface (drops the still image, shows the native view again).
+    this.setPageObscured(false);
+    this.logger?.('[overlays] healed a stuck page-obscured flag - live surface restored');
+    return true;
+  }
+
+  /**
+   * Arms a one-shot heal for the moment the user returns to the window.
+   * Page surfaces obscured while the window was hidden (update relaunch,
+   * mid-typing relaunch) are exactly the ones whose close paths can
+   * freeze - the return itself must repair them. Re-arms on the next
+   * obscure; the heal is a no-op unless the flag is truly stuck.
+   */
+  ensureSurfaceHealOnReturn() {
+    if (this._surfaceHealOnReturnBound) return;
+    this._surfaceHealOnReturnBound = true;
+    try {
+      document.addEventListener('visibilitychange', () => {
+        if (typeof document === 'undefined' || document.hidden === true) return;
+        this._surfaceHealOnReturnBound = false; // re-arm on the next obscure
+        try { this.healStuckPageSurface(); } catch { /* best-effort */ }
+      });
+    } catch { /* embedders/shims without document events */ }
   }
 
   restoreActiveNativeBounds(tabId) {
@@ -10522,6 +10607,9 @@ export class BrowserShell {
   reload() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
+    // FREEZE FIX: refresh must ALWAYS hand back the live page surface -
+    // in the field a stuck obscured flag made refresh look dead.
+    try { this.healStuckPageSurface(); } catch { /* best-effort heal */ }
     if (this.nativeWebview && this._nativeWebviewTabIds.has(activeTab.id)) {
       // The X (stop) must appear the INSTANT the reload is requested -
       // not a roundtrip later when loading-start comes back from the
@@ -10551,6 +10639,8 @@ export class BrowserShell {
   async hardReload() {
     const activeTab = this.getActiveTab();
     if (!activeTab) return;
+    // FREEZE FIX: same invariant as reload() - the live surface comes back.
+    try { this.healStuckPageSurface(); } catch { /* best-effort heal */ }
     if (this.nativeWebview && typeof this.nativeWebview.hardReload === 'function' && this._nativeWebviewTabIds.has(activeTab.id)) {
       try {
         const res = await this.nativeWebview.hardReload(activeTab.id);
@@ -11648,8 +11738,20 @@ export class BrowserShell {
       detach(document.body.querySelector('.fb-passkey-dialog-overlay'), 'passkey dialog');
       detach(document.querySelector('.fb-update-splash'), 'update splash');
     }
-    if (dismissed) {
-      // Give the page surface back (desktop native view) and repaint once.
+    // The omnibox / new-tab suggestion dropdowns also obscure the page
+    // (they hide via [hidden], managed by bindSearchSuggestions) - one
+    // Esc press closes them too.
+    if (typeof document !== 'undefined' && document.body) {
+      try {
+        const lists = document.querySelectorAll('.fb-search-suggestions');
+        for (const list of (lists || [])) {
+          if (list && list.hidden !== true) { list.hidden = true; dismissed = true; }
+        }
+      } catch { /* best-effort */ }
+    }
+    if (dismissed || this.state.isPageObscured) {
+      // Give the page surface back (desktop native view) and repaint once -
+      // even when only the flag itself was stuck with nothing on screen.
       try { this.setPageObscured(false); } catch { /* no native view */ }
       this.render();
     }
