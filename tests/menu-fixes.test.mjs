@@ -264,3 +264,199 @@ test('KOTTON (Kotlin pin): the Android plugin really implements installSiteAsApp
   const ensure = readFileSync(new URL('../scripts/ensure-capacitor-platform.mjs', import.meta.url), 'utf8');
   assert.ok(ensure.includes('com.android.launcher.permission.INSTALL_SHORTCUT'), 'manifest permission injected for legacy devices');
 });
+
+test('SUBMENUS: every submenu parent opens on click, lists its items, and closes again', async () => {
+  const { shell, container } = await makeShell({ storage: makeStorage() });
+  try {
+    shell._textPromptDialog = async () => 'G';
+    shell._openFilePicker = async () => null;
+    shell.checkForUpdates = async () => {};
+    shell.state.isSideDrawerOpen = true;
+    shell.render(container);
+    const parents = Array.from(container.querySelectorAll('.fb-drawer-item-has-submenu'));
+    assert.ok(parents.length >= 7, `all submenu groups present (${parents.length} found)`);
+    for (const parent of parents) {
+      const button = parent.querySelector('.fb-drawer-item');
+      const items = parent.querySelectorAll('.fb-drawer-item');
+      assert.ok(items.length >= 2, 'submenu carries its options');
+      assert.equal(parent.classList.contains('open'), false, 'starts closed');
+      button.click();
+      assert.equal(parent.classList.contains('open'), true, 'opens on click');
+      button.click();
+      assert.equal(parent.classList.contains('open'), false, 'closes on second click');
+      // Every sub-option must also survive a click while open.
+      for (const item of Array.from(parent.querySelectorAll('.fb-drawer-submenu .fb-drawer-item'))) {
+        item.click();
+        await flush();
+      }
+    }
+  } finally {
+    shell.destroy();
+    delete globalThis.localStorage;
+  }
+});
+
+test('ZOOM + UPDATE + CLOSE: the non-item drawer controls all really work', async () => {
+  const { shell, container } = await makeShell({ storage: makeStorage() });
+  try {
+    shell.checkForUpdates = async () => {};
+    shell.applyUpdate = async () => { shell._applied = true; };
+    shell.installDesktopUpdateNow = async () => { shell._installed = true; };
+    shell.state.isSideDrawerOpen = true;
+    shell.state.updateState = { ...shell.state.updateState, status: 'ready', availableVersion: '9.9.9' };
+    shell.render(container);
+    container.querySelector('.fb-update-ready-btn')?.click();
+    await flush();
+    assert.equal(shell._applied, true, 'Update-ready button starts the update');
+
+    shell.state.updateState = { ...shell.state.updateState, status: 'staged' };
+    shell.state.isSideDrawerOpen = true; // the ready-click closed the drawer
+    shell.render(container);
+    container.querySelector('.fb-drawer-install-btn')?.click();
+    await flush();
+    assert.equal(shell._installed, true, 'Staged button installs');
+
+    container.querySelector('.fb-check-updates-btn')?.click();
+    await flush(); // no throw + checkForUpdates ran
+
+    shell.state.isSideDrawerOpen = true;
+    shell.render(container);
+    const before = shell.state.zoomLevel;
+    container.querySelector('.fb-dr-zoom-in')?.click();
+    assert.equal(shell.state.zoomLevel, Math.min(200, before + 10), 'zoom + works');
+    container.querySelector('.fb-dr-zoom-out')?.click();
+    container.querySelector('.fb-dr-zoom-out')?.click();
+    assert.equal(shell.state.zoomLevel, Math.max(50, before - 10), 'zoom - works');
+    container.querySelector('.fb-dr-fullscreen')?.click(); // no-throw in every environment
+    container.querySelector('.fb-close-drawer-btn')?.click();
+    assert.equal(shell.state.isSideDrawerOpen, false, 'close button closes the menu');
+  } finally {
+    shell.destroy();
+    delete globalThis.localStorage;
+  }
+});
+
+test('KEYBOARD: every shortcut the menu ADVERTISES really fires its action', async () => {
+  const { shell, container } = await makeShell({ storage: makeStorage() });
+  try {
+    shell._textPromptDialog = async () => 'G';
+    const calls = [];
+    shell.printActivePage = () => calls.push('print');
+    shell.savePageAs = async () => calls.push('save');
+    shell.openDevToolsForActiveTab = async () => calls.push('devtools');
+    shell.reload = () => calls.push('reload');
+    shell.hardReload = () => calls.push('hard-reload');
+    shell.state.tabs[0].url = 'https://example.com/';
+    shell.state.tabs[0].title = 'Example';
+    const key = (over) => shell.handleGlobalKeyDown({ ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, key: 'x', preventDefault() {}, ...over });
+
+    // Ctrl+T new tab
+    let count = shell.state.tabs.length;
+    key({ ctrlKey: true, key: 't' });
+    assert.equal(shell.state.tabs.length, count + 1, 'Ctrl+T');
+    // Ctrl+N floating mini window
+    key({ ctrlKey: true, key: 'n' });
+    assert.equal(shell.state.isFloatingMiniOpen, true, 'Ctrl+N');
+    shell.closeFloatingMini();
+    // Ctrl+Shift+N incognito
+    key({ ctrlKey: true, shiftKey: true, key: 'N' });
+    assert.equal(shell.state.tabs.at(-1).isPrivate, true, 'Ctrl+Shift+N');
+    // Ctrl+Shift+A tab search
+    key({ ctrlKey: true, shiftKey: true, key: 'A' });
+    assert.equal(shell.state.activeModal, 'tab-switcher', 'Ctrl+Shift+A');
+    shell.closeModal();
+    // Ctrl+Shift+Del clear data
+    key({ ctrlKey: true, shiftKey: true, key: 'Delete' });
+    assert.equal(shell.state.activeModal, 'clear-data', 'Ctrl+Shift+Del');
+    shell.closeModal();
+    // Ctrl+H history, Ctrl+J downloads, Ctrl+Shift+O bookmark manager
+    key({ ctrlKey: true, key: 'h' });
+    assert.equal(shell.getActiveTab().url, 'yayra://history', 'Ctrl+H');
+    key({ ctrlKey: true, key: 'j' });
+    assert.equal(shell.getActiveTab().url, 'yayra://downloads', 'Ctrl+J');
+    key({ ctrlKey: true, shiftKey: true, key: 'O' });
+    assert.equal(shell.getActiveTab().url, 'yayra://bookmarks', 'Ctrl+Shift+O');
+    // Ctrl+F find bar
+    key({ ctrlKey: true, key: 'f' });
+    assert.equal(shell.state.findInPage.isOpen, true, 'Ctrl+F');
+    // Ctrl+D bookmarks the page, Ctrl+Shift+D all tabs
+    shell.navigateActiveTab('https://example.com/');
+    key({ ctrlKey: true, key: 'd' });
+    await flush();
+    assert.ok((await shell.bookmarksRepo.getAllBookmarks()).some((b) => b.url === 'https://example.com/'), 'Ctrl+D');
+    key({ ctrlKey: true, shiftKey: true, key: 'D' });
+    await flush();
+    // Ctrl+Shift+B bookmarks bar
+    const barBefore = shell.state.settings.showBookmarksBar;
+    key({ ctrlKey: true, shiftKey: true, key: 'B' });
+    assert.notEqual(shell.state.settings.showBookmarksBar, barBefore, 'Ctrl+Shift+B');
+    // Ctrl+R / Ctrl+Shift+R
+    key({ ctrlKey: true, key: 'r' });
+    assert.ok(calls.includes('reload'), 'Ctrl+R');
+    key({ ctrlKey: true, shiftKey: true, key: 'R' });
+    assert.ok(calls.includes('hard-reload'), 'Ctrl+Shift+R');
+    // Ctrl+P / Ctrl+S / Ctrl+Shift+I / F12 / Alt+Shift+I
+    key({ ctrlKey: true, key: 'p' });
+    assert.ok(calls.includes('print'), 'Ctrl+P');
+    await key({ ctrlKey: true, key: 's' });
+    assert.ok(calls.includes('save'), 'Ctrl+S');
+    await key({ ctrlKey: true, shiftKey: true, key: 'I' });
+    assert.ok(calls.includes('devtools'), 'Ctrl+Shift+I');
+    await key({ key: 'F12' });
+    assert.equal(calls.filter((c) => c === 'devtools').length, 2, 'F12 also opens DevTools');
+    key({ altKey: true, shiftKey: true, key: 'I' });
+    assert.equal(shell.getActiveTab().url, 'https://github.com/g2code33/yayra/issues', 'Alt+Shift+I');
+    // Ctrl+W closes, Ctrl+Shift+T reopens
+    const before = shell.state.tabs.length;
+    key({ ctrlKey: true, key: 'w' });
+    assert.equal(shell.state.tabs.length, before - 1, 'Ctrl+W');
+    key({ ctrlKey: true, shiftKey: true, key: 'T' });
+    assert.equal(shell.state.tabs.length, before, 'Ctrl+Shift+T');
+    // Esc closes the drawer
+    shell.state.isSideDrawerOpen = true;
+    key({ key: 'Escape' });
+    assert.equal(shell.state.isSideDrawerOpen, false, 'Esc closes the menu');
+  } finally {
+    shell.destroy();
+    delete globalThis.localStorage;
+  }
+});
+
+test('CUT/COPY: real clipboard behaviour - honest notice with no selection, field cut works', async () => {
+  const { shell } = await makeShell({ storage: makeStorage() });
+  try {
+    // No selection anywhere -> honest instructions, never a silent no-op.
+    await shell.copySelectionToClipboard();
+    await shell.cutSelectionToClipboard();
+
+    // Selection inside a focused Yayra field + clipboard available.
+    const field = {
+      tagName: 'INPUT',
+      disabled: false,
+      readOnly: false,
+      value: 'hello yayra world',
+      selectionStart: 6,
+      selectionEnd: 11,
+      dispatchEvent() {}
+    };
+    Object.defineProperty(globalThis.document, 'activeElement', { configurable: true, get: () => field });
+    const wrote = [];
+    const originalClipboard = globalThis.navigator.clipboard;
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (t) => { wrote.push(t); } }
+    });
+    try {
+      await shell.copySelectionToClipboard();
+      assert.deepEqual(wrote, ['yayra'], 'Copy takes the field selection');
+      await shell.cutSelectionToClipboard();
+      assert.equal(field.value, 'hello  world', 'Cut removes the selection from the field');
+    } finally {
+      Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value: originalClipboard });
+      Object.defineProperty(globalThis.document, 'activeElement', { configurable: true, get: () => null });
+    }
+  } finally {
+    shell.destroy();
+    delete globalThis.localStorage;
+  }
+});

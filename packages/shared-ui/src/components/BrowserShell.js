@@ -6416,6 +6416,81 @@ export class BrowserShell {
     this.showTransientNotice(`Translating this page to \u201C${target}\u201D\u2026`);
   }
 
+  /** The focused editable field, or null (shared by cut/copy/paste). */
+  _focusedEditableField() {
+    const el = typeof document !== 'undefined' ? document.activeElement : null;
+    return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.disabled && !el.readOnly ? el : null;
+  }
+
+  /** Whatever text is currently selected: page selection, or the selection
+   *  inside the focused Yayra field. '' when nothing is selected. */
+  _currentSelectionText() {
+    try {
+      if (typeof document !== 'undefined' && typeof document.getSelection === 'function') {
+        const sel = String(document.getSelection() || '');
+        if (sel) return sel;
+      }
+    } catch { /* shim without getSelection */ }
+    const el = this._focusedEditableField();
+    if (el) {
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? 0;
+      if (typeof start === 'number' && typeof end === 'number' && end > start) {
+        return el.value.slice(start, end);
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Menu > Copy: the modern way - the current selection via the async
+   * clipboard API (execCommand('copy') is legacy and unreliable). Honest
+   * notices when nothing is selected or the browser blocks the clipboard.
+   */
+  async copySelectionToClipboard() {
+    const text = this._currentSelectionText();
+    if (!text) {
+      this.showTransientNotice('Select some text first - then Copy (or press Ctrl+C).');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      this.showTransientNotice('Copied to the clipboard.');
+    } catch {
+      this.showTransientNotice('This browser blocked clipboard access - press Ctrl+C instead.');
+    }
+  }
+
+  /**
+   * Menu > Cut: copies the current selection and removes it - fully works
+   * inside Yayra's own text fields; page text (cross-origin) can only be
+   * copied, never removed, and the user is told exactly that.
+   */
+  async cutSelectionToClipboard() {
+    const text = this._currentSelectionText();
+    if (!text) {
+      this.showTransientNotice('Select some text first - then Cut (or press Ctrl+X).');
+      return;
+    }
+    const el = this._focusedEditableField();
+    try {
+      await navigator.clipboard.writeText(text);
+      if (el) {
+        const start = el.selectionStart ?? 0;
+        const end = el.selectionEnd ?? 0;
+        if (end > start) {
+          el.value = el.value.slice(0, start) + el.value.slice(end);
+          if (typeof Event === 'function') el.dispatchEvent?.(new Event('input', { bubbles: true }));
+        }
+        this.showTransientNotice('Cut to the clipboard.');
+        return;
+      }
+      this.showTransientNotice('Copied - page text can\u2019t be removed from a website, only Yayra\u2019s own fields can be cut.');
+    } catch {
+      this.showTransientNotice('This browser blocked clipboard access - press Ctrl+X instead.');
+    }
+  }
+
   /**
    * Menu > Paste: execCommand('paste') is dead in every modern browser
    * (pages may never read the clipboard without a user gesture + the async
@@ -8683,12 +8758,14 @@ export class BrowserShell {
 
     drawer.querySelector('.fb-dr-cut')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      document.execCommand?.('cut');
+      this.render();
+      this.cutSelectionToClipboard();
     });
 
     drawer.querySelector('.fb-dr-copy')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
-      document.execCommand?.('copy');
+      this.render();
+      this.copySelectionToClipboard();
     });
 
     drawer.querySelector('.fb-dr-paste')?.addEventListener('click', () => {
@@ -11464,6 +11541,47 @@ export class BrowserShell {
       e.preventDefault();
       this.state.findInPage.isOpen = true;
       this.render();
+    }
+    // Ctrl+N: New window - the independent floating mini window (the
+    // web/PWA equivalent of a real new browser window).
+    else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'n') {
+      e.preventDefault();
+      this.openFloatingMini();
+    }
+    // Ctrl+Shift+A: Tab search (the tab switcher)
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      this.openModal('tab-switcher');
+    }
+    // Ctrl+Shift+Del: Clear browsing data
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Delete') {
+      e.preventDefault();
+      this.openModal('clear-data');
+    }
+    // Ctrl+Shift+O: Bookmark manager
+    else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      this.openInternalPage('yayra://bookmarks');
+    }
+    // Ctrl+P: Print the active page
+    else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      this.printActivePage();
+    }
+    // Ctrl+S: Save the active page
+    else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      this.savePageAs();
+    }
+    // Ctrl+Shift+I / F12: Developer tools for the active tab
+    else if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'i') || e.key === 'F12') {
+      e.preventDefault();
+      this.openDevToolsForActiveTab();
+    }
+    // Alt+Shift+I: Report an issue (matches the menu's advertised hint)
+    else if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'i') {
+      e.preventDefault();
+      this.navigateActiveTab('https://github.com/g2code33/yayra/issues');
     }
     // Esc: Close Overlays
     else if (e.key === 'Escape') {
