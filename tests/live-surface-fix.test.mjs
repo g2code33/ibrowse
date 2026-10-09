@@ -187,12 +187,21 @@ test('ESC closes the omnibox suggestion dropdown too (it also obscures the page)
   }
 });
 
-test('STAYS LIVE (source pin): no network-state listener ever reacts - and the heal is wired into every recovery path', () => {
+test('STAYS LIVE (source pin): connectivity listeners only INFORM - they never reload or obscure loaded pages', () => {
   const src = readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
-  // A loaded page must remain live even with disconnected internet: the
-  // shell NEVER subscribes to network state - only the user acts.
-  assert.doesNotMatch(src, /addEventListener\(\s*['"]online['"]/, 'no online listener');
-  assert.doesNotMatch(src, /addEventListener\(\s*['"]offline['"]/, 'no offline listener');
+  // A loaded page must remain live even with disconnected internet. The
+  // offline PROMPT feature (user-requested) adds online/offline listeners,
+  // so the contract is pinned on their BEHAVIOR: the connectivity block
+  // may only show notices and re-render (pooled live frames survive
+  // re-renders) - it must NEVER call reload()/navigateActiveTab().
+  const connStart = src.indexOf('_armConnectivityAwareness() {');
+  assert.ok(connStart > -1, 'connectivity awareness exists');
+  const connBlock = src.slice(connStart, src.indexOf('buildOfflineFallback', connStart));
+  assert.match(connBlock, /'offline'/, 'offline notice armed');
+  assert.match(connBlock, /'online'/, 'online notice + heal armed');
+  assert.doesNotMatch(connBlock, /this\.reload\(/, 'connectivity events never reload a page');
+  assert.doesNotMatch(connBlock, /navigateActiveTab/, 'connectivity events never navigate');
+  assert.match(connBlock, /Pages you already opened stay available/, 'the promise is stated to the user');
   // The heal invariant is wired into render(), reload() and hardReload().
   const renderStart = src.indexOf('render(container = null) {');
   const renderHead = src.slice(renderStart, renderStart + 2000);

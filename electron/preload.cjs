@@ -180,6 +180,12 @@ const api = {
     // Chrome-style "Install page as app...": real launcher entries that
     // reopen the site in its own minimal app window (yayra --app=<url>).
     installPageAsApp: ({ url, title } = {}) => ipcRenderer.invoke('yayra:install-page-as-app', { url, title }),
+    installPageAsAppPreview: ({ url, title } = {}) => ipcRenderer.invoke('yayra:install-page-as-app-preview', { url, title }),
+    // Local document workspace: open ONE user-picked PDF; the renderer
+    // receives only the bytes (never a filesystem path).
+    documents: {
+      openPdf: () => ipcRenderer.invoke('yayra:doc-open')
+    },
     // Real Chromium cache/site-data clearing across all Yayra sessions.
     clearBrowsingData: ({ cache = true, cookies = false } = {}) => ipcRenderer.invoke('yayra:clear-browsing-data', { cache, cookies })
   }

@@ -8,6 +8,7 @@ const {
   isPngBuffer,
   isIcoBuffer,
   extractManifestLink,
+  extractIconLink,
   parseManifest,
   pickManifestIcon,
   resolveStartUrl,
@@ -185,7 +186,7 @@ test('WIRING (source pin): main.cjs runs the full identity pipeline and never bl
   assert.match(hblock, /async \(_event/, 'handler is async');
   assert.match(hblock, /await resolvePwaInstallIdentity/, 'identity resolved before planning');
   assert.match(hblock, /url: identity\.startUrl/, 'the PWA start url is what gets installed');
-  assert.match(hblock, /title: identity\.name/, "the PWA's own name is the launcher name");
+  assert.match(hblock, /title: (identity\.name|installName)/, "the PWA's own (or user-edited) name is the launcher name");
   assert.match(hblock, /iconPath = identity\.iconFile/, "the PWA's own icon is the launcher icon");
 });
 
@@ -193,4 +194,79 @@ test('WIRING (source pin): the renderer announces a true PWA install as such', (
   const src = readFileSync(new URL('../packages/shared-ui/src/components/BrowserShell.js', import.meta.url), 'utf8');
   assert.match(src, /res\.pwa/, 'the pwa flag is consumed');
   assert.match(src, /its own icon is on your desktop/, 'the success message says it is the site\\u2019s own app');
+});
+
+
+/* ------- P68: editable install name + site-logo guarantees ------- */
+
+test('extractIconLink: a plain site own <link rel="icon"> is found - apple-touch-icon preferred, relative urls resolved, SVG skipped', () => {
+  const PAGE = 'https://plain.example.com/articles/1';
+  assert.equal(
+    extractIconLink('<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">', PAGE),
+    'https://plain.example.com/favicon-32.png'
+  );
+  assert.equal(
+    extractIconLink(
+      '<link rel="icon" href="/i16.png" sizes="16x16" type="image/png">'
+      + '<link rel="apple-touch-icon" href="/touch.png" sizes="180x180">',
+      PAGE
+    ),
+    'https://plain.example.com/touch.png'
+  );
+  assert.equal(
+    extractIconLink('<link rel="shortcut icon" href="https://cdn.example.net/f.ico">', PAGE),
+    'https://cdn.example.net/f.ico'
+  );
+  assert.equal(extractIconLink('<link rel="icon" href="/v.svg" type="image/svg+xml">', PAGE), null, 'SVG icons cannot be used');
+  assert.equal(extractIconLink('<link rel="stylesheet" href="/a.css">', PAGE), null, 'non-icon links ignored');
+  assert.equal(extractIconLink('', PAGE), null);
+});
+
+test('INSTALL FLOW (desktop): the name is EDITABLE - previewed from the site own manifest, then honored verbatim', async () => {
+  const { setupDomShim } = await import('./dom-shim.mjs');
+  setupDomShim();
+  const { BrowserShell } = await import('../packages/shared-ui/src/components/BrowserShell.js');
+  let lastInstall = null;
+  globalThis.window.yayra = {
+    system: {
+      installPageAsAppPreview: async () => ({ ok: true, name: 'Example App', startUrl: 'https://example.com/?src=pwa', pwa: true }),
+      installPageAsApp: async (opts) => { lastInstall = opts; return { ok: true, name: opts.title, inLauncher: true, pwa: true }; }
+    }
+  };
+  const container = document.createElement('div');
+  const shell = new BrowserShell({ container, platform: 'linux', isMobile: false });
+  await shell.initialize();
+  const notices = [];
+  shell.showTransientNotice = (m) => notices.push(String(m));
+  shell.state.tabs[0].url = 'https://example.com/app';
+  shell.state.tabs[0].title = 'Some page title';
+  try {
+    let seenInitial = null;
+    shell._textPromptDialog = async (opts) => { seenInitial = opts.initialValue; return 'My Example'; };
+    await shell.installPageAsApp();
+    assert.equal(seenInitial, 'Example App', 'the dialog is pre-filled with the SITE OWN name');
+    assert.equal(lastInstall.url, 'https://example.com/?src=pwa', 'the manifest start url is installed');
+    assert.equal(lastInstall.title, 'My Example', 'the EDITED name is used');
+    assert.equal(lastInstall.nameOverride, 'My Example', 'the edit is passed as an explicit override');
+    assert.ok(notices.some((n) => /its own icon/.test(n)), 'announced as the site own app');
+
+    lastInstall = null;
+    shell._textPromptDialog = async () => null;
+    await shell.installPageAsApp();
+    assert.equal(lastInstall, null, 'cancel writes nothing');
+    assert.ok(notices.some((n) => /cancelled/i.test(n)), 'cancellation is confirmed to the user');
+  } finally {
+    shell.destroy();
+    delete globalThis.window.yayra;
+  }
+});
+
+test('WIRING (source pin): preview IPC + preload bridge + nameOverride honored in main', () => {
+  const mainSrc = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+  assert.match(mainSrc, /yayra:install-page-as-app-preview/, 'preview IPC registered');
+  assert.match(mainSrc, /nameOverride\.trim\(\) !== ''/, 'nameOverride validated');
+  assert.match(mainSrc, /title: installName/, 'the override (or manifest) name reaches the plan');
+  assert.match(mainSrc, /extractIconLink\(html, url\)/, 'non-PWA sites get their own <link rel=icon> logo');
+  const preloadSrc = readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
+  assert.match(preloadSrc, /installPageAsAppPreview/, 'the renderer can call the preview');
 });

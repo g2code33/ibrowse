@@ -9,7 +9,7 @@ const { pathToFileURL } = require('node:url');
 const { registerDesktopUpdateHandlers } = require('./desktopUpdater.cjs');
 const { createWebviewBridge, buildContextMenuTemplate, buildBrowserUserAgent } = require('./webviewBridge.cjs');
 const { parseAppModeUrl, buildInstallPlan } = require('./appMode.cjs');
-const { extractManifestLink, parseManifest, pickInstallIdentity, isPngBuffer, isIcoBuffer, pngToIco } = require('./pwaManifest.cjs');
+const { extractManifestLink, extractIconLink, parseManifest, pickInstallIdentity, isPngBuffer, isIcoBuffer, pngToIco } = require('./pwaManifest.cjs');
 const { startGlobalHotkeys } = require('./globalHotkeys.cjs');
 const { createAuthBridge } = require('./authBridge.cjs');
 const { createAuthStore } = require('./authStore.cjs');
@@ -299,9 +299,10 @@ async function resolvePwaInstallIdentity(url, pageTitle) {
     // 1. The page's HTML -> its manifest link -> the manifest itself.
     let manifest = null;
     let manifestUrl = null;
+    let html = '';
     const pageRes = await fetchBoxed(url, 6000);
     if (pageRes) {
-      const html = await pageRes.text().catch(() => '');
+      html = await pageRes.text().catch(() => '');
       manifestUrl = extractManifestLink(html, url);
       if (manifestUrl) {
         const manifestRes = await fetchBoxed(manifestUrl, 6000);
@@ -310,8 +311,10 @@ async function resolvePwaInstallIdentity(url, pageTitle) {
     }
     const identity = pickInstallIdentity({ manifest, manifestUrl, pageUrl: url, pageTitle });
 
-    // 2. The site's OWN icon: the manifest icon, else favicon.ico.
+    // 2. The site's OWN icon: the manifest icon, else the page's own
+    // <link rel="icon"> / apple-touch-icon, else favicon.ico.
     let iconUrl = identity.iconSrc;
+    if (!iconUrl && html) iconUrl = extractIconLink(html, url);
     if (!iconUrl) {
       try { iconUrl = new URL('/favicon.ico', url).toString(); } catch { iconUrl = null; }
     }
@@ -651,7 +654,18 @@ function registerIpcBridges() {
   // menu on Linux, desktop + Start Menu .lnk on Windows) that reopens
   // the site in its own minimal app window via `yayra --app=<url>` -
   // see createAppModeWindow() + electron/appMode.cjs.
-  ipcMain.handle('yayra:install-page-as-app', async (_event, { url, title } = {}) => {
+  // Preview of the site's own PWA identity (name/start url/pwa flag) for
+  // the renderer's editable install dialog - nothing is written.
+  ipcMain.handle('yayra:install-page-as-app-preview', async (_event, { url, title } = {}) => {
+    try {
+      const identity = await resolvePwaInstallIdentity(url, title);
+      return { ok: true, name: identity.name, startUrl: identity.startUrl, pwa: identity.pwa };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle('yayra:install-page-as-app', async (_event, { url, title, nameOverride } = {}) => {
     try {
       // SHORTCUT TARGET FIX: inside a running AppImage, process.execPath
       // is the TEMPORARY squashfs mount (/tmp/.mount_yayraXXX/yayra)
@@ -670,12 +684,17 @@ function registerIpcBridges() {
       // hicolor name 'yayra' (installed by the .deb, registered by
       // AppImage desktop integration).
       const identity = await resolvePwaInstallIdentity(url, title);
+      // The user may EDIT the install name in the renderer dialog - an
+      // explicit non-empty override always wins over the manifest name.
+      const installName = (typeof nameOverride === 'string' && nameOverride.trim() !== '')
+        ? nameOverride.trim().slice(0, 60)
+        : identity.name;
       const iconPath = identity.iconFile || (process.platform === 'linux' ? 'yayra' : null);
       const plan = buildInstallPlan({
         platform: process.platform,
         execPath,
         url: identity.startUrl,
-        title: identity.name,
+        title: installName,
         desktopDir: app.getPath('desktop'),
         applicationsDir: process.platform === 'linux'
           ? path.join(os.homedir(), '.local', 'share', 'applications')
@@ -704,10 +723,37 @@ function registerIpcBridges() {
         }
       }
       if (!primaryPath) return { ok: false, reason: 'write-failed' };
-      return { ok: true, name: plan.name, path: primaryPath, inLauncher: plan.inLauncher, pwa: identity.pwa };
+      return { ok: true, name: plan.name, path: primaryPath, inLauncher: plan.inLauncher, pwa: identity.pwa, edited: installName !== identity.name };
     } catch (err) {
       console.error('[yayra] install page as app failed', err);
       return { ok: false, reason: 'failed' };
+    }
+  });
+
+  // DOCUMENT WORKSPACE (Phase 1: PDF - docs/DOCUMENT_WORKSPACE.md):
+  // opens ONE local PDF chosen in the native picker and transfers ONLY its
+  // bytes to the renderer. The file path never crosses the IPC boundary,
+  // nothing else on disk is reachable, and the size is capped. No state is
+  // kept in the main process - the renderer holds the bytes in memory for
+  // the tab's lifetime (local-first, no backend).
+  ipcMain.handle('yayra:doc-open', async () => {
+    try {
+      const picked = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [{ name: 'PDF documents', extensions: ['pdf'] }]
+      });
+      if (picked.canceled || !picked.filePaths || picked.filePaths.length === 0) {
+        return { ok: false, canceled: true };
+      }
+      const filePath = picked.filePaths[0];
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) return { ok: false, reason: 'not-a-file' };
+      if (stat.size > 150 * 1024 * 1024) return { ok: false, reason: 'file-too-large' };
+      const data = await fs.promises.readFile(filePath);
+      return { ok: true, name: path.basename(filePath), size: stat.size, data };
+    } catch (err) {
+      console.error('[yayra] doc-open failed', err);
+      return { ok: false, reason: 'read-failed' };
     }
   });
 

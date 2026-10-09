@@ -46,10 +46,10 @@ function extractManifestLink(html, pageUrl) {
     const linkTags = text.match(/<link\b[^>]*>/gi) || [];
     for (const tag of linkTags) {
       const rel = /\brel\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(tag);
-      const relValue = (rel && (rel[2] || rel[3] || rel[4] || '')).toLowerCase().trim();
+      const relValue = rel ? String(rel[2] || rel[3] || rel[4] || '').toLowerCase().trim() : '';
       if (relValue !== 'manifest') continue;
       const href = /\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(tag);
-      const hrefValue = href && (href[2] || href[3] || href[4] || '');
+      const hrefValue = href ? String(href[2] || href[3] || href[4] || '') : '';
       if (!hrefValue) continue;
       try {
         const abs = new URL(hrefValue, pageUrl);
@@ -163,6 +163,51 @@ function pickInstallIdentity({ manifest, manifestUrl, pageUrl, pageTitle }) {
 }
 
 /**
+ * Fallback icon discovery for non-PWA sites: the page's own <link
+ * rel="icon"> / rel="apple-touch-icon"> tags. Prefers PNG and larger
+ * sizes (apple-touch-icons are typically the highest-quality source a
+ * plain site offers). Returns an absolute http(s) url or null. The
+ * caller still verifies the downloaded bytes by magic number.
+ */
+function extractIconLink(html, pageUrl) {
+  try {
+    const text = String(html || '').slice(0, 512 * 1024);
+    const linkTags = text.match(/<link\b[^>]*>/gi) || [];
+    const attr = (tag, name) => {
+      const m = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`, 'i').exec(tag);
+      if (!m) return ''; // attribute absent - never throw on optional attrs
+      return String(m[2] || m[3] || m[4] || '').trim();
+    };
+    let best = null;
+    let bestScore = -1;
+    for (const tag of linkTags) {
+      const relTokens = attr(tag, 'rel').toLowerCase().split(/\s+/);
+      const isIcon = relTokens.includes('icon');
+      const isApple = relTokens.includes('apple-touch-icon');
+      if (!isIcon && !isApple) continue;
+      const href = attr(tag, 'href');
+      if (!href) continue;
+      const type = attr(tag, 'type').toLowerCase();
+      if (type === 'image/svg+xml' || /\.svg(\?|#|$)/i.test(href)) continue; // not rasterizable
+      const sm = /^(\d+)\s*x\s*(\d+)$/.exec(attr(tag, 'sizes'));
+      const size = sm ? Math.min(Number(sm[1]), Number(sm[2])) : (isApple ? 180 : 32);
+      const score = size * (type === 'image/png' || /\.png(\?|#|$)/i.test(href) ? 1.5 : 1) * (isApple ? 1.2 : 1);
+      if (score > bestScore) {
+        try {
+          const abs = new URL(href, pageUrl);
+          if (abs.protocol !== 'https:' && abs.protocol !== 'http:') continue;
+          bestScore = score;
+          best = abs.toString();
+        } catch { /* unresolvable - next tag */ }
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Wrap a PNG in an ICO container so a Windows .lnk can use it as its
  * icon (shell.writeShortcutLink needs .ico; Vista+ accepts a PNG payload
  * inside an ICO entry). Width/height of 256+ are encoded as 0 per the
@@ -192,6 +237,7 @@ module.exports = {
   isPngBuffer,
   isIcoBuffer,
   extractManifestLink,
+  extractIconLink,
   parseManifest,
   pickManifestIcon,
   resolveStartUrl,

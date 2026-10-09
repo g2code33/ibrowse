@@ -140,17 +140,17 @@ test('install handler (source pin): AppImage shortcuts target the .AppImage FILE
   assert.ok(!block.includes('iconCandidate'), 'no unshipped PNG icon candidate');
 });
 
-test('install handler (source pin): the TRUE PWA flow - the SITE\u2019S OWN name/icon/start url, icon fallbacks per platform', () => {
+test('install handler (source pin): the TRUE PWA flow - the SITE OWN name/icon/start url, icon fallbacks per platform', () => {
   const src = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
   const start = src.indexOf("ipcMain.handle('yayra:install-page-as-app'");
-  const block = src.slice(start, start + 3000);
+  const block = src.slice(start, start + 4000);
   assert.ok(start > -1, 'handler exists');
   assert.match(block, /async \(_event/, 'the handler is async (manifest fetches)');
-  assert.match(block, /resolvePwaInstallIdentity\(url, title\)/, 'the site\u2019s own PWA identity is resolved');
+  assert.match(block, /resolvePwaInstallIdentity\(url, title\)/, 'the site own PWA identity is resolved');
   assert.match(block, /iconPath = identity\.iconFile \|\| \(process\.platform === 'linux' \? 'yayra' : null\)/,
-    'the SITE\u2019S OWN icon file is used, with the honest per-platform fallback');
+    'the SITE OWN icon file is used, with the honest per-platform fallback');
   assert.match(block, /url: identity\.startUrl/, 'the manifest start url is installed');
-  assert.match(block, /title: identity\.name/, 'the manifest name is installed');
+  assert.match(block, /title: installName/, 'the site own (or user-edited) name is installed');
   assert.match(block, /pwa: identity\.pwa/, 'the renderer learns whether it was a true PWA install');
 });
 

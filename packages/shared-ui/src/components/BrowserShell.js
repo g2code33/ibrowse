@@ -18,6 +18,7 @@
 
 import { Icons } from '../icons/icons.js';
 import qrcode from '../vendor/qrcode.js';
+import { classifyDocument, DocumentStore, createPdfViewer, DOCUMENT_ENGINES } from '../services/documentWorkspace.js';
 import { PasswordManager } from '../../../persistence/src/PasswordManager.js';
 import { PasskeyService } from '../services/passkeyService.js';
 import { ProfileService } from '../services/profileService.js';
@@ -873,6 +874,9 @@ export class BrowserShell {
     // Web/PWA: capture the browser's install prompt so "Install page as
     // app..." can trigger the REAL install flow (see installPageAsApp).
     this._capturePwaInstallPrompt();
+    this._armConnectivityAwareness();
+    // Local document workspace (Phase 1: PDF) - in-memory, local-first.
+    this.documentStore = new DocumentStore();
     // Android: "installed site" home-screen shortcuts deep-link back into
     // Yayra via com.yayra.app:/browse?url=... - handle them on launch and
     // on every cold/warm reopen.
@@ -1354,6 +1358,10 @@ export class BrowserShell {
     if (this.nativeWebview) return false;
     if (this.isSystemBrowserAuthHost(tab.url)) return false;
     if (this.isKnownFrameBlockedUrl(tab.url)) return false;
+    // OFFLINE: a tab with an EXISTING live frame keeps it (loaded pages
+    // stay live offline); a NEW frame while offline must not be created -
+    // fall through to createWebContentFrame's honest offline card.
+    if (!this._onLine() && /^https?:\/\//i.test(String(tab.url || '')) && !this.webFrames?.has(tab.id)) return false;
     // Internal pages (yayra://...) are DOM-rendered and must never occupy a
     // pooled live-page slot (defense in depth for future internal schemes).
     if (/^yayra:/i.test(String(tab.url || ''))) return false;
@@ -2153,7 +2161,13 @@ export class BrowserShell {
       captureActive: overlayOpen && !isInternalPage
     });
 
-    if (!url || url === 'yayra://newtab' || url === 'about:blank') {
+    // LOCAL DOCUMENT TABS (yayra://doc/<id>): the integrated document
+    // viewer - never the web frame path, never the native engine. This is
+    // what guarantees opening a document can never navigate a browsing tab
+    // away from its site.
+    if (url.startsWith('yayra://doc/')) {
+      this.renderDocumentViewer(viewport, activeTab);
+    } else if (!url || url === 'yayra://newtab' || url === 'about:blank') {
       this.renderNewTabPage(viewport, activeTab);
     } else if (url === 'yayra://settings') {
       this.renderInternalSettingsPage(viewport, activeTab);
@@ -2403,6 +2417,16 @@ export class BrowserShell {
     if (this.isSystemBrowserAuthHost(url)) {
       wrapper.appendChild(this.buildSystemBrowserHandoffFallback(url));
       this.openExternally(url);
+      if (typeof onLoaded === 'function') onLoaded();
+      return { wrapper, iframe: null };
+    }
+
+    // OFFLINE PROMPT: never render a silent blank frame. While there is
+    // no connection, any fresh http(s) frame shows the honest offline
+    // card (with Retry) instead. Tabs that already hold a live pooled
+    // frame never reach this method - loaded pages stay live offline.
+    if (!this._onLine() && /^https?:\/\//i.test(String(url || ''))) {
+      wrapper.appendChild(this.buildOfflineFallback(url));
       if (typeof onLoaded === 'function') onLoaded();
       return { wrapper, iframe: null };
     }
@@ -6208,6 +6232,64 @@ export class BrowserShell {
   }
 
   /**
+   * OFFLINE PROMPTING ("when there is no internet connection, it must
+   * prompt users so not to give blank pages"): without this, opening a
+   * page while offline rendered a silent BLANK frame (the iframe request
+   * fails and nothing explains why). Two guarantees:
+   *   1. A NEW page opened while offline shows an honest offline card
+   *      with a Retry button - never a blank page.
+   *   2. A page that is ALREADY LOADED stays exactly as it is (the
+   *      loaded-page contract) - the listeners below only INFORM and
+   *      heal failed tabs; they never reload or touch live pages.
+   */
+  _onLine() {
+    try {
+      return !(typeof navigator !== 'undefined' && navigator.onLine === false);
+    } catch {
+      return true;
+    }
+  }
+
+  _armConnectivityAwareness() {
+    if (this._connectivityArmed) return;
+    this._connectivityArmed = true;
+    try {
+      window.addEventListener?.('offline', () => {
+        this.showTransientNotice('You\u2019re offline - new pages can\u2019t load until the connection is back. Pages you already opened stay available.');
+      });
+      window.addEventListener?.('online', () => {
+        // Never reloads anything: pooled live frames survive re-renders
+        // (the no-blink architecture); only tabs stuck on the offline
+        // card get a fresh attempt because they never loaded at all.
+        this.showTransientNotice('Back online.');
+        try { this.render(); } catch { /* best-effort heal */ }
+      });
+    } catch { /* older shims */ }
+  }
+
+  /** The honest in-tab card shown instead of a blank frame. */
+  buildOfflineFallback(url) {
+    const fallback = document.createElement('div');
+    fallback.className = 'fb-frame-blocked-fallback fb-offline-fallback';
+    fallback.style.cssText = 'position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:#15171c; color:#d7dbe3; text-align:center; padding:24px; z-index:1;';
+    fallback.innerHTML = `
+      <div style="font-size:1.4rem;">\u26A1</div>
+      <div style="font-size:0.95rem; font-weight:700;">You\u2019re offline</div>
+      <div style="font-size:0.9rem; max-width:380px; line-height:1.5;">There\u2019s no internet connection, so \u201C${String(url).replace(/</g, '&lt;').slice(0, 80)}\u201D can\u2019t load. Pages you already have open keep working.</div>
+      <button type="button" class="fb-btn fb-offline-retry-btn" style="padding:8px 16px; border-radius:8px; border:none; background:#3b82f6; color:#fff; cursor:pointer; font-size:0.875rem;">Retry</button>
+      <div style="font-size:0.75rem; color:#9aa3b2;">Yayra reloads it automatically once you\u2019re back online.</div>
+    `;
+    fallback.querySelector('.fb-offline-retry-btn')?.addEventListener('click', () => {
+      if (this._onLine()) {
+        try { this.render(); } catch { /* best effort */ }
+      } else {
+        this.showTransientNotice('Still offline - reconnect and try again.');
+      }
+    });
+    return fallback;
+  }
+
+  /**
    * Web/PWA: catch the browser's beforeinstallprompt so Yayra itself can be
    * installed from the menu (the only "install as app" a plain web page is
    * allowed to perform). No-op everywhere the event doesn't exist.
@@ -6270,11 +6352,25 @@ export class BrowserShell {
       return;
     }
     const title = String(tab.title || tab.url).slice(0, 60);
+    // The user can EDIT the install name everywhere - pre-filled with the
+    // site's own name (its manifest name on desktop, its page title on
+    // Android), exactly like Chrome's install dialog.
     // 1. Android: REAL home-screen shortcut, deep-links back into Yayra.
     const overlay = this.capacitorOverlay;
     if (overlay && typeof overlay.installSiteAsApp === 'function') {
+      let shortcutName = title;
       try {
-        const res = await overlay.installSiteAsApp({ url: tab.url, title });
+        const editedName = await this._textPromptDialog({
+          title: 'Add to home screen',
+          description: 'Choose a name for the shortcut. The site\u2019s own icon is used when it can be fetched.',
+          initialValue: title,
+          placeholder: 'Shortcut name'
+        });
+        if (editedName === null) { this.showTransientNotice('Install cancelled.'); return; }
+        shortcutName = editedName;
+      } catch { /* prompt unavailable (tests/embedders) - keep the site title */ }
+      try {
+        const res = await overlay.installSiteAsApp({ url: tab.url, title: shortcutName });
         if (res && res.ok) {
           this.showTransientNotice(`Added \u201C${title}\u201D to your home screen - tap it to open Yayra straight on the site.`);
           return;
@@ -6283,10 +6379,38 @@ export class BrowserShell {
         return;
       } catch { /* fall through to other platforms */ }
     }
-    // 2. Desktop app: launcher entry + its own app window.
+    // 2. Desktop app: launcher entry + its own app window. The SITE'S OWN
+    // PWA identity (manifest name/start url) is previewed first so the
+    // editable name dialog starts from the site's own name.
     if (this.systemBridge && typeof this.systemBridge.installPageAsApp === 'function') {
       try {
-        const res = await this.systemBridge.installPageAsApp({ url: tab.url, title: tab.title || tab.url });
+        let installName = String(tab.title || tab.url).slice(0, 60);
+        let startUrl = tab.url;
+        let isPwaInstall = false;
+        if (typeof this.systemBridge.installPageAsAppPreview === 'function') {
+          try {
+            const preview = await this.systemBridge.installPageAsAppPreview({ url: tab.url, title: tab.title || tab.url });
+            if (preview && preview.ok) {
+              if (preview.name) installName = String(preview.name).slice(0, 60);
+              if (preview.startUrl) startUrl = preview.startUrl;
+              isPwaInstall = Boolean(preview.pwa);
+            }
+          } catch { /* preview is best-effort - plain install still works */ }
+        }
+        let finalName = installName;
+        try {
+          const editedName = await this._textPromptDialog({
+            title: 'Install as app',
+            description: isPwaInstall
+              ? 'This site is a web app - it installs with its own name, its own icon and its own window on your desktop.'
+              : 'This installs the site on your desktop with its own icon and window. You can edit the name.',
+            initialValue: installName,
+            placeholder: 'App name'
+          });
+          if (editedName === null) { this.showTransientNotice('Install cancelled.'); return; }
+          finalName = editedName;
+        } catch { /* prompt unavailable (tests/embedders) - keep the site name */ }
+        const res = await this.systemBridge.installPageAsApp({ url: startUrl, title: finalName, nameOverride: finalName });
         if (res && res.ok) {
           this.showTransientNotice(res.pwa
             ? `Installed "${res.name}" as an app - its own icon is on your desktop${res.inLauncher ? ' and in your apps menu' : ''}, and it opens in its own window.`
@@ -8779,6 +8903,7 @@ export class BrowserShell {
 
             <div class="fb-submenu-section-label">Save</div>
             <button class="fb-drawer-item fb-dr-save-page">${Icons.save} <span>Save page as...</span> <kbd>Ctrl+S</kbd></button>
+            <button class="fb-drawer-item fb-dr-open-doc">${Icons.document} <span>Open document... (PDF)</span></button>
             <button class="fb-drawer-item fb-dr-install-app">${Icons.download} <span>Install page as app...</span></button>
             <button class="fb-drawer-item fb-dr-open-pharmagame">${Icons.sparkles} <span>Open in pharmaGAME Ai</span></button>
             <button class="fb-drawer-item fb-dr-create-shortcut">${Icons.externalLink} <span>Create shortcut...</span></button>
@@ -9086,6 +9211,12 @@ export class BrowserShell {
     drawer.querySelector('.fb-dr-open-pharmagame')?.addEventListener('click', () => {
       this.state.isSideDrawerOpen = false;
       this.navigateActiveTab('https://github.com/g2code33/pharmaTRACK_PERFECT_new');
+    });
+
+    drawer.querySelector('.fb-dr-open-doc')?.addEventListener('click', () => {
+      this.state.isSideDrawerOpen = false;
+      this.render();
+      this.openDocument();
     });
 
     drawer.querySelector('.fb-dr-install-app')?.addEventListener('click', () => {
@@ -11652,8 +11783,215 @@ export class BrowserShell {
     }
   }
 
+  /* -------------------------------------------------------------
+   * LOCAL DOCUMENT WORKSPACE (Phase 1: PDF - docs/DOCUMENT_WORKSPACE.md)
+   * ----------------------------------------------------------- */
+  /**
+   * Opens a local document. Electron: the native picker in the main
+   * process (the file path never reaches the renderer - only the bytes of
+   * the explicitly chosen file). Web/PWA/Android: the standard file
+   * input. Documents open in their OWN tab; browsing tabs are untouched.
+   */
+  async openDocument() {
+    try {
+      const bridge = this.systemBridge?.documents;
+      if (bridge && typeof bridge.openPdf === 'function') {
+        const res = await bridge.openPdf();
+        if (!res || !res.ok) {
+          if (res && res.canceled) return; // user closed the picker
+          this.showTransientNotice(`Couldn\u2019t open the document${res && res.reason ? ` (${res.reason})` : ''}.`);
+          return;
+        }
+        this.addDocumentTab({ name: res.name, bytes: res.data });
+        return;
+      }
+    } catch { /* fall through to the file input */ }
+    this._openDocumentFileInput();
+  }
+
+  /** Web/PWA/Android picker: a hidden standard file input (offline, no
+   *  plugins needed; Capacitor's WebView maps it to the system picker). */
+  _openDocumentFileInput() {
+    if (typeof document === 'undefined' || !document.body) {
+      this.showTransientNotice('Opening documents needs the app interface.');
+      return;
+    }
+    let input = this._docFileInput;
+    if (!input) {
+      input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/pdf,.pdf';
+      input.setAttribute('aria-label', 'Open a PDF document');
+      input.style.cssText = 'position:fixed; left:-9999px; top:0; opacity:0;';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        if (classifyDocument(file.name) !== 'pdf') {
+          this.showTransientNotice('Only PDF documents are supported right now - Word, Excel and PowerPoint are on the roadmap.');
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => this.addDocumentTab({ name: file.name, bytes: reader.result });
+        reader.onerror = () => this.showTransientNotice('Couldn\u2019t read the file.');
+        reader.readAsArrayBuffer(file);
+        input.value = '';
+      });
+      document.body.appendChild(input);
+      this._docFileInput = input;
+    }
+    input.click();
+  }
+
+  /** Registers the document and opens it in a fresh tab of its own. */
+  addDocumentTab({ name, bytes }) {
+    let doc;
+    try {
+      doc = this.documentStore.add({ name, bytes });
+    } catch {
+      this.showTransientNotice('That file appears to be empty.');
+      return null;
+    }
+    this.createNewTab();
+    const tab = this.getActiveTab();
+    if (!tab) return null;
+    tab.url = `yayra://doc/${doc.id}`;
+    tab.title = doc.name;
+    tab.isDocument = true;
+    tab.docId = doc.id;
+    tab.docState = { status: 'loading', numPages: 0, page: 1, zoom: 1.25, query: '', matches: [], matchIndex: -1, error: null };
+    this.render();
+    return doc;
+  }
+
+  /** Lazy PDF.js loader (vendored, offline). The worker is the vendored
+   *  module URL; where workers are unavailable PDF.js falls back to
+   *  main-thread parsing automatically. */
+  async _pdfjsModule() {
+    if (this._pdfjsLib) return this._pdfjsLib;
+    this._pdfjsLib = await import('../vendor/pdfjs/pdf.mjs');
+    try {
+      this._pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.mjs', import.meta.url).toString();
+    } catch { /* older embedders - PDF.js self-heals to main-thread */ }
+    return this._pdfjsLib;
+  }
+
+  /** The integrated document tab: toolbar (pages, zoom, search, close) +
+   *  the canvas host, driven by createPdfViewer. Honest states only -
+   *  no placeholder buttons for unsupported operations. */
+  renderDocumentViewer(viewport, tab) {
+    const wrap = document.createElement('div');
+    wrap.className = 'fb-doc-viewer';
+    wrap.style.cssText = 'flex:1; min-height:0; display:flex; flex-direction:column; background:#191c23;';
+
+    const bar = document.createElement('div');
+    bar.className = 'fb-doc-toolbar';
+    bar.style.cssText = 'flex:none; display:flex; align-items:center; gap:6px; padding:6px 10px; background:#141824; border-bottom:1px solid rgba(255,255,255,0.08); font-size:0.8rem; color:#dfe4ee;';
+    const btnCss = 'padding:5px 9px; border:none; border-radius:7px; background:rgba(255,255,255,0.07); color:inherit; cursor:pointer; font-size:0.8rem;';
+    const nameEl = document.createElement('span');
+    nameEl.textContent = tab.title || 'Document';
+    nameEl.style.cssText = 'max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600;';
+    bar.appendChild(nameEl);
+
+    const pageLabel = document.createElement('span');
+    pageLabel.className = 'fb-doc-page-label';
+    pageLabel.style.cssText = 'min-width:64px; text-align:center; color:#9aa3b2;';
+    pageLabel.textContent = '- / -';
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'fb-doc-search-input';
+    searchInput.placeholder = 'Find in document';
+    searchInput.setAttribute('aria-label', 'Find in document');
+    searchInput.style.cssText = 'width:150px; padding:5px 9px; border-radius:7px; border:1px solid rgba(255,255,255,0.12); background:#101218; color:inherit; font-size:0.78rem;';
+    const matchLabel = document.createElement('span');
+    matchLabel.className = 'fb-doc-match-label';
+    matchLabel.style.cssText = 'min-width:52px; color:#9aa3b2; font-size:0.72rem;';
+
+    const host = document.createElement('div');
+    host.className = 'fb-doc-host';
+    host.style.cssText = 'flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px;';
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'fb-doc-status';
+    statusEl.style.cssText = 'position:absolute; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; gap:10px; background:#191c23; color:#d7dbe3; text-align:center; padding:24px; font-size:0.9rem; z-index:2;';
+
+    const mkBtn = (label, title, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'fb-doc-btn';
+      b.textContent = label;
+      b.title = title;
+      b.setAttribute('aria-label', title);
+      b.style.cssText = btnCss;
+      b.addEventListener('click', fn);
+      return b;
+    };
+
+    bar.appendChild(mkBtn('\u2039', 'Previous page', () => this._activeDocViewer?.viewer.prevPage()));
+    bar.appendChild(pageLabel);
+    bar.appendChild(mkBtn('\u203a', 'Next page', () => this._activeDocViewer?.viewer.nextPage()));
+    bar.appendChild(mkBtn('\u2212', 'Zoom out', () => this._activeDocViewer?.viewer.setZoom((tab.docState?.zoom || 1.25) - 0.25)));
+    const zoomLabel = document.createElement('span');
+    zoomLabel.className = 'fb-doc-zoom-label';
+    zoomLabel.style.cssText = 'min-width:40px; text-align:center; color:#9aa3b2;';
+    bar.appendChild(zoomLabel);
+    bar.appendChild(mkBtn('+', 'Zoom in', () => this._activeDocViewer?.viewer.setZoom((tab.docState?.zoom || 1.25) + 0.25)));
+    bar.appendChild(searchInput);
+    bar.appendChild(matchLabel);
+    const spacer = document.createElement('span');
+    spacer.style.cssText = 'flex:1;';
+    bar.appendChild(spacer);
+    bar.appendChild(mkBtn('\u2715 Close', 'Close the document and return to browsing', () => this.closeTab(tab.id)));
+
+    const rel = document.createElement('div');
+    rel.style.cssText = 'position:relative; flex:1; min-height:0; display:flex; flex-direction:column;';
+    rel.appendChild(host);
+    rel.appendChild(statusEl);
+    wrap.appendChild(bar);
+    wrap.appendChild(rel);
+    viewport.appendChild(wrap);
+
+    const doc = this.documentStore.get(tab.docId);
+    const state = tab.docState || (tab.docState = { status: 'loading', numPages: 0, page: 1, zoom: 1.25, query: '', matches: [], matchIndex: -1, error: null });
+    const sync = () => {
+      try {
+        pageLabel.textContent = state.numPages ? `${state.page} / ${state.numPages}` : '- / -';
+        zoomLabel.textContent = `${Math.round((state.zoom || 1) * 100)}%`;
+        matchLabel.textContent = state.query ? `${state.matches.length} found` : '';
+        if (state.status === 'ready') { statusEl.style.display = 'none'; }
+        else {
+          statusEl.style.display = 'flex';
+          statusEl.textContent = state.status === 'loading'
+            ? 'Opening document...'
+            : (state.error || 'This document can\u2019t be displayed.');
+        }
+      } catch { /* shim */ }
+    };
+    sync();
+
+    if (!doc) {
+      state.status = 'error';
+      state.error = 'This document is no longer available (it was closed or the app restarted). Open it again from the menu.';
+      sync();
+      return;
+    }
+
+    // The engine (vendored PDF.js, or a test-injected fake) resolves
+    // asynchronously; the toolbar buttons drive whatever viewer is bound
+    // to THIS tab once it is ready.
+    (async () => {
+      const engine = this._docEngineOverride || await this._pdfjsModule();
+      if (this._activeDocViewer?.tabId === tab.id) return; // a newer render won
+      const viewer = createPdfViewer({ pdfjs: engine, container: host, state, onStateChange: sync });
+      this._activeDocViewer = { tabId: tab.id, viewer, sync };
+      viewer.load(doc.bytes);
+    })();
+  }
+
   getTabFavicon(tab) {
     if (!tab) return Icons.globe;
+    // Document tabs carry the document glyph, never a web favicon.
+    if (tab.isDocument) return Icons.document;
     // "Time sign" while the page is loading: the tab's icon slot becomes
     // an animated hourglass the moment loading starts, and flips back to
     // the real favicon when the page is fully loaded. Updated in place by

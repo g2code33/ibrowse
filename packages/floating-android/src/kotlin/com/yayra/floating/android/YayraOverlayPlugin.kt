@@ -134,45 +134,86 @@ class YayraOverlayPlugin : Plugin() {
             setPackage(context.packageName)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val shortcutManager = context.getSystemService(ShortcutManager::class.java)
-                if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported) {
-                    val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
-                    val icon = if (logoResId != 0) {
-                        Icon.createWithResource(context, logoResId)
-                    } else {
-                        Icon.createWithResource(context, android.R.drawable.ic_menu_view)
+        // SITE LOGO ON THE HOME SCREEN: fetch the site's own favicon OFF the
+        // main thread (NetworkOnMainThreadException otherwise), then pin the
+        // shortcut on the main thread with the site's bitmap when it
+        // decoded, falling back to the Yayra bubble logo. Best effort only.
+        Thread {
+            val siteBitmap = try { fetchFaviconBitmap(url) } catch (err: Exception) { null }
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val shortcutManager = context.getSystemService(ShortcutManager::class.java)
+                        if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported) {
+                            val icon = if (siteBitmap != null) {
+                                Icon.createWithBitmap(siteBitmap)
+                            } else {
+                                val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
+                                if (logoResId != 0) {
+                                    Icon.createWithResource(context, logoResId)
+                                } else {
+                                    Icon.createWithResource(context, android.R.drawable.ic_menu_view)
+                                }
+                            }
+                            val shortcut = ShortcutInfo.Builder(context, "yayra-site-${url.hashCode()}")
+                                .setShortLabel(title.take(10))
+                                .setLongLabel(title.take(40))
+                                .setIcon(icon)
+                                .setIntent(launchIntent)
+                                .build()
+                            shortcutManager.requestPinShortcut(shortcut, null)
+                            call.resolve(JSObject().put("ok", true).put("method", "pinned-shortcut"))
+                            return@post
+                        }
                     }
-                    val shortcut = ShortcutInfo.Builder(context, "yayra-site-${url.hashCode()}")
-                        .setShortLabel(title.take(10))
-                        .setLongLabel(title.take(40))
-                        .setIcon(icon)
-                        .setIntent(launchIntent)
-                        .build()
-                    shortcutManager.requestPinShortcut(shortcut, null)
-                    call.resolve(JSObject().put("ok", true).put("method", "pinned-shortcut"))
-                    return
+                    // Legacy path (pre-Android-8 or launchers without pin support):
+                    // the INSTALL_SHORTCUT broadcast (permission is declared in the
+                    // manifest, injected by scripts/ensure-capacitor-platform.mjs).
+                    val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
+                    val broadcast = Intent("com.android.launcher.action.INSTALL_SHORTCUT").apply {
+                        putExtra(Intent.EXTRA_SHORTCUT_NAME, title)
+                        putExtra(Intent.EXTRA_SHORTCUT_INTENT, launchIntent)
+                        if (siteBitmap != null) {
+                            putExtra(Intent.EXTRA_SHORTCUT_ICON, siteBitmap)
+                        } else if (logoResId != 0) {
+                            putExtra(
+                                Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
+                                Intent.ShortcutIconResource.fromContext(context, logoResId)
+                            )
+                        }
+                    }
+                    context.sendBroadcast(broadcast)
+                    call.resolve(JSObject().put("ok", true).put("method", "legacy-broadcast"))
+                } catch (err: Exception) {
+                    call.reject("install-failed: ${err.message}")
                 }
             }
-            // Legacy path (pre-Android-8 or launchers without pin support):
-            // the INSTALL_SHORTCUT broadcast (permission is declared in the
-            // manifest, injected by scripts/ensure-capacitor-platform.mjs).
-            val logoResId = context.resources.getIdentifier("yayra_bubble_logo", "drawable", context.packageName)
-            val broadcast = Intent("com.android.launcher.action.INSTALL_SHORTCUT").apply {
-                putExtra(Intent.EXTRA_SHORTCUT_NAME, title)
-                putExtra(Intent.EXTRA_SHORTCUT_INTENT, launchIntent)
-                if (logoResId != 0) {
-                    putExtra(
-                        Intent.EXTRA_SHORTCUT_ICON_RESOURCE,
-                        Intent.ShortcutIconResource.fromContext(context, logoResId)
-                    )
-                }
+        }.start()
+    }
+
+    /**
+     * Best-effort fetch + decode of the site's own favicon (PNG data served
+     * at /favicon.ico decodes cleanly; true ICO containers may not - the
+     * caller falls back to the Yayra logo). Time-boxed to 4s.
+     */
+    private fun fetchFaviconBitmap(siteUrl: String?): android.graphics.Bitmap? {
+        if (siteUrl == null) return null
+        return try {
+            val host = java.net.URI(siteUrl).host ?: return null
+            val conn = java.net.URL("https://$host/favicon.ico").openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            conn.instanceFollowRedirects = true
+            if (conn.responseCode !in 200..299) {
+                conn.disconnect()
+                return null
             }
-            context.sendBroadcast(broadcast)
-            call.resolve(JSObject().put("ok", true).put("method", "legacy-broadcast"))
+            val bytes = conn.inputStream.use { it.readBytes() }
+            conn.disconnect()
+            if (bytes.isEmpty() || bytes.size > 512_000) return null
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         } catch (err: Exception) {
-            call.reject("install-failed: ${err.message}")
+            null
         }
     }
 }

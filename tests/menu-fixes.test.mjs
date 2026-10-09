@@ -92,6 +92,9 @@ test('INSTALL AS APP (Android): a REAL native home-screen shortcut is requested 
     shell.state.tabs[0].url = 'https://news.example.com/';
     shell.state.tabs[0].title = 'Example News';
     shell.render(container);
+    // The editable-name dialog (pre-filled with the site title) is part of
+    // the flow - simulate the user accepting the suggested name.
+    shell._textPromptDialog = async (opts) => opts?.initialValue || 'Example News';
     await shell.installPageAsApp();
     assert.equal(installCalls.length, 1, 'the native install method was called');
     assert.equal(installCalls[0].url, 'https://news.example.com/');
@@ -261,6 +264,12 @@ test('KOTTON (Kotlin pin): the Android plugin really implements installSiteAsApp
   assert.ok(src.includes('requestPinShortcut'), 'real pinned-shortcut API on Android 8+');
   assert.ok(src.includes('com.yayra.app:/browse?url='), 'shortcut deep-links back into Yayra on the site');
   assert.ok(src.includes('INSTALL_SHORTCUT'), 'legacy broadcast fallback declared');
+  // SITE LOGO: the shortcut uses the site's own favicon bitmap when it can
+  // be fetched (off the main thread), falling back to the Yayra logo.
+  assert.ok(src.includes('fetchFaviconBitmap'), 'site favicon fetched');
+  assert.ok(src.includes('Icon.createWithBitmap'), 'site bitmap used for the pinned shortcut');
+  assert.ok(src.includes('Intent.EXTRA_SHORTCUT_ICON,'), 'legacy broadcast carries the site bitmap too');
+  assert.ok(src.includes('Looper.getMainLooper()'), 'network off the main thread, pin on it');
   const ensure = readFileSync(new URL('../scripts/ensure-capacitor-platform.mjs', import.meta.url), 'utf8');
   assert.ok(ensure.includes('com.android.launcher.permission.INSTALL_SHORTCUT'), 'manifest permission injected for legacy devices');
 });

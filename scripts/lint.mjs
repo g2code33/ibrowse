@@ -14,7 +14,12 @@ const forbidden = [
 for (const file of files) {
   if (!/\.(js|mjs|cjs|json|html|yml|yaml|md|sh|gradle|plist|webmanifest)$/.test(file)) continue;
   const text = await readFile(path.join(root, file), 'utf8');
-  if (text.includes('\t')) problems.push(`${file}: tab character found`);
+  // Vendored third-party sources (PDF.js under packages/shared-ui/src/vendor/)
+  // are kept BYTE-IDENTICAL to their upstream release for license/provenance
+  // reasons - we never reformat them, so the whitespace rule does not apply.
+  // The security patterns below still apply to them.
+  const isVendored = file.split(path.sep).includes('vendor');
+  if (text.includes('\t') && !isVendored) problems.push(`${file}: tab character found`);
   for (const [pattern, message] of forbidden) {
     if (pattern.test(text) && !file.endsWith('lint.mjs') && !file.endsWith('RELEASE-PIPELINE.md')) problems.push(`${file}: ${message}`);
   }
